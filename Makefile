@@ -34,6 +34,10 @@ clean:
 
 # Install dependencies
 deps:
-	go mod tidy
-	go get github.com/go-echarts/go-echarts/v2
+	export GOPROXY=https://goproxy.cn && go mod tidy
+	export GOPROXY=https://goproxy.cn && go get github.com/go-echarts/go-echarts/v2
+
+# Generate templ files
+generate-templ:
+	export GOPROXY=https://goproxy.cn && templ generate
 

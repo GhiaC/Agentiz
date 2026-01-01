@@ -213,16 +213,21 @@ func (d *AgentizeDocument) GenerateHTML() ([]byte, error) {
 	treeJSON, _ := json.Marshal(d.tree)
 	nodesJSON, _ := json.Marshal(d.nodes)
 
-	// Convert to strings for templ (already valid JSON strings)
-	treeData := string(treeJSON)
-	nodesData := string(nodesJSON)
+	// Construct JavaScript assignment strings
+	treeDataJS := "const treeData = " + string(treeJSON) + ";"
+	nodesDataJS := "const nodesData = " + string(nodesJSON) + ";"
 
 	// Render using templ
 	var buf bytes.Buffer
 	ctx := context.Background()
-	if err := components.Page(treeData, nodesData).Render(ctx, &buf); err != nil {
+	if err := components.Page(treeDataJS, nodesDataJS).Render(ctx, &buf); err != nil {
 		return nil, err
 	}
 
-	return buf.Bytes(), nil
+	// Replace the literal string placeholders with actual JavaScript
+	html := buf.Bytes()
+	html = bytes.ReplaceAll(html, []byte("{ treeData }"), []byte(treeDataJS))
+	html = bytes.ReplaceAll(html, []byte("{ nodesData }"), []byte(nodesDataJS))
+
+	return html, nil
 }

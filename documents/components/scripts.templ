@@ -3,8 +3,8 @@ package components
 templ scripts(treeData, nodesData string) {
 	<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 	<script>
-		const treeData = { templ.Raw(treeData) }
-		const nodesData = { templ.Raw(nodesData) }
+		{ treeData }
+		{ nodesData }
 	</script>
 	<script>
 		function calculateStats() {
@@ -101,7 +101,7 @@ templ scripts(treeData, nodesData string) {
 					'<button class="markdown-toggle-btn" onclick="toggleMarkdown(\'content-preview-' + escapeHtml(node.path) + '\')">View as Plain Text</button>' +
 					'<button class="copy-btn" onclick="copyContent(\'' + escapeHtml(node.path) + '\', \'preview\')">📋 Copy Content</button>' +
 					'</div>' +
-					'<div id="content-preview-' + escapeHtml(node.path) + '" style="margin-top: 10px; padding: 10px; background: white; border-radius: 6px; font-size: 0.9em; color: #555;" class="content-markdown">' +
+					'<div id="content-preview-' + escapeHtml(node.path) + '" data-content-path="' + escapeHtml(node.path) + '" style="margin-top: 10px; padding: 10px; background: white; border-radius: 6px; font-size: 0.9em; color: #555;" class="content-markdown">' +
 					markdownHtml +
 					'</div>' +
 					'</div>' +
@@ -240,16 +240,26 @@ templ scripts(treeData, nodesData string) {
 		}
 
 		function toggleMarkdownForElement(element, button) {
+			// Get the path from data attribute to access original content from nodesData
+			const contentPath = element.getAttribute('data-content-path');
+			if (!contentPath) return;
+
+			// Always get the original content from nodesData (source of truth)
+			const nodeData = nodesData[contentPath];
+			if (!nodeData || !nodeData.content) return;
+
+			const originalMarkdown = nodeData.content;
+
 			if (element.classList.contains('content-plain')) {
-				const content = element.textContent || element.innerText;
-				const markdownHtml = marked.parse(content);
+				// Switch from plain text to markdown
+				const markdownHtml = marked.parse(originalMarkdown);
 				element.innerHTML = markdownHtml;
 				element.classList.remove('content-plain');
 				element.classList.add('content-markdown');
 				button.textContent = 'View as Plain Text';
 			} else {
-				const content = element.textContent || element.innerText;
-				element.textContent = content;
+				// Switch from markdown to plain text
+				element.textContent = originalMarkdown;
 				element.classList.remove('content-markdown');
 				element.classList.add('content-plain');
 				button.textContent = 'View as Markdown';
@@ -352,7 +362,7 @@ templ scripts(treeData, nodesData string) {
 					'<button class="markdown-toggle-btn" onclick="toggleMarkdown(\'content-detail-' + path + '\')">View as Plain Text</button>' +
 					'<button class="copy-btn" onclick="copyContent(\'' + path + '\', \'detail\')">📋 Copy Content</button>' +
 					'</div>' +
-					'<div id="content-detail-' + path + '" class="detail-field-value content-markdown" style="margin-top: 10px;">' +
+					'<div id="content-detail-' + path + '" data-content-path="' + path + '" class="detail-field-value content-markdown" style="margin-top: 10px;">' +
 					markdownHtml +
 					'</div>' +
 					'</div>';
