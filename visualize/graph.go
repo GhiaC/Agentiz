@@ -46,7 +46,7 @@ func (gv *GraphVisualizer) GenerateGraph(title string) *charts.Graph {
 
 	// Convert nodes to graph nodes
 	graphNodes := gv.convertNodes()
-	
+
 	// Create links between nodes
 	links := gv.createLinks()
 
@@ -74,23 +74,35 @@ func (gv *GraphVisualizer) GenerateGraph(title string) *charts.Graph {
 	return graph
 }
 
+// getNodeName extracts the node name from a path (last part after "/")
+func (gv *GraphVisualizer) getNodeName(path string) string {
+	if path == "root" {
+		return "root"
+	}
+	parts := strings.Split(path, "/")
+	return parts[len(parts)-1]
+}
+
 // convertNodes converts model.Node to opts.GraphNode
 func (gv *GraphVisualizer) convertNodes() []opts.GraphNode {
 	graphNodes := make([]opts.GraphNode, 0, len(gv.nodes))
-	
+
 	for path, node := range gv.nodes {
 		// Determine node category based on properties
 		category := gv.getNodeCategory(node)
-		
+
+		// Extract node name from path (just the last part)
+		nodeName := gv.getNodeName(path)
+
 		// Create label with title and tool count
 		label := node.Title
 		if label == "" {
 			label = node.ID
 		}
 		if label == "" {
-			label = path
+			label = nodeName
 		}
-		
+
 		// Add tool count to label
 		toolCount := len(node.Tools)
 		if toolCount > 0 {
@@ -100,13 +112,13 @@ func (gv *GraphVisualizer) convertNodes() []opts.GraphNode {
 		// Create tooltip with more details
 		tooltip := fmt.Sprintf("Path: %s\nTitle: %s\nDescription: %s\nTools: %d",
 			path, node.Title, node.Description, toolCount)
-		
+
 		if !node.Policy.CanAdvance {
 			tooltip += "\n⚠ Cannot advance"
 		}
 
 		graphNode := opts.GraphNode{
-			Name:       path,
+			Name:       nodeName,               // Use node name instead of full path
 			Value:      float32(toolCount + 1), // Size based on tool count
 			Category:   category,
 			SymbolSize: gv.calculateNodeSize(node),
@@ -131,9 +143,12 @@ func (gv *GraphVisualizer) createLinks() []opts.GraphLink {
 				remaining := strings.TrimPrefix(childPath, path+"/")
 				// Check if this is a direct child (no more slashes)
 				if !strings.Contains(remaining, "/") {
+					// Use node names instead of full paths for Source and Target
+					sourceName := gv.getNodeName(path)
+					targetName := gv.getNodeName(childPath)
 					links = append(links, opts.GraphLink{
-						Source: path,
-						Target: childPath,
+						Source: sourceName,
+						Target: targetName,
 						Value:  1,
 						LineStyle: &opts.LineStyle{
 							Width:     2,
@@ -174,19 +189,19 @@ func (gv *GraphVisualizer) getNodeCategory(n *model.Node) int {
 	// Category 1: Intermediate nodes
 	// Category 2: Leaf nodes (cannot advance)
 	// Category 3: Nodes with many tools
-	
+
 	if n.Path == "root" {
 		return 0
 	}
-	
+
 	if !n.Policy.CanAdvance {
 		return 2
 	}
-	
+
 	if len(n.Tools) >= 3 {
 		return 3
 	}
-	
+
 	return 1
 }
 
@@ -224,17 +239,17 @@ func (gv *GraphVisualizer) createCategories() []*opts.GraphCategory {
 func (gv *GraphVisualizer) calculateNodeSize(node *model.Node) float32 {
 	baseSize := 30.0
 	toolSize := float32(len(node.Tools)) * 5.0
-	
+
 	// Root node is larger
 	if node.Path == "root" {
 		return float32(baseSize) + toolSize + 20
 	}
-	
+
 	// Leaf nodes are slightly smaller
 	if !node.Policy.CanAdvance {
 		return float32(baseSize) + toolSize
 	}
-	
+
 	return float32(baseSize) + toolSize + 10
 }
 
@@ -246,13 +261,13 @@ func (gv *GraphVisualizer) getNodeStyle(category int) *opts.ItemStyle {
 		"#fac858", // Leaf - Yellow
 		"#ee6666", // Tool Rich - Red
 	}
-	
+
 	if category >= len(colors) {
 		category = 1
 	}
-	
+
 	return &opts.ItemStyle{
-		Color: colors[category],
+		Color:       colors[category],
 		BorderColor: "#fff",
 		BorderWidth: 2,
 	}
@@ -261,10 +276,10 @@ func (gv *GraphVisualizer) getNodeStyle(category int) *opts.ItemStyle {
 // SaveToFile saves the graph to an HTML file
 func (gv *GraphVisualizer) SaveToFile(filename string, title string) error {
 	graph := gv.GenerateGraph(title)
-	
+
 	page := components.NewPage()
 	page.AddCharts(graph)
-	
+
 	f, err := os.Create(filename)
 	if err != nil {
 		return fmt.Errorf("failed to create file: %w", err)
@@ -273,4 +288,3 @@ func (gv *GraphVisualizer) SaveToFile(filename string, title string) error {
 
 	return page.Render(f)
 }
-

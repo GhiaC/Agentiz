@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -14,6 +15,7 @@ type Engine struct {
 	repo         *fsrepo.NodeRepository
 	sessionStore store.SessionStore
 	toolStrategy model.MergeStrategy
+	llmHandler   *LLMHandler // Optional LLM handler
 }
 
 // NewEngine creates a new engine instance
@@ -25,7 +27,13 @@ func NewEngine(repo *fsrepo.NodeRepository, sessionStore store.SessionStore, too
 		repo:         repo,
 		sessionStore: sessionStore,
 		toolStrategy: toolStrategy,
+		llmHandler:   nil, // LLM handler is optional
 	}
+}
+
+// SetLLMHandler sets the LLM handler for the engine
+func (e *Engine) SetLLMHandler(handler *LLMHandler) {
+	e.llmHandler = handler
 }
 
 // StartSession creates a new session for a user starting at root
@@ -147,7 +155,8 @@ func (e *Engine) Advance(sessionID string) (*model.Session, error) {
 	return session, nil
 }
 
-// Step processes user input and returns agent output (rule-based for MVP)
+// Step processes user input and returns agent output
+// If LLM handler is set, it uses LLM; otherwise uses rule-based logic
 func (e *Engine) Step(sessionID string, userInput string) (*StepOutput, error) {
 	session, err := e.sessionStore.Get(sessionID)
 	if err != nil {
@@ -178,13 +187,91 @@ func (e *Engine) Step(sessionID string, userInput string) (*StepOutput, error) {
 		}
 	}
 
-	// For MVP, just return a simple response
+	// If LLM handler is available, use it
+	if e.llmHandler != nil {
+		return e.stepWithLLM(sessionID, userInput, currentNode, session)
+	}
+
+	// Fallback to rule-based response
 	output.Message = fmt.Sprintf("Processing input at node: %s", currentNode.Title)
 	if currentNode.Content != "" {
 		output.Message += "\n" + currentNode.Content[:min(100, len(currentNode.Content))]
 	}
 
 	return output, nil
+}
+
+// stepWithLLM processes user input using LLM
+func (e *Engine) stepWithLLM(sessionID string, userInput string, currentNode *model.Node, session *model.Session) (*StepOutput, error) {
+	// Get or create conversation memory
+	var memory *ConversationMemory
+	if memData, ok := session.Memory["conversation"].(*ConversationMemory); ok {
+		memory = memData
+	} else {
+		memory = NewConversationMemory()
+		session.Memory["conversation"] = memory
+	}
+
+	// Add user message
+	memory.AddUserMessage(userInput)
+
+	// Build system prompt from current node
+	systemPrompt := currentNode.Content
+	if currentNode.Description != "" {
+		systemPrompt = currentNode.Description + "\n\n" + systemPrompt
+	}
+
+	// Get active tools
+	activeTools := make([]model.Tool, 0)
+	for _, tool := range session.AccumulatedTools {
+		if tool.Status == model.ToolStatusActive {
+			activeTools = append(activeTools, tool)
+		}
+	}
+
+	// Process with LLM
+	ctx := context.Background()
+	response, tokens, err := e.llmHandler.ProcessWithTools(
+		ctx,
+		systemPrompt,
+		memory.GetMessages(),
+		activeTools,
+		e.createToolExecutor(sessionID),
+		10, // max iterations
+	)
+
+	if err != nil {
+		return nil, fmt.Errorf("LLM processing failed: %w", err)
+	}
+
+	// Add assistant response to memory
+	memory.AddAssistantMessage(response)
+
+	// Save session
+	session.UpdatedAt = session.UpdatedAt // Update timestamp
+	if err := e.sessionStore.Put(session); err != nil {
+		return nil, fmt.Errorf("failed to save session: %w", err)
+	}
+
+	return &StepOutput{
+		Action:      "respond",
+		Message:     response,
+		ToolCall:    nil,
+		CurrentNode: session.CurrentNodePath,
+		OpenedFiles: session.OpenedFiles,
+		Debug: map[string]interface{}{
+			"tokens": tokens,
+		},
+	}, nil
+}
+
+// createToolExecutor creates a tool executor for the session
+func (e *Engine) createToolExecutor(sessionID string) ToolExecutor {
+	return func(toolName string, args map[string]interface{}) (string, error) {
+		// TODO: Implement actual tool execution
+		// For now, return a placeholder
+		return fmt.Sprintf("Tool %s executed with args: %v", toolName, args), nil
+	}
 }
 
 // shouldAdvance determines if the session should advance based on user input and policy
