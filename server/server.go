@@ -227,7 +227,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 func (s *Server) getOrCreateSession(userID string) (*model.Session, error) {
 	// Try to get existing session from store
 	sessionStore := s.engine.GetSessionStore()
-	
+
 	// List sessions for user to find active one
 	sessions, err := sessionStore.List(userID)
 	if err == nil && len(sessions) > 0 {
@@ -245,4 +245,3 @@ func respondJSON(w http.ResponseWriter, status int, data interface{}) {
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(data)
 }
-

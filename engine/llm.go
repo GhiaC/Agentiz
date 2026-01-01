@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"agentize/model"
+
 	"github.com/sashabaranov/go-openai"
 )
 
@@ -185,4 +186,3 @@ func (h *LLMHandler) ProcessWithTools(
 
 	return "", totalTokens, fmt.Errorf("max iterations (%d) reached", maxIterations)
 }
-

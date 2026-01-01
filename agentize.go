@@ -163,7 +163,7 @@ func (ag *Agentize) GetNodePaths() []string {
 
 	paths := make([]string, 0, len(ag.nodes))
 	visited := make(map[string]bool)
-	
+
 	// DFS traversal starting from root
 	var traverse func(path string)
 	traverse = func(path string) {
@@ -172,7 +172,7 @@ func (ag *Agentize) GetNodePaths() []string {
 		}
 		visited[path] = true
 		paths = append(paths, path)
-		
+
 		children, err := ag.repo.GetChildren(path)
 		if err == nil {
 			for _, childPath := range children {
@@ -180,7 +180,7 @@ func (ag *Agentize) GetNodePaths() []string {
 			}
 		}
 	}
-	
+
 	traverse("root")
 	return paths
 }

@@ -109,4 +109,3 @@ routing:
 		t.Errorf("Expected 'root/next', got '%s'", nextPathStr)
 	}
 }
-

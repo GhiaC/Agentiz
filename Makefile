@@ -1,4 +1,4 @@
-.PHONY: build run test clean
+.PHONY: build run test test-full test-verbose clean deps
 
 # Build the agentize server
 build:
@@ -15,7 +15,11 @@ run-server:
 	AGENTIZE_KNOWLEDGE_PATH=./knowledge \
 	go run cmd/agentize/main.go
 
-# Run tests
+# Run comprehensive test suite (format, vet, tests, coverage)
+test-full:
+	@bash scripts/test.sh
+
+# Run tests (simple)
 test:
 	go test ./...
 
@@ -26,6 +30,7 @@ test-verbose:
 # Clean build artifacts
 clean:
 	rm -rf bin/
+	rm -f coverage.out
 
 # Install dependencies
 deps:

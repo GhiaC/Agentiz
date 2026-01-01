@@ -77,9 +77,9 @@ func (r *NodeRepository) LoadNode(path string) (*model.Node, error) {
 		// Use defaults if node.yaml doesn't exist
 		node.ID = path
 		node.Policy = model.Policy{
-			CanAdvance:      true,
+			CanAdvance:       true,
 			AdvanceCondition: "",
-			MaxOpenFiles:    20,
+			MaxOpenFiles:     20,
 			Routing: model.Routing{
 				Mode: "sequential",
 			},
@@ -117,15 +117,15 @@ func (r *NodeRepository) LoadNode(path string) (*model.Node, error) {
 // It checks both the Routing.Children field and scans the directory for subdirectories
 func (r *NodeRepository) GetChildren(path string) ([]string, error) {
 	fullPath := filepath.Join(r.rootPath, path)
-	
+
 	// Load node to check Routing.Children
 	node, err := r.LoadNode(path)
 	if err != nil {
 		return nil, err
 	}
-	
+
 	var children []string
-	
+
 	// If Routing.Children is specified, use those names
 	if len(node.Policy.Routing.Children) > 0 {
 		for _, childName := range node.Policy.Routing.Children {
@@ -140,13 +140,13 @@ func (r *NodeRepository) GetChildren(path string) ([]string, error) {
 		}
 		return children, nil
 	}
-	
+
 	// Otherwise, scan directory for all subdirectories (excluding special files)
 	entries, err := os.ReadDir(fullPath)
 	if err != nil {
 		return nil, err
 	}
-	
+
 	for _, entry := range entries {
 		if entry.IsDir() {
 			// Skip hidden directories and special directories
@@ -160,7 +160,7 @@ func (r *NodeRepository) GetChildren(path string) ([]string, error) {
 			}
 		}
 	}
-	
+
 	return children, nil
 }
 
@@ -249,5 +249,3 @@ func (r *NodeRepository) InvalidateCache(path string) {
 		delete(r.cache, path)
 	}
 }
-
-

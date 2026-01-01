@@ -218,6 +218,77 @@ curl -X POST http://localhost:8080/chat \
 open http://localhost:8080/graph
 ```
 
+## Makefile Commands
+
+The project includes a Makefile with convenient commands:
+
+| Command | Description |
+|---------|-------------|
+| `make build` | Build the agentize server binary |
+| `make run` | Run the server (requires env vars) |
+| `make run-server` | Run server with HTTP enabled |
+| `make test-full` | Run comprehensive test suite (format, vet, tests, coverage) |
+| `make test` | Run simple tests |
+| `make test-verbose` | Run tests with verbose output |
+| `make clean` | Remove build artifacts and coverage files |
+| `make deps` | Install/update dependencies |
+
+## Testing
+
+Agentize includes a comprehensive test suite. You can run tests in several ways:
+
+### Quick Test Commands
+
+```bash
+# Run comprehensive test suite (recommended)
+# This runs: format check, vet, tests, and coverage
+make test-full
+
+# Run simple tests
+make test
+
+# Run tests with verbose output
+make test-verbose
+
+# Or use Go directly
+go test ./...
+go test -v ./...
+```
+
+### Test Script
+
+The project includes a test script (`scripts/test.sh`) that performs:
+
+1. **Dependency Check**: Verifies and updates Go modules
+2. **Format Check**: Ensures code follows Go formatting standards
+3. **Vet Check**: Runs `go vet` to catch common errors
+4. **Test Execution**: Runs all tests with verbose output
+5. **Coverage Report**: Generates test coverage statistics
+
+You can run it directly:
+
+```bash
+bash scripts/test.sh
+```
+
+Or use the Makefile:
+
+```bash
+make test-full
+```
+
+### Test Coverage
+
+To view detailed coverage report:
+
+```bash
+# Generate coverage file
+go test -coverprofile=coverage.out ./...
+
+# View HTML coverage report
+go tool cover -html=coverage.out
+```
+
 ## Architecture
 
 - **model/**: Core data structures (Node, Session, Tool, Policy)
@@ -228,6 +299,7 @@ open http://localhost:8080/graph
 - **config/**: Configuration management
 - **visualize/**: Graph visualization using ECharts
 - **cmd/agentize/**: Main executable
+- **scripts/**: Utility scripts (test runner, etc.)
 
 ## MVP Status
 

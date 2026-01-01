@@ -67,4 +67,3 @@ func TestToolRegistryErrorStrategy(t *testing.T) {
 		t.Errorf("Expected ToolConflictError, got %T", err)
 	}
 }
-

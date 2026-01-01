@@ -1,9 +1,9 @@
 package fsrepo
 
 import (
+	"agentize/model"
 	"fmt"
 	"strings"
-	"agentize/model"
 )
 
 // parseYAML is a simple YAML parser for MVP
@@ -52,7 +52,7 @@ func parseYAML(data []byte, v interface{}) error {
 			}
 			continue
 		}
-		
+
 		// Handle array items (lines starting with -) in routing section
 		if strings.HasPrefix(line, "-") && routingStarted {
 			childName := strings.TrimSpace(strings.TrimPrefix(line, "-"))
@@ -161,4 +161,3 @@ func parseStringArray(s string) []string {
 	}
 	return result
 }
-

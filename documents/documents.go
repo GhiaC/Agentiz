@@ -68,7 +68,7 @@ func NewAgentizeDocument(nodes map[string]*model.Node, getChildren func(string) 
 	// Convert model nodes to document nodes
 	for path, node := range nodes {
 		children, _ := getChildren(path)
-		
+
 		nodeDoc := &NodeDocument{
 			Path:        path,
 			ID:          node.ID,
@@ -662,4 +662,3 @@ const embeddedTemplate = `<!DOCTYPE html>
     </script>
 </body>
 </html>`
-

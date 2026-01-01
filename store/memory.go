@@ -80,4 +80,3 @@ type SessionStore interface {
 	Delete(sessionID string) error
 	List(userID string) ([]*model.Session, error)
 }
-

@@ -27,7 +27,7 @@ type HTTPConfig struct {
 
 // FeatureFlags holds feature flag settings
 type FeatureFlags struct {
-	HTTPServerEnabled bool
+	HTTPServerEnabled         bool
 	GraphVisualizationEnabled bool
 }
 
@@ -40,7 +40,7 @@ func Load() (*Config, error) {
 			Port:    getEnvInt("AGENTIZE_HTTP_PORT", 8080),
 		},
 		Features: FeatureFlags{
-			HTTPServerEnabled:        getEnvBool("AGENTIZE_FEATURE_HTTP", false),
+			HTTPServerEnabled:         getEnvBool("AGENTIZE_FEATURE_HTTP", false),
 			GraphVisualizationEnabled: getEnvBool("AGENTIZE_FEATURE_GRAPH", true),
 		},
 		KnowledgePath: getEnvString("AGENTIZE_KNOWLEDGE_PATH", "./knowledge"),
@@ -82,4 +82,3 @@ func getEnvBool(key string, defaultValue bool) bool {
 	}
 	return defaultValue
 }
-

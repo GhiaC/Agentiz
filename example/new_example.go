@@ -13,7 +13,7 @@ import (
 // This example demonstrates the new Agentize.New() API
 func newExample() {
 	// Create a temporary knowledge tree for demonstration
-	examplePath := createExampleKnowledgeTree()
+	examplePath := createNewExampleKnowledgeTree()
 	defer os.RemoveAll(examplePath)
 
 	// Create Agentize instance - this automatically loads all nodes
@@ -64,7 +64,7 @@ func newExample() {
 		} else {
 			fmt.Printf("=== Node: %s ===\n", paths[1])
 			fmt.Printf("Title: %s\n", node.Title)
-			fmt.Printf("Content preview: %s\n", node.Content[:min(50, len(node.Content))])
+			fmt.Printf("Content preview: %s\n", node.Content[:minInt(50, len(node.Content))])
 		}
 	}
 
@@ -80,7 +80,7 @@ func newExample() {
 	fmt.Printf("Tool strategy: %s\n", ag2.GetToolStrategy())
 }
 
-func createExampleKnowledgeTree() string {
+func createNewExampleKnowledgeTree() string {
 	tmpDir, err := os.MkdirTemp("", "agentize-example-*")
 	if err != nil {
 		log.Fatalf("Failed to create temp dir: %v", err)
@@ -174,10 +174,9 @@ This is the second level node.
 	return tmpDir
 }
 
-func min(a, b int) int {
+func minInt(a, b int) int {
 	if a < b {
 		return a
 	}
 	return b
 }
-

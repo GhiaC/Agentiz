@@ -67,4 +67,3 @@ func (m *ConversationMemory) GetLastMessages(n int) []openai.ChatCompletionMessa
 	}
 	return m.messages[len(m.messages)-n:]
 }
-

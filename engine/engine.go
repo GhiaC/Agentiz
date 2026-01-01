@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"agentize/fsrepo"
 	"agentize/model"
@@ -248,7 +249,7 @@ func (e *Engine) stepWithLLM(sessionID string, userInput string, currentNode *mo
 	memory.AddAssistantMessage(response)
 
 	// Save session
-	session.UpdatedAt = session.UpdatedAt // Update timestamp
+	session.UpdatedAt = time.Now() // Update timestamp
 	if err := e.sessionStore.Put(session); err != nil {
 		return nil, fmt.Errorf("failed to save session: %w", err)
 	}

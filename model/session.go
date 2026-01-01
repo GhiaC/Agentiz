@@ -34,27 +34,27 @@ type Session struct {
 
 // NodeDigest is a lightweight representation of a node (for memory efficiency)
 type NodeDigest struct {
-	Path      string
-	ID        string
-	Title     string
-	Hash      string
-	LoadedAt  time.Time
-	Excerpt   string // First 100 chars of content
+	Path     string
+	ID       string
+	Title    string
+	Hash     string
+	LoadedAt time.Time
+	Excerpt  string // First 100 chars of content
 }
 
 // NewSession creates a new session for a user
 func NewSession(userID string) *Session {
 	now := time.Now()
 	return &Session{
-		UserID:          userID,
-		SessionID:       generateSessionID(),
-		CurrentNodePath: "root",
-		OpenedFiles:     []string{},
+		UserID:           userID,
+		SessionID:        generateSessionID(),
+		CurrentNodePath:  "root",
+		OpenedFiles:      []string{},
 		AccumulatedTools: []Tool{},
-		Memory:          make(map[string]interface{}),
-		NodeDigests:     []NodeDigest{},
-		CreatedAt:       now,
-		UpdatedAt:       now,
+		Memory:           make(map[string]interface{}),
+		NodeDigests:      []NodeDigest{},
+		CreatedAt:        now,
+		UpdatedAt:        now,
 	}
 }
 
@@ -72,4 +72,3 @@ func randomString(n int) string {
 	}
 	return string(b)
 }
-

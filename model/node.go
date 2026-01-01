@@ -39,8 +39,8 @@ type Policy struct {
 
 // Routing defines how navigation works
 type Routing struct {
-	Mode     string   `yaml:"mode"`      // "sequential" for now
-	Children []string `yaml:"children"`  // List of child node names (instead of "next")
+	Mode     string   `yaml:"mode"`     // "sequential" for now
+	Children []string `yaml:"children"` // List of child node names (instead of "next")
 }
 
 // Memory defines what should be persisted
