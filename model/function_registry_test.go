@@ -201,4 +201,3 @@ func TestFunctionRegistryWithDisabledTools(t *testing.T) {
 		t.Errorf("Expected no error (disabled/hidden tools don't need functions), got: %v", err)
 	}
 }
-

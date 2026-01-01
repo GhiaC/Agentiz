@@ -73,7 +73,7 @@ func functionRegistryExample() {
 	// when tools are called by the LLM
 	fmt.Println("\nEngine is ready to use with registered functions!")
 	fmt.Printf("Engine created with %d registered functions\n", len(functionRegistry.GetAllRegistered()))
-	
+
 	// Example: Start a session
 	session, err := eng.StartSession("user123")
 	if err != nil {
@@ -81,7 +81,7 @@ func functionRegistryExample() {
 	} else {
 		fmt.Printf("Session started: %s\n", session.SessionID)
 	}
-	
+
 	_ = eng // Use engine
 }
 
@@ -224,4 +224,3 @@ This node has additional tools.
 
 	return tmpDir
 }
-

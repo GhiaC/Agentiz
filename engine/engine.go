@@ -13,10 +13,10 @@ import (
 
 // Engine is the main agent engine
 type Engine struct {
-	repo            *fsrepo.NodeRepository
-	sessionStore    store.SessionStore
-	toolStrategy    model.MergeStrategy
-	llmHandler      *LLMHandler        // Optional LLM handler
+	repo             *fsrepo.NodeRepository
+	sessionStore     store.SessionStore
+	toolStrategy     model.MergeStrategy
+	llmHandler       *LLMHandler             // Optional LLM handler
 	functionRegistry *model.FunctionRegistry // Registry for tool functions
 }
 
@@ -26,10 +26,10 @@ func NewEngine(repo *fsrepo.NodeRepository, sessionStore store.SessionStore, too
 		toolStrategy = model.MergeStrategyOverride
 	}
 	return &Engine{
-		repo:            repo,
-		sessionStore:    sessionStore,
-		toolStrategy:    toolStrategy,
-		llmHandler:      nil, // LLM handler is optional
+		repo:             repo,
+		sessionStore:     sessionStore,
+		toolStrategy:     toolStrategy,
+		llmHandler:       nil,                         // LLM handler is optional
 		functionRegistry: model.NewFunctionRegistry(), // Initialize function registry
 	}
 }
@@ -43,10 +43,10 @@ func NewEngineWithFunctions(repo *fsrepo.NodeRepository, sessionStore store.Sess
 		functionRegistry = model.NewFunctionRegistry()
 	}
 	return &Engine{
-		repo:            repo,
-		sessionStore:    sessionStore,
-		toolStrategy:    toolStrategy,
-		llmHandler:      nil,
+		repo:             repo,
+		sessionStore:     sessionStore,
+		toolStrategy:     toolStrategy,
+		llmHandler:       nil,
 		functionRegistry: functionRegistry,
 	}
 }

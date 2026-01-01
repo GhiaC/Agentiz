@@ -149,4 +149,3 @@ type MissingFunctionsError struct {
 func (e *MissingFunctionsError) Error() string {
 	return fmt.Sprintf("missing functions for tools: %v", e.MissingTools)
 }
-
