@@ -43,6 +43,11 @@ func main() {
 ## Features
 
 - **Interactive Graph**: Drag nodes, zoom in/out
+- **Click to View Details**: Click on any node to see detailed information in a modal popup, including:
+  - Full path and description
+  - Policy settings (can advance, routing mode, memory settings)
+  - List of all tools with descriptions
+  - Full markdown content
 - **Color Coding**: 
   - Blue: Root node
   - Green: Intermediate nodes
