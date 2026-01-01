@@ -62,11 +62,8 @@ templ scripts(treeData, nodesData string) {
 				if (nodeData.policy.can_advance) {
 					html += '<span class="meta-item"><span class="meta-badge">Can Advance</span></span>';
 				}
-				if (nodeData.policy.routing_mode) {
-					html += '<span class="meta-item">Routing: <strong>' + escapeHtml(nodeData.policy.routing_mode) + '</strong></span>';
-				}
 				if (nodeData.children && nodeData.children.length > 0) {
-					html += '<span class="meta-item">Children: <strong>' + nodeData.children.length + '</strong></span>';
+					html += '<span class="meta-item"><span class="meta-badge">Children: ' + nodeData.children.length + '</span></span>';
 				}
 			}
 
@@ -386,13 +383,6 @@ templ scripts(treeData, nodesData string) {
 						'</div>';
 				}
 				
-				if (nodeData.policy.routing_mode) {
-					html += '<div class="detail-field">' +
-						'<div class="detail-field-label">Routing Mode:</div>' +
-						'<div class="detail-field-value"><code>' + escapeHtml(nodeData.policy.routing_mode) + '</code></div>' +
-						'</div>';
-				}
-				
 				if (nodeData.policy.max_open_files) {
 					html += '<div class="detail-field">' +
 						'<div class="detail-field-label">Max Open Files:</div>' +
@@ -453,13 +443,13 @@ templ scripts(treeData, nodesData string) {
 					'<div class="tools-content" id="tools-content-' + path + '">';
 				
 				nodeData.tools.forEach(function(tool, index) {
-					html += '<div class="detail-field" style="margin-bottom: 25px;">' +
+					html += '<div class="detail-field" style="margin-bottom: 12px;">' +
 						'<div class="detail-field-label">' + (index + 1) + '. ' + escapeHtml(tool.name) + '</div>' +
 						'<div class="detail-field-value">' +
-						'<div style="margin-bottom: 10px;"><strong>Description:</strong> ' + escapeHtml(tool.description || 'N/A') + '</div>';
+						'<div style="margin-bottom: 6px;"><strong>Description:</strong> ' + escapeHtml(tool.description || 'N/A') + '</div>';
 					
 					if (tool.status) {
-						html += '<div style="margin-bottom: 10px;"><strong>Status:</strong> <code>' + escapeHtml(tool.status) + '</code></div>';
+						html += '<div style="margin-bottom: 6px;"><strong>Status:</strong> <code>' + escapeHtml(tool.status) + '</code></div>';
 					}
 					
 					if (tool.input_schema) {
