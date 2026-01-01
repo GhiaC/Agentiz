@@ -1,0 +1,152 @@
+package model
+
+import (
+	"fmt"
+	"sync"
+)
+
+// ToolFunction is the signature for tool execution functions
+// It receives a map of arguments and returns a result string and error
+type ToolFunction func(args map[string]interface{}) (string, error)
+
+// FunctionRegistry manages the mapping between tool names and their Go functions
+// This registry must be populated at application startup with all available functions
+type FunctionRegistry struct {
+	mu        sync.RWMutex
+	functions map[string]ToolFunction // tool name -> function
+}
+
+// NewFunctionRegistry creates a new function registry
+func NewFunctionRegistry() *FunctionRegistry {
+	return &FunctionRegistry{
+		functions: make(map[string]ToolFunction),
+	}
+}
+
+// Register registers a function for a tool name
+// This should be called at application startup for all available tools
+func (fr *FunctionRegistry) Register(toolName string, fn ToolFunction) error {
+	if toolName == "" {
+		return fmt.Errorf("tool name cannot be empty")
+	}
+	if fn == nil {
+		return fmt.Errorf("function cannot be nil for tool: %s", toolName)
+	}
+
+	fr.mu.Lock()
+	defer fr.mu.Unlock()
+
+	if _, exists := fr.functions[toolName]; exists {
+		return fmt.Errorf("function already registered for tool: %s", toolName)
+	}
+
+	fr.functions[toolName] = fn
+	return nil
+}
+
+// RegisterBatch registers multiple functions at once
+func (fr *FunctionRegistry) RegisterBatch(registrations map[string]ToolFunction) error {
+	for toolName, fn := range registrations {
+		if err := fr.Register(toolName, fn); err != nil {
+			return fmt.Errorf("failed to register %s: %w", toolName, err)
+		}
+	}
+	return nil
+}
+
+// MustRegister registers a function and panics if there's an error
+// Useful for initialization code where failures should be fatal
+func (fr *FunctionRegistry) MustRegister(toolName string, fn ToolFunction) {
+	if err := fr.Register(toolName, fn); err != nil {
+		panic(fmt.Sprintf("failed to register tool function %s: %v", toolName, err))
+	}
+}
+
+// Get retrieves a function for a tool name
+func (fr *FunctionRegistry) Get(toolName string) (ToolFunction, bool) {
+	fr.mu.RLock()
+	defer fr.mu.RUnlock()
+
+	fn, ok := fr.functions[toolName]
+	return fn, ok
+}
+
+// Execute executes a tool function by name
+func (fr *FunctionRegistry) Execute(toolName string, args map[string]interface{}) (string, error) {
+	fn, ok := fr.Get(toolName)
+	if !ok {
+		return "", &FunctionNotFoundError{ToolName: toolName}
+	}
+
+	return fn(args)
+}
+
+// Has checks if a function is registered for a tool name
+func (fr *FunctionRegistry) Has(toolName string) bool {
+	fr.mu.RLock()
+	defer fr.mu.RUnlock()
+
+	_, ok := fr.functions[toolName]
+	return ok
+}
+
+// GetAllRegistered returns all registered tool names
+func (fr *FunctionRegistry) GetAllRegistered() []string {
+	fr.mu.RLock()
+	defer fr.mu.RUnlock()
+
+	names := make([]string, 0, len(fr.functions))
+	for name := range fr.functions {
+		names = append(names, name)
+	}
+	return names
+}
+
+// ValidateTools checks if all tools in a registry have corresponding functions
+// Returns a list of missing tool names
+func (fr *FunctionRegistry) ValidateTools(toolRegistry *ToolRegistry) []string {
+	fr.mu.RLock()
+	defer fr.mu.RUnlock()
+
+	missing := make([]string, 0)
+	tools := toolRegistry.GetToolsIncludingHidden()
+
+	for _, tool := range tools {
+		// Only validate active tools (disabled/hidden tools might not need functions)
+		if tool.Status == ToolStatusActive {
+			if _, ok := fr.functions[tool.Name]; !ok {
+				missing = append(missing, tool.Name)
+			}
+		}
+	}
+
+	return missing
+}
+
+// ValidateAllTools checks if all tools have functions and returns an error if any are missing
+func (fr *FunctionRegistry) ValidateAllTools(toolRegistry *ToolRegistry) error {
+	missing := fr.ValidateTools(toolRegistry)
+	if len(missing) > 0 {
+		return &MissingFunctionsError{MissingTools: missing}
+	}
+	return nil
+}
+
+// FunctionNotFoundError is returned when a function is not found for a tool
+type FunctionNotFoundError struct {
+	ToolName string
+}
+
+func (e *FunctionNotFoundError) Error() string {
+	return fmt.Sprintf("function not found for tool: %s", e.ToolName)
+}
+
+// MissingFunctionsError is returned when tools are missing their functions
+type MissingFunctionsError struct {
+	MissingTools []string
+}
+
+func (e *MissingFunctionsError) Error() string {
+	return fmt.Sprintf("missing functions for tools: %v", e.MissingTools)
+}
+

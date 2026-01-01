@@ -13,10 +13,11 @@ import (
 
 // Engine is the main agent engine
 type Engine struct {
-	repo         *fsrepo.NodeRepository
-	sessionStore store.SessionStore
-	toolStrategy model.MergeStrategy
-	llmHandler   *LLMHandler // Optional LLM handler
+	repo            *fsrepo.NodeRepository
+	sessionStore    store.SessionStore
+	toolStrategy    model.MergeStrategy
+	llmHandler      *LLMHandler        // Optional LLM handler
+	functionRegistry *model.FunctionRegistry // Registry for tool functions
 }
 
 // NewEngine creates a new engine instance
@@ -25,11 +26,39 @@ func NewEngine(repo *fsrepo.NodeRepository, sessionStore store.SessionStore, too
 		toolStrategy = model.MergeStrategyOverride
 	}
 	return &Engine{
-		repo:         repo,
-		sessionStore: sessionStore,
-		toolStrategy: toolStrategy,
-		llmHandler:   nil, // LLM handler is optional
+		repo:            repo,
+		sessionStore:    sessionStore,
+		toolStrategy:    toolStrategy,
+		llmHandler:      nil, // LLM handler is optional
+		functionRegistry: model.NewFunctionRegistry(), // Initialize function registry
 	}
+}
+
+// NewEngineWithFunctions creates a new engine instance with a pre-configured function registry
+func NewEngineWithFunctions(repo *fsrepo.NodeRepository, sessionStore store.SessionStore, toolStrategy model.MergeStrategy, functionRegistry *model.FunctionRegistry) *Engine {
+	if toolStrategy == "" {
+		toolStrategy = model.MergeStrategyOverride
+	}
+	if functionRegistry == nil {
+		functionRegistry = model.NewFunctionRegistry()
+	}
+	return &Engine{
+		repo:            repo,
+		sessionStore:    sessionStore,
+		toolStrategy:    toolStrategy,
+		llmHandler:      nil,
+		functionRegistry: functionRegistry,
+	}
+}
+
+// SetFunctionRegistry sets the function registry for the engine
+func (e *Engine) SetFunctionRegistry(registry *model.FunctionRegistry) {
+	e.functionRegistry = registry
+}
+
+// GetFunctionRegistry returns the function registry
+func (e *Engine) GetFunctionRegistry() *model.FunctionRegistry {
+	return e.functionRegistry
 }
 
 // SetLLMHandler sets the LLM handler for the engine
@@ -269,9 +298,13 @@ func (e *Engine) stepWithLLM(sessionID string, userInput string, currentNode *mo
 // createToolExecutor creates a tool executor for the session
 func (e *Engine) createToolExecutor(sessionID string) ToolExecutor {
 	return func(toolName string, args map[string]interface{}) (string, error) {
-		// TODO: Implement actual tool execution
-		// For now, return a placeholder
-		return fmt.Sprintf("Tool %s executed with args: %v", toolName, args), nil
+		// Check if function is registered
+		if e.functionRegistry == nil {
+			return "", fmt.Errorf("function registry not initialized")
+		}
+
+		// Execute the tool function
+		return e.functionRegistry.Execute(toolName, args)
 	}
 }
 
