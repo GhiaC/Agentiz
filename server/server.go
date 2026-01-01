@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 
 	"agentize/config"
+	"agentize/documents"
 	"agentize/engine"
 	"agentize/fsrepo"
 	"agentize/model"
@@ -28,6 +29,7 @@ type AgentizeInterface interface {
 	GetSessionStore() store.SessionStore
 	GetToolStrategy() model.MergeStrategy
 	GenerateGraphVisualization(filename string, title string) error
+	GetAllNodes() map[string]*model.Node
 }
 
 // NewServer creates a new HTTP server
@@ -56,6 +58,7 @@ func (s *Server) Start() error {
 	// Setup routes
 	http.HandleFunc("/chat", s.handleChat)
 	http.HandleFunc("/graph", s.handleGraph)
+	http.HandleFunc("/docs", s.handleDocs)
 	http.HandleFunc("/health", s.handleHealth)
 
 	address := s.config.GetAddress()
@@ -63,6 +66,7 @@ func (s *Server) Start() error {
 	log.Printf("Available endpoints:")
 	log.Printf("  POST /chat - Chat endpoint (requires query and userID)")
 	log.Printf("  GET  /graph - Graph visualization")
+	log.Printf("  GET  /docs - Knowledge tree documentation")
 	log.Printf("  GET  /health - Health check")
 
 	return http.ListenAndServe(address, nil)
@@ -180,6 +184,36 @@ func (s *Server) handleGraph(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	w.Write(content)
+}
+
+// handleDocs handles documentation requests
+func (s *Server) handleDocs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Get all nodes from Agentize
+	nodes := s.ag.GetAllNodes()
+	repo := s.ag.GetRepository()
+
+	// Create document structure
+	doc := documents.NewAgentizeDocument(nodes, func(path string) ([]string, error) {
+		return repo.GetChildren(path)
+	})
+
+	// Generate HTML
+	html, err := doc.GenerateHTML()
+	if err != nil {
+		respondJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": fmt.Sprintf("Failed to generate documentation: %v", err),
+		})
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write(html)
 }
 
 // handleHealth handles health check requests
