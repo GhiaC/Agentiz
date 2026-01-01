@@ -1,0 +1,499 @@
+package components
+
+templ scripts(treeData, nodesData string) {
+	<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+	<script>
+		const treeData = { templ.Raw(treeData) }
+		const nodesData = { templ.Raw(nodesData) }
+	</script>
+	<script>
+		function calculateStats() {
+			const totalNodes = Object.keys(nodesData).length;
+			let totalTools = 0;
+			let maxDepth = 0;
+
+			function countTools(node) {
+				if (nodesData[node.path] && nodesData[node.path].tools) {
+					totalTools += nodesData[node.path].tools.length;
+				}
+				if (node.level > maxDepth) {
+					maxDepth = node.level;
+				}
+				if (node.children) {
+					node.children.forEach(countTools);
+				}
+			}
+
+			if (treeData) {
+				countTools(treeData);
+			}
+
+			document.getElementById('total-nodes').textContent = totalNodes;
+			document.getElementById('total-tools').textContent = totalTools;
+			document.getElementById('tree-depth').textContent = maxDepth + 1;
+		}
+
+		function renderNode(node, isRoot = false) {
+			const nodeData = nodesData[node.path] || {};
+			const level = node.level || 0;
+			const indent = level * 30;
+			const hasChildren = node.children && node.children.length > 0;
+			const toggleStyle = hasChildren ? '' : 'visibility: hidden;';
+
+			let html = '<div class="tree-node" data-path="' + escapeHtml(node.path) + '" data-level="' + level + '" style="margin-left: ' + indent + 'px;">' +
+				'<div class="node-header">' +
+				'<div>' +
+				'<span class="toggle-icon" id="toggle-' + escapeHtml(node.path) + '" style="' + toggleStyle + '" onclick="event.stopPropagation(); toggleNode(\'' + escapeHtml(node.path) + '\')"></span>' +
+				'<span class="level-indicator">' + level + '</span>' +
+				'<a href="#" class="node-title-link" onclick="event.preventDefault(); showNodeDetail(\'' + escapeHtml(node.path) + '\'); return false;">' +
+				escapeHtml(node.title || node.id || node.path) +
+				'</a>' +
+				'</div>' +
+				'<span class="node-path">' + escapeHtml(node.path) + '</span>' +
+				'</div>';
+
+			if (node.description || nodeData.description) {
+				html += '<div class="node-description">' + escapeHtml(node.description || nodeData.description || '') + '</div>';
+			}
+
+			html += '<div class="node-meta">';
+			
+			if (nodeData.policy) {
+				if (nodeData.policy.can_advance) {
+					html += '<span class="meta-item"><span class="meta-badge">Can Advance</span></span>';
+				}
+				if (nodeData.policy.routing_mode) {
+					html += '<span class="meta-item">Routing: <strong>' + escapeHtml(nodeData.policy.routing_mode) + '</strong></span>';
+				}
+				if (nodeData.children && nodeData.children.length > 0) {
+					html += '<span class="meta-item">Children: <strong>' + nodeData.children.length + '</strong></span>';
+				}
+			}
+
+			if (nodeData.tools && nodeData.tools.length > 0) {
+				html += '<span class="meta-item">Tools: <strong>' + nodeData.tools.length + '</strong></span>';
+			}
+
+			html += '</div>';
+
+			if (nodeData.tools && nodeData.tools.length > 0) {
+				html += '<div class="tools-section">';
+				html += '<div class="tools-title" onclick="toggleTools(\'' + escapeHtml(node.path) + '\')">' +
+					'<span class="toggle-icon" id="toggle-tools-' + escapeHtml(node.path) + '"></span>' +
+					'<span>🔧 Tools (' + nodeData.tools.length + ')</span>' +
+					'</div>';
+				html += '<div class="tools-content" id="tools-content-' + escapeHtml(node.path) + '">';
+				nodeData.tools.forEach(function(tool) {
+					html += '<div class="tool-item">' +
+						'<div class="tool-name">' + escapeHtml(tool.name) + '</div>' +
+						'<div class="tool-description">' + escapeHtml(tool.description || '') + '</div>' +
+						'</div>';
+				});
+				html += '</div></div>';
+			}
+
+			if (nodeData.content) {
+				const markdownHtml = marked.parse(nodeData.content);
+				html += '<details style="margin-top: 10px;">' +
+					'<summary style="cursor: pointer; color: #667eea; font-weight: bold;">📄 Content Preview</summary>' +
+					'<div style="margin-top: 10px;">' +
+					'<div class="button-group">' +
+					'<button class="markdown-toggle-btn" onclick="toggleMarkdown(\'content-preview-' + escapeHtml(node.path) + '\')">View as Plain Text</button>' +
+					'<button class="copy-btn" onclick="copyContent(\'' + escapeHtml(node.path) + '\', \'preview\')">📋 Copy Content</button>' +
+					'</div>' +
+					'<div id="content-preview-' + escapeHtml(node.path) + '" style="margin-top: 10px; padding: 10px; background: white; border-radius: 6px; font-size: 0.9em; color: #555;" class="content-markdown">' +
+					markdownHtml +
+					'</div>' +
+					'</div>' +
+					'</details>';
+			}
+
+			html += '</div>';
+
+			if (node.children && node.children.length > 0) {
+				html += '<div class="children" id="children-' + escapeHtml(node.path) + '">';
+				node.children.forEach(function(child) {
+					html += renderNode(child);
+				});
+				html += '</div>';
+			}
+
+			return html;
+		}
+
+		function toggleNode(path) {
+			const childrenDiv = document.getElementById('children-' + path);
+			const toggleIcon = document.getElementById('toggle-' + path);
+			
+			if (!childrenDiv) return;
+			
+			if (childrenDiv.classList.contains('expanded')) {
+				childrenDiv.classList.remove('expanded');
+				if (toggleIcon) toggleIcon.classList.remove('expanded');
+			} else {
+				childrenDiv.classList.add('expanded');
+				if (toggleIcon) toggleIcon.classList.add('expanded');
+			}
+		}
+
+		function toggleTools(path) {
+			const toolsContent = document.getElementById('tools-content-' + path);
+			const toggleIcon = document.getElementById('toggle-tools-' + path);
+			
+			if (!toolsContent) return;
+			
+			if (toolsContent.classList.contains('expanded')) {
+				toolsContent.classList.remove('expanded');
+				if (toggleIcon) toggleIcon.classList.remove('expanded');
+			} else {
+				toolsContent.classList.add('expanded');
+				if (toggleIcon) toggleIcon.classList.add('expanded');
+			}
+		}
+
+		function toggleChildren(path) {
+			const childrenContent = document.getElementById('children-content-' + path);
+			const toggleIcon = document.getElementById('toggle-children-' + path);
+			
+			if (!childrenContent) return;
+			
+			if (childrenContent.classList.contains('expanded')) {
+				childrenContent.classList.remove('expanded');
+				if (toggleIcon) toggleIcon.classList.remove('expanded');
+			} else {
+				childrenContent.classList.add('expanded');
+				if (toggleIcon) toggleIcon.classList.add('expanded');
+			}
+		}
+
+		function renderTree() {
+			const container = document.getElementById('tree-container');
+			if (treeData) {
+				container.innerHTML = renderNode(treeData, true);
+			} else {
+				container.innerHTML = '<p>No tree data available</p>';
+			}
+			calculateStats();
+		}
+
+		function setupSearch() {
+			const searchInput = document.getElementById('search-input');
+			searchInput.addEventListener('input', function(e) {
+				const query = e.target.value.toLowerCase();
+				const nodes = document.querySelectorAll('.tree-node');
+				
+				nodes.forEach(function(node) {
+					const path = node.getAttribute('data-path');
+					const nodeData = nodesData[path] || {};
+					const toolText = (nodeData.tools || []).map(function(t) { return t.name + ' ' + t.description; }).join(' ');
+					const text = (nodeData.title || '') + ' ' + (nodeData.description || '') + ' ' + path + ' ' + toolText;
+					const lowerText = text.toLowerCase();
+					
+					if (lowerText.includes(query)) {
+						node.style.display = '';
+						let current = node.parentElement;
+						while (current) {
+							if (current.classList.contains('children')) {
+								current.style.display = '';
+								current.classList.add('expanded');
+								const parentNode = current.parentElement;
+								if (parentNode && parentNode.classList.contains('tree-node')) {
+									const parentPath = parentNode.getAttribute('data-path');
+									const toggleIcon = document.getElementById('toggle-' + parentPath);
+									if (toggleIcon) toggleIcon.classList.add('expanded');
+									current = parentNode.parentElement;
+								} else {
+									break;
+								}
+							} else {
+								current = current.parentElement;
+							}
+						}
+					} else {
+						node.style.display = 'none';
+					}
+				});
+			});
+		}
+
+		function escapeHtml(text) {
+			const div = document.createElement('div');
+			div.textContent = text;
+			return div.innerHTML;
+		}
+
+		function toggleMarkdown(elementId) {
+			const element = document.getElementById(elementId);
+			if (!element) return;
+
+			const button = element.previousElementSibling;
+			if (!button || !button.classList.contains('markdown-toggle-btn')) {
+				const parent = element.parentElement;
+				const btn = parent.querySelector('.markdown-toggle-btn');
+				if (btn) {
+					toggleMarkdownForElement(element, btn);
+				}
+				return;
+			}
+
+			toggleMarkdownForElement(element, button);
+		}
+
+		function toggleMarkdownForElement(element, button) {
+			if (element.classList.contains('content-plain')) {
+				const content = element.textContent || element.innerText;
+				const markdownHtml = marked.parse(content);
+				element.innerHTML = markdownHtml;
+				element.classList.remove('content-plain');
+				element.classList.add('content-markdown');
+				button.textContent = 'View as Plain Text';
+			} else {
+				const content = element.textContent || element.innerText;
+				element.textContent = content;
+				element.classList.remove('content-markdown');
+				element.classList.add('content-plain');
+				button.textContent = 'View as Markdown';
+			}
+		}
+
+		function copyContent(path, type) {
+			const nodeData = nodesData[path];
+			if (!nodeData || !nodeData.content) return;
+
+			const content = nodeData.content;
+			
+			if (navigator.clipboard && navigator.clipboard.writeText) {
+				navigator.clipboard.writeText(content).then(function() {
+					showCopyFeedback(path, type);
+				}).catch(function(err) {
+					console.error('Failed to copy:', err);
+					fallbackCopyTextToClipboard(content, path, type);
+				});
+			} else {
+				fallbackCopyTextToClipboard(content, path, type);
+			}
+		}
+
+		function fallbackCopyTextToClipboard(text, path, type) {
+			const textArea = document.createElement('textarea');
+			textArea.value = text;
+			textArea.style.position = 'fixed';
+			textArea.style.left = '-999999px';
+			textArea.style.top = '-999999px';
+			document.body.appendChild(textArea);
+			textArea.focus();
+			textArea.select();
+			
+			try {
+				const successful = document.execCommand('copy');
+				if (successful) {
+					showCopyFeedback(path, type);
+				}
+			} catch (err) {
+				console.error('Fallback copy failed:', err);
+			}
+			
+			document.body.removeChild(textArea);
+		}
+
+		function showCopyFeedback(path, type) {
+			const buttons = document.querySelectorAll('.copy-btn');
+			buttons.forEach(function(btn) {
+				if (btn.getAttribute('onclick') && btn.getAttribute('onclick').indexOf(path) !== -1 && btn.getAttribute('onclick').indexOf(type) !== -1) {
+					const originalText = btn.textContent;
+					btn.textContent = '✓ Copied!';
+					btn.style.background = '#28a745';
+					
+					setTimeout(function() {
+						btn.textContent = originalText;
+						btn.style.background = '';
+					}, 2000);
+				}
+			});
+		}
+
+		function showNodeDetail(path) {
+			const nodeData = nodesData[path];
+			if (!nodeData) return;
+
+			const treeView = document.getElementById('tree-view');
+			const detailView = document.getElementById('detail-view');
+			const detailContent = document.getElementById('detail-content');
+
+			treeView.classList.add('hidden');
+			detailView.classList.add('active');
+
+			let html = '';
+
+			html += '<div class="detail-section">' +
+				'<div class="detail-section-title">' + escapeHtml(nodeData.title || nodeData.id || path) + '</div>' +
+				'<div class="detail-field">' +
+				'<div class="detail-field-label">Path:</div>' +
+				'<div class="detail-field-value"><code>' + escapeHtml(path) + '</code></div>' +
+				'</div>' +
+				'<div class="detail-field">' +
+				'<div class="detail-field-label">ID:</div>' +
+				'<div class="detail-field-value"><code>' + escapeHtml(nodeData.id || 'N/A') + '</code></div>' +
+				'</div>' +
+				'</div>';
+
+			if (nodeData.description) {
+				html += '<div class="detail-section">' +
+					'<div class="detail-section-title">Description</div>' +
+					'<div class="detail-field-value">' + escapeHtml(nodeData.description) + '</div>' +
+					'</div>';
+			}
+
+			if (nodeData.content) {
+				const markdownHtml = marked.parse(nodeData.content);
+				html += '<div class="detail-section">' +
+					'<div class="detail-section-title">Content</div>' +
+					'<div class="button-group">' +
+					'<button class="markdown-toggle-btn" onclick="toggleMarkdown(\'content-detail-' + path + '\')">View as Plain Text</button>' +
+					'<button class="copy-btn" onclick="copyContent(\'' + path + '\', \'detail\')">📋 Copy Content</button>' +
+					'</div>' +
+					'<div id="content-detail-' + path + '" class="detail-field-value content-markdown" style="margin-top: 10px;">' +
+					markdownHtml +
+					'</div>' +
+					'</div>';
+			}
+
+			if (nodeData.policy) {
+				html += '<div class="detail-section">' +
+					'<div class="detail-section-title">Policy</div>';
+				
+				if (nodeData.policy.can_advance !== undefined) {
+					html += '<div class="detail-field">' +
+						'<div class="detail-field-label">Can Advance:</div>' +
+						'<div class="detail-field-value">' + (nodeData.policy.can_advance ? 'Yes' : 'No') + '</div>' +
+						'</div>';
+				}
+				
+				if (nodeData.policy.advance_condition) {
+					html += '<div class="detail-field">' +
+						'<div class="detail-field-label">Advance Condition:</div>' +
+						'<div class="detail-field-value"><code>' + escapeHtml(nodeData.policy.advance_condition) + '</code></div>' +
+						'</div>';
+				}
+				
+				if (nodeData.policy.routing_mode) {
+					html += '<div class="detail-field">' +
+						'<div class="detail-field-label">Routing Mode:</div>' +
+						'<div class="detail-field-value"><code>' + escapeHtml(nodeData.policy.routing_mode) + '</code></div>' +
+						'</div>';
+				}
+				
+				if (nodeData.policy.max_open_files) {
+					html += '<div class="detail-field">' +
+						'<div class="detail-field-label">Max Open Files:</div>' +
+						'<div class="detail-field-value">' + nodeData.policy.max_open_files + '</div>' +
+						'</div>';
+				}
+				
+				if (nodeData.policy.children && nodeData.policy.children.length > 0) {
+					html += '<div class="detail-field">' +
+						'<div class="detail-field-label">Policy Children:</div>' +
+						'<div class="detail-field-value"><ul class="children-list">';
+					nodeData.policy.children.forEach(function(child) {
+						html += '<li class="children-list-item">' +
+							'<a href="#" onclick="event.preventDefault(); showNodeDetail(\'' + child + '\'); return false;">' + escapeHtml(child) + '</a>' +
+							'</li>';
+					});
+					html += '</ul></div></div>';
+				}
+				
+				if (nodeData.policy.memory_persist && nodeData.policy.memory_persist.length > 0) {
+					html += '<div class="detail-field">' +
+						'<div class="detail-field-label">Memory Persist:</div>' +
+						'<div class="detail-field-value"><code>' + escapeHtml(nodeData.policy.memory_persist.join(', ')) + '</code></div>' +
+						'</div>';
+				}
+				
+				html += '</div>';
+			}
+
+			if (nodeData.children && nodeData.children.length > 0) {
+				html += '<div class="detail-section">' +
+					'<div class="children-section">' +
+					'<div class="children-title" onclick="toggleChildren(\'' + path + '\')">' +
+					'<span class="toggle-icon" id="toggle-children-' + path + '"></span>' +
+					'<span>👶 Children Nodes (' + nodeData.children.length + ')</span>' +
+					'</div>' +
+					'<div class="children-content" id="children-content-' + path + '">' +
+					'<div class="detail-field-value"><ul class="children-list">';
+				nodeData.children.forEach(function(childPath) {
+					const childData = nodesData[childPath];
+					const childTitle = childData ? (childData.title || childData.id || childPath) : childPath;
+					html += '<li class="children-list-item">' +
+						'<a href="#" onclick="event.preventDefault(); showNodeDetail(\'' + childPath + '\'); return false;">' +
+						escapeHtml(childTitle) + ' <span style="color: #6c757d; font-size: 0.9em;">(' + escapeHtml(childPath) + ')</span>' +
+						'</a>' +
+						'</li>';
+				});
+				html += '</ul></div></div></div></div>';
+			}
+
+			if (nodeData.tools && nodeData.tools.length > 0) {
+				html += '<div class="detail-section">' +
+					'<div class="tools-section">' +
+					'<div class="tools-title" onclick="toggleTools(\'' + path + '\')">' +
+					'<span class="toggle-icon" id="toggle-tools-' + path + '"></span>' +
+					'<span>🔧 Tools (' + nodeData.tools.length + ')</span>' +
+					'</div>' +
+					'<div class="tools-content" id="tools-content-' + path + '">';
+				
+				nodeData.tools.forEach(function(tool, index) {
+					html += '<div class="detail-field" style="margin-bottom: 25px;">' +
+						'<div class="detail-field-label">' + (index + 1) + '. ' + escapeHtml(tool.name) + '</div>' +
+						'<div class="detail-field-value">' +
+						'<div style="margin-bottom: 10px;"><strong>Description:</strong> ' + escapeHtml(tool.description || 'N/A') + '</div>';
+					
+					if (tool.status) {
+						html += '<div style="margin-bottom: 10px;"><strong>Status:</strong> <code>' + escapeHtml(tool.status) + '</code></div>';
+					}
+					
+					if (tool.input_schema) {
+						html += '<div><strong>Input Schema:</strong>' +
+							'<pre class="json-viewer">' + JSON.stringify(tool.input_schema, null, 2) + '</pre>' +
+							'</div>';
+					}
+					
+					html += '</div></div>';
+				});
+				
+				html += '</div></div></div>';
+			}
+
+			detailContent.innerHTML = html;
+			window.location.hash = 'node-' + encodeURIComponent(path);
+		}
+
+		function showTreeView() {
+			const treeView = document.getElementById('tree-view');
+			const detailView = document.getElementById('detail-view');
+
+			treeView.classList.remove('hidden');
+			detailView.classList.remove('active');
+			window.location.hash = '';
+		}
+
+		window.addEventListener('hashchange', function() {
+			const hash = window.location.hash;
+			if (hash && hash.startsWith('#node-')) {
+				const path = decodeURIComponent(hash.substring(6));
+				showNodeDetail(path);
+			} else {
+				showTreeView();
+			}
+		});
+
+		renderTree();
+		setupSearch();
+		
+		if (window.location.hash && window.location.hash.startsWith('#node-')) {
+			const path = decodeURIComponent(window.location.hash.substring(6));
+			showNodeDetail(path);
+		}
+	</script>
+}
+

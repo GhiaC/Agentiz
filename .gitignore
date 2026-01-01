@@ -29,3 +29,6 @@ go.work
 Thumbs.db
 bin/
 
+# Templ generated files
+*_templ.go
+
