@@ -18,17 +18,16 @@ func TestGenerateHTML(t *testing.T) {
 			Title:       "Test Root Node",
 			Description: "This is a test root node",
 			Content:     "# Test Root\n\nThis is test content.",
-			Policy: model.Policy{
-				CanAdvance:       true,
-				AdvanceCondition: "next",
-				MaxOpenFiles:     10,
-				Routing: model.Routing{
-					Mode:     "sequential",
-					Children: []string{"child1"},
+			Auth: model.Auth{
+				Users: map[string]*model.Permissions{
+					"test": {
+						Perms: "rwxsdg",
+					},
 				},
-				Memory: model.Memory{
-					Persist: []string{"summary"},
-				},
+			},
+			Routing: model.Routing{
+				Mode:     "sequential",
+				Children: []string{"child1"},
 			},
 			Tools: []model.Tool{
 				{
@@ -52,11 +51,11 @@ func TestGenerateHTML(t *testing.T) {
 			Title:       "Child Node",
 			Description: "A child node",
 			Content:     "# Child\n\nChild content.",
-			Policy: model.Policy{
-				CanAdvance: false,
-				Routing: model.Routing{
-					Mode: "sequential",
-				},
+			Auth: model.Auth{
+				Users: map[string]*model.Permissions{},
+			},
+			Routing: model.Routing{
+				Mode: "sequential",
 			},
 			Tools: []model.Tool{},
 		},
@@ -153,11 +152,11 @@ func TestGenerateHTMLWithEmptyData(t *testing.T) {
 			Path:  "root",
 			ID:    "root",
 			Title: "Empty Root",
-			Policy: model.Policy{
-				CanAdvance: false,
-				Routing: model.Routing{
-					Mode: "sequential",
-				},
+			Auth: model.Auth{
+				Users: map[string]*model.Permissions{},
+			},
+			Routing: model.Routing{
+				Mode: "sequential",
 			},
 		},
 	}
@@ -192,11 +191,11 @@ func TestGenerateHTMLWithSpecialCharacters(t *testing.T) {
 			Title:       "Node with \"quotes\" and <tags>",
 			Description: "Description with 'single' and \"double\" quotes",
 			Content:     "Content with `backticks` and <script>alert('xss')</script>",
-			Policy: model.Policy{
-				CanAdvance: false,
-				Routing: model.Routing{
-					Mode: "sequential",
-				},
+			Auth: model.Auth{
+				Users: map[string]*model.Permissions{},
+			},
+			Routing: model.Routing{
+				Mode: "sequential",
 			},
 		},
 	}

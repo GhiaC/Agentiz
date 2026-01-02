@@ -93,14 +93,17 @@ func createNewExampleKnowledgeTree() string {
 	yamlContent := `id: "root"
 title: "Root Node"
 description: "This is the root of the knowledge tree"
-policy:
-  can_advance: true
-  advance_condition: "proceed"
-  max_open_files: 20
+auth:
+  users:
+    - user_id: "default"
+      can_edit: true
+      can_read: true
+      can_access_next: true
+      can_see: true
+      visible_in_docs: true
+      visible_in_graph: true
 routing:
   mode: "sequential"
-memory:
-  persist: ["summary", "facts"]
 `
 	os.WriteFile(filepath.Join(rootPath, "node.yaml"), []byte(yamlContent), 0644)
 
@@ -137,9 +140,15 @@ This is the root node of the knowledge tree. It contains initial instructions an
 	nextYaml := `id: "next"
 title: "Next Node"
 description: "Second level node"
-policy:
-  can_advance: false
-  max_open_files: 20
+auth:
+  users:
+    - user_id: "default"
+      can_edit: true
+      can_read: true
+      can_access_next: false
+      can_see: true
+      visible_in_docs: true
+      visible_in_graph: true
 routing:
   mode: "sequential"
 `

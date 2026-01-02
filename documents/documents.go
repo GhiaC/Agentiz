@@ -26,7 +26,8 @@ type NodeDocument struct {
 	Content     string   `json:"content,omitempty"`
 	Children    []string `json:"children,omitempty"`
 	Tools       []Tool   `json:"tools,omitempty"`
-	Policy      Policy   `json:"policy,omitempty"`
+	Auth        Auth     `json:"auth,omitempty"`
+	Routing     Routing  `json:"routing,omitempty"`
 }
 
 // Tool represents a tool definition
@@ -37,14 +38,26 @@ type Tool struct {
 	Status      string                 `json:"status,omitempty"`
 }
 
-// Policy represents node policy
-type Policy struct {
-	CanAdvance       bool     `json:"can_advance"`
-	AdvanceCondition string   `json:"advance_condition,omitempty"`
-	MaxOpenFiles     int      `json:"max_open_files,omitempty"`
-	RoutingMode      string   `json:"routing_mode,omitempty"`
-	Children         []string `json:"children,omitempty"`
-	MemoryPersist    []string `json:"memory_persist,omitempty"`
+// Auth represents node authentication/authorization
+type Auth struct {
+	Users []UserPermissions `json:"users,omitempty"`
+}
+
+// UserPermissions represents permissions for a user
+type UserPermissions struct {
+	UserID         string `json:"user_id"`
+	CanEdit        bool   `json:"can_edit"`
+	CanRead        bool   `json:"can_read"`
+	CanAccessNext  bool   `json:"can_access_next"`
+	CanSee         bool   `json:"can_see"`
+	VisibleInDocs  bool   `json:"visible_in_docs"`
+	VisibleInGraph bool   `json:"visible_in_graph"`
+}
+
+// Routing represents routing configuration
+type Routing struct {
+	Mode     string   `json:"mode,omitempty"`
+	Children []string `json:"children,omitempty"`
 }
 
 // TreeNode represents a node in the tree structure
@@ -68,6 +81,23 @@ func NewAgentizeDocument(nodes map[string]*model.Node, getChildren func(string) 
 	for path, node := range nodes {
 		children, _ := getChildren(path)
 
+		// Convert auth users from map[string]*Permissions to UserPermissions slice
+		authUsers := make([]UserPermissions, 0, len(node.Auth.Users))
+		for userID, perms := range node.Auth.Users {
+			if perms == nil {
+				continue
+			}
+			authUsers = append(authUsers, UserPermissions{
+				UserID:         userID,
+				CanEdit:        perms.HasPermission('w'),
+				CanRead:        perms.HasPermission('r'),
+				CanAccessNext:  perms.HasPermission('x'),
+				CanSee:         perms.HasPermission('s'),
+				VisibleInDocs:  perms.HasPermission('d'),
+				VisibleInGraph: perms.HasPermission('g'),
+			})
+		}
+
 		nodeDoc := &NodeDocument{
 			Path:        path,
 			ID:          node.ID,
@@ -75,13 +105,12 @@ func NewAgentizeDocument(nodes map[string]*model.Node, getChildren func(string) 
 			Description: node.Description,
 			Content:     node.Content,
 			Children:    children,
-			Policy: Policy{
-				CanAdvance:       node.Policy.CanAdvance,
-				AdvanceCondition: node.Policy.AdvanceCondition,
-				MaxOpenFiles:     node.Policy.MaxOpenFiles,
-				RoutingMode:      node.Policy.Routing.Mode,
-				Children:         node.Policy.Routing.Children,
-				MemoryPersist:    node.Policy.Memory.Persist,
+			Auth: Auth{
+				Users: authUsers,
+			},
+			Routing: Routing{
+				Mode:     node.Routing.Mode,
+				Children: node.Routing.Children,
 			},
 		}
 

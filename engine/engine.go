@@ -133,8 +133,8 @@ func (e *Engine) Advance(sessionID string) (*model.Session, error) {
 		return nil, fmt.Errorf("failed to load current node: %w", err)
 	}
 
-	if !currentNode.Policy.CanAdvance {
-		return nil, fmt.Errorf("advance not allowed for node: %s", session.CurrentNodePath)
+	if !currentNode.CanUserAccessNextSimple(session.UserID) {
+		return nil, fmt.Errorf("advance not allowed for user %s at node: %s", session.UserID, session.CurrentNodePath)
 	}
 
 	// Get children nodes
@@ -208,7 +208,7 @@ func (e *Engine) Step(sessionID string, userInput string) (*StepOutput, error) {
 
 	// Rule-based decision making
 	// Check if user wants to advance
-	if e.shouldAdvance(userInput, currentNode) {
+	if e.shouldAdvance(userInput, currentNode, session.UserID) {
 		children, err := e.repo.GetChildren(session.CurrentNodePath)
 		if err == nil && len(children) > 0 {
 			output.Action = "advance"
@@ -308,23 +308,24 @@ func (e *Engine) createToolExecutor(sessionID string) ToolExecutor {
 	}
 }
 
-// shouldAdvance determines if the session should advance based on user input and policy
-func (e *Engine) shouldAdvance(userInput string, node *model.Node) bool {
-	if !node.Policy.CanAdvance {
+// shouldAdvance determines if the session should advance based on user input and auth
+func (e *Engine) shouldAdvance(userInput string, node *model.Node, userID string) bool {
+	if !node.CanUserAccessNextSimple(userID) {
 		return false
 	}
 
-	// If no condition specified, don't auto-advance
-	if node.Policy.AdvanceCondition == "" {
-		return false
-	}
-
-	// Simple keyword matching for MVP
+	// For now, we don't have advance condition in Auth, so we'll check user input
+	// Simple keyword matching for MVP - check for common advance keywords
 	lowerInput := strings.ToLower(userInput)
-	lowerCondition := strings.ToLower(node.Policy.AdvanceCondition)
-
-	// Check if condition appears in input
-	return strings.Contains(lowerInput, lowerCondition)
+	advanceKeywords := []string{"next", "continue", "proceed", "advance", "go"}
+	
+	for _, keyword := range advanceKeywords {
+		if strings.Contains(lowerInput, keyword) {
+			return true
+		}
+	}
+	
+	return false
 }
 
 // Context represents the current context of a session

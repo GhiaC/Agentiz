@@ -72,20 +72,17 @@ func (r *NodeRepository) LoadNode(path string) (*model.Node, error) {
 		node.ID = meta.ID
 		node.Title = meta.Title
 		node.Description = meta.Description
-		node.Policy = meta.Policy
+		node.Auth = meta.Auth
+		node.Routing = meta.Routing
 	} else {
 		// Use defaults if node.yaml doesn't exist
 		node.ID = path
-		node.Policy = model.Policy{
-			CanAdvance:       true,
-			AdvanceCondition: "",
-			MaxOpenFiles:     20,
-			Routing: model.Routing{
-				Mode: "sequential",
-			},
-			Memory: model.Memory{
-				Persist: []string{},
-			},
+		node.Auth = model.Auth{
+			Inherit: true,
+			Users:   make(map[string]*model.Permissions),
+		}
+		node.Routing = model.Routing{
+			Mode: "sequential",
 		}
 	}
 
@@ -127,8 +124,8 @@ func (r *NodeRepository) GetChildren(path string) ([]string, error) {
 	var children []string
 
 	// If Routing.Children is specified, use those names
-	if len(node.Policy.Routing.Children) > 0 {
-		for _, childName := range node.Policy.Routing.Children {
+	if len(node.Routing.Children) > 0 {
+		for _, childName := range node.Routing.Children {
 			childPath := filepath.Join(fullPath, childName)
 			if info, err := os.Stat(childPath); err == nil && info.IsDir() {
 				if path == "root" {

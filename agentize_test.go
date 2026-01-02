@@ -122,10 +122,15 @@ func createTestKnowledgeTree(t *testing.T) string {
 	yamlContent := `id: "root"
 title: "Test Root"
 description: "Test description"
-policy:
-  can_advance: true
-  advance_condition: "next"
-  max_open_files: 10
+auth:
+  users:
+    - user_id: "test"
+      can_edit: true
+      can_read: true
+      can_access_next: true
+      can_see: true
+      visible_in_docs: true
+      visible_in_graph: true
 routing:
   mode: "sequential"
 `

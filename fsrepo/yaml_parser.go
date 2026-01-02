@@ -18,9 +18,15 @@ func parseYAML(data []byte, v interface{}) error {
 	}
 
 	var currentSection string
-	var policyStarted bool
+	var authStarted bool
 	var routingStarted bool
-	var memoryStarted bool
+	var currentUserID string
+	var currentPerms *model.Permissions
+
+	// Initialize Users map if nil
+	if meta.Auth.Users == nil {
+		meta.Auth.Users = make(map[string]*model.Permissions)
+	}
 
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
@@ -32,23 +38,30 @@ func parseYAML(data []byte, v interface{}) error {
 		if strings.HasSuffix(line, ":") {
 			section := strings.TrimSuffix(line, ":")
 			currentSection = strings.TrimSpace(section)
-			if currentSection == "policy" {
-				policyStarted = true
+			if currentSection == "auth" {
+				authStarted = true
 				routingStarted = false
-				memoryStarted = false
+				currentUserID = ""
+				currentPerms = nil
 			} else if currentSection == "routing" {
 				routingStarted = true
-				policyStarted = false
-				memoryStarted = false
-			} else if currentSection == "memory" {
-				memoryStarted = true
-				policyStarted = false
-				routingStarted = false
+				authStarted = false
+				currentUserID = ""
+				currentPerms = nil
+			} else if authStarted && !strings.Contains(section, ":") {
+				// This might be a user ID (quoted or unquoted)
+				userID := strings.Trim(section, `"'`)
+				if userID != "" {
+					currentUserID = userID
+					currentPerms = &model.Permissions{}
+					meta.Auth.Users[currentUserID] = currentPerms
+				}
 			} else {
 				// Reset all flags for other sections
-				policyStarted = false
+				authStarted = false
 				routingStarted = false
-				memoryStarted = false
+				currentUserID = ""
+				currentPerms = nil
 			}
 			continue
 		}
@@ -58,7 +71,7 @@ func parseYAML(data []byte, v interface{}) error {
 			childName := strings.TrimSpace(strings.TrimPrefix(line, "-"))
 			childName = strings.Trim(childName, `"'`)
 			if childName != "" {
-				meta.Policy.Routing.Children = append(meta.Policy.Routing.Children, childName)
+				meta.Routing.Children = append(meta.Routing.Children, childName)
 			}
 			continue
 		}
@@ -80,37 +93,46 @@ func parseYAML(data []byte, v interface{}) error {
 				meta.Title = value
 			case key == "description":
 				meta.Description = value
-			case policyStarted:
+			case key == "inherit" && authStarted:
+				meta.Auth.Inherit = parseBool(value)
+			case currentPerms != nil && currentUserID != "":
+				// Parse user permissions
 				switch key {
-				case "can_advance":
-					meta.Policy.CanAdvance = parseBool(value)
-				case "advance_condition":
-					meta.Policy.AdvanceCondition = value
-				case "max_open_files":
-					meta.Policy.MaxOpenFiles = parseInt(value, 20)
+				case "perms":
+					currentPerms.Perms = value
+				case "read":
+					b := parseBool(value)
+					currentPerms.Read = &b
+				case "write":
+					b := parseBool(value)
+					currentPerms.Write = &b
+				case "execute":
+					b := parseBool(value)
+					currentPerms.Execute = &b
+				case "see":
+					b := parseBool(value)
+					currentPerms.See = &b
+				case "visible_docs":
+					b := parseBool(value)
+					currentPerms.VisibleDocs = &b
+				case "visible_graph":
+					b := parseBool(value)
+					currentPerms.VisibleGraph = &b
 				}
 			case routingStarted:
 				if key == "mode" {
-					meta.Policy.Routing.Mode = value
+					meta.Routing.Mode = value
 				} else if key == "children" {
 					// Children is an array - parse it
-					meta.Policy.Routing.Children = parseStringArray(value)
-				}
-			case memoryStarted:
-				if key == "persist" {
-					// Parse array: ["summary", "facts"]
-					meta.Policy.Memory.Persist = parseStringArray(value)
+					meta.Routing.Children = parseStringArray(value)
 				}
 			}
 		}
 	}
 
 	// Set defaults if not specified
-	if meta.Policy.Routing.Mode == "" {
-		meta.Policy.Routing.Mode = "sequential"
-	}
-	if meta.Policy.MaxOpenFiles == 0 {
-		meta.Policy.MaxOpenFiles = 20
+	if meta.Routing.Mode == "" {
+		meta.Routing.Mode = "sequential"
 	}
 
 	return nil

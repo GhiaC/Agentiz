@@ -47,14 +47,17 @@ func createGraphExampleKnowledgeTree() string {
 	yamlContent := `id: "root"
 title: "Root Node"
 description: "This is the root of the knowledge tree"
-policy:
-  can_advance: true
-  advance_condition: "proceed"
-  max_open_files: 20
+auth:
+  users:
+    - user_id: "default"
+      can_edit: true
+      can_read: true
+      can_access_next: true
+      can_see: true
+      visible_in_docs: true
+      visible_in_graph: true
 routing:
   mode: "sequential"
-memory:
-  persist: ["summary", "facts"]
 `
 	os.WriteFile(filepath.Join(rootPath, "node.yaml"), []byte(yamlContent), 0644)
 
@@ -104,10 +107,15 @@ This is the root node of the knowledge tree.
 	nextYaml := `id: "second_level"
 title: "Second Level"
 description: "Second level node"
-policy:
-  can_advance: true
-  advance_condition: "continue"
-  max_open_files: 15
+auth:
+  users:
+    - user_id: "default"
+      can_edit: true
+      can_read: true
+      can_access_next: true
+      can_see: true
+      visible_in_docs: true
+      visible_in_graph: true
 routing:
   mode: "sequential"
 `
@@ -146,9 +154,15 @@ Second level content.
 	thirdYaml := `id: "third_level"
 title: "Third Level"
 description: "Final level"
-policy:
-  can_advance: false
-  max_open_files: 10
+auth:
+  users:
+    - user_id: "default"
+      can_edit: true
+      can_read: true
+      can_access_next: false
+      can_see: true
+      visible_in_docs: true
+      visible_in_graph: true
 routing:
   mode: "sequential"
 `

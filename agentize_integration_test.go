@@ -103,11 +103,8 @@ func TestFullKnowledgeTreeIntegration(t *testing.T) {
 		if root.Description != "This is the main entry point" {
 			t.Errorf("Root description mismatch: got '%s'", root.Description)
 		}
-		if !root.Policy.CanAdvance {
-			t.Error("Root should allow advance")
-		}
-		if root.Policy.AdvanceCondition != "continue" {
-			t.Errorf("Expected advance condition 'continue', got '%s'", root.Policy.AdvanceCondition)
+		if !root.CanUserAccessNextSimple("test") {
+			t.Error("Root should allow advance for test user")
 		}
 
 		// Test second level node
@@ -133,8 +130,8 @@ func TestFullKnowledgeTreeIntegration(t *testing.T) {
 		if third.Title != "Third Level" {
 			t.Errorf("Expected title 'Third Level', got '%s'", third.Title)
 		}
-		if third.Policy.CanAdvance {
-			t.Error("Third level should not allow advance")
+		if third.CanUserAccessNextSimple("test") {
+			t.Error("Third level should not allow advance for test user")
 		}
 		if len(third.Tools) != 2 {
 			t.Errorf("Expected 2 tools in third node, got %d", len(third.Tools))
@@ -318,14 +315,17 @@ func createFullKnowledgeTree(t *testing.T) string {
 	rootYAML := `id: "root"
 title: "Main Entry Point"
 description: "This is the main entry point"
-policy:
-  can_advance: true
-  advance_condition: "continue"
-  max_open_files: 20
+auth:
+  users:
+    - user_id: "test"
+      can_edit: true
+      can_read: true
+      can_access_next: true
+      can_see: true
+      visible_in_docs: true
+      visible_in_graph: true
 routing:
   mode: "sequential"
-memory:
-  persist: ["summary", "facts", "decisions"]
 `
 	os.WriteFile(filepath.Join(rootPath, "node.yaml"), []byte(rootYAML), 0644)
 
@@ -393,14 +393,17 @@ Welcome to the knowledge tree. This is where everything begins.
 	nextYAML := `id: "second_level"
 title: "Second Level"
 description: "Second level of the knowledge tree"
-policy:
-  can_advance: true
-  advance_condition: "proceed"
-  max_open_files: 15
+auth:
+  users:
+    - user_id: "test"
+      can_edit: true
+      can_read: true
+      can_access_next: true
+      can_see: true
+      visible_in_docs: true
+      visible_in_graph: true
 routing:
   mode: "sequential"
-memory:
-  persist: ["summary"]
 `
 	os.WriteFile(filepath.Join(nextPath, "node.yaml"), []byte(nextYAML), 0644)
 
@@ -451,13 +454,17 @@ Continue when you're ready to dive deeper.
 	thirdYAML := `id: "third_level"
 title: "Third Level"
 description: "Deep dive into advanced topics"
-policy:
-  can_advance: false
-  max_open_files: 10
+auth:
+  users:
+    - user_id: "test"
+      can_edit: true
+      can_read: true
+      can_access_next: false
+      can_see: true
+      visible_in_docs: true
+      visible_in_graph: true
 routing:
   mode: "sequential"
-memory:
-  persist: []
 `
 	os.WriteFile(filepath.Join(thirdPath, "node.yaml"), []byte(thirdYAML), 0644)
 
@@ -519,13 +526,17 @@ This is the deepest level before the final stage.
 	fourthYAML := `id: "final_level"
 title: "Final Level"
 description: "The final destination"
-policy:
-  can_advance: false
-  max_open_files: 5
+auth:
+  users:
+    - user_id: "test"
+      can_edit: true
+      can_read: true
+      can_access_next: false
+      can_see: true
+      visible_in_docs: true
+      visible_in_graph: true
 routing:
   mode: "sequential"
-memory:
-  persist: ["final_summary"]
 `
 	os.WriteFile(filepath.Join(fourthPath, "node.yaml"), []byte(fourthYAML), 0644)
 

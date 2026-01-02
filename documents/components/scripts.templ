@@ -365,51 +365,39 @@ templ scripts(treeData, nodesData string) {
 					'</div>';
 			}
 
-			if (nodeData.policy) {
+			if (nodeData.auth && nodeData.auth.users && nodeData.auth.users.length > 0) {
 				html += '<div class="detail-section">' +
-					'<div class="detail-section-title">Policy</div>';
+					'<div class="detail-section-title">Auth</div>';
 				
-				if (nodeData.policy.can_advance !== undefined) {
-					html += '<div class="detail-field">' +
-						'<div class="detail-field-label">Can Advance:</div>' +
-						'<div class="detail-field-value">' + (nodeData.policy.can_advance ? 'Yes' : 'No') + '</div>' +
+				nodeData.auth.users.forEach(function(user) {
+					html += '<div class="detail-field" style="margin-bottom: 15px; padding: 10px; background-color: #f9f9f9; border-radius: 4px;">' +
+						'<div class="detail-field-label" style="font-weight: bold; margin-bottom: 5px;">User: ' + escapeHtml(user.user_id) + '</div>' +
+						'<div class="detail-field-value" style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 5px;">' +
+						'<div>Can Edit: ' + (user.can_edit ? 'Yes' : 'No') + '</div>' +
+						'<div>Can Read: ' + (user.can_read ? 'Yes' : 'No') + '</div>' +
+						'<div>Can Access Next: ' + (user.can_access_next ? 'Yes' : 'No') + '</div>' +
+						'<div>Can See: ' + (user.can_see ? 'Yes' : 'No') + '</div>' +
+						'<div>Visible in Docs: ' + (user.visible_in_docs ? 'Yes' : 'No') + '</div>' +
+						'<div>Visible in Graph: ' + (user.visible_in_graph ? 'Yes' : 'No') + '</div>' +
+						'</div>' +
 						'</div>';
-				}
-				
-				if (nodeData.policy.advance_condition) {
-					html += '<div class="detail-field">' +
-						'<div class="detail-field-label">Advance Condition:</div>' +
-						'<div class="detail-field-value"><code>' + escapeHtml(nodeData.policy.advance_condition) + '</code></div>' +
-						'</div>';
-				}
-				
-				if (nodeData.policy.max_open_files) {
-					html += '<div class="detail-field">' +
-						'<div class="detail-field-label">Max Open Files:</div>' +
-						'<div class="detail-field-value">' + nodeData.policy.max_open_files + '</div>' +
-						'</div>';
-				}
-				
-				if (nodeData.policy.children && nodeData.policy.children.length > 0) {
-					html += '<div class="detail-field">' +
-						'<div class="detail-field-label">Policy Children:</div>' +
-						'<div class="detail-field-value"><ul class="children-list">';
-					nodeData.policy.children.forEach(function(child) {
-						html += '<li class="children-list-item">' +
-							'<a href="#" onclick="event.preventDefault(); showNodeDetail(\'' + child + '\'); return false;">' + escapeHtml(child) + '</a>' +
-							'</li>';
-					});
-					html += '</ul></div></div>';
-				}
-				
-				if (nodeData.policy.memory_persist && nodeData.policy.memory_persist.length > 0) {
-					html += '<div class="detail-field">' +
-						'<div class="detail-field-label">Memory Persist:</div>' +
-						'<div class="detail-field-value"><code>' + escapeHtml(nodeData.policy.memory_persist.join(', ')) + '</code></div>' +
-						'</div>';
-				}
+				});
 				
 				html += '</div>';
+			}
+			
+			if (nodeData.routing && nodeData.routing.children && nodeData.routing.children.length > 0) {
+				html += '<div class="detail-section">' +
+					'<div class="detail-section-title">Routing Children</div>' +
+					'<div class="detail-field">' +
+					'<div class="detail-field-label">Children:</div>' +
+					'<div class="detail-field-value"><ul class="children-list">';
+				nodeData.routing.children.forEach(function(child) {
+					html += '<li class="children-list-item">' +
+						'<a href="#" onclick="event.preventDefault(); showNodeDetail(\'' + child + '\'); return false;">' + escapeHtml(child) + '</a>' +
+						'</li>';
+				});
+				html += '</ul></div></div></div>';
 			}
 
 			if (nodeData.children && nodeData.children.length > 0) {

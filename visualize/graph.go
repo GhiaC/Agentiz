@@ -125,7 +125,16 @@ func (gv *GraphVisualizer) convertNodes() []opts.GraphNode {
 		tooltip := fmt.Sprintf("Path: %s\nTitle: %s\nDescription: %s\nTools: %d",
 			path, node.Title, node.Description, toolCount)
 
-		if !node.Policy.CanAdvance {
+		// Check if any user can access next (for display purposes)
+		canAdvance := len(node.Auth.Users) == 0 || func() bool {
+			for _, perms := range node.Auth.Users {
+				if perms != nil && perms.HasPermission('x') {
+					return true
+				}
+			}
+			return false
+		}()
+		if !canAdvance {
 			tooltip += "\n⚠ Cannot advance"
 		}
 
@@ -248,7 +257,16 @@ func (gv *GraphVisualizer) getNodeCategory(n *model.Node) int {
 		return 0
 	}
 
-	if !n.Policy.CanAdvance {
+	// Check if any user can access next
+	canAdvance := len(n.Auth.Users) == 0 || func() bool {
+		for _, perms := range n.Auth.Users {
+			if perms != nil && perms.HasPermission('x') {
+				return true
+			}
+		}
+		return false
+	}()
+	if !canAdvance {
 		return 2
 	}
 
@@ -306,7 +324,15 @@ func (gv *GraphVisualizer) calculateNodeSize(node *model.Node) float32 {
 	}
 
 	// Leaf nodes are slightly smaller
-	if !node.Policy.CanAdvance {
+	canAdvance := len(node.Auth.Users) == 0 || func() bool {
+		for _, perms := range node.Auth.Users {
+			if perms != nil && perms.HasPermission('x') {
+				return true
+			}
+		}
+		return false
+	}()
+	if !canAdvance {
 		return float32(baseSize) + toolSize
 	}
 
@@ -348,7 +374,7 @@ type nodeData struct {
 	Content     string                 `json:"content"`
 	CanAdvance  bool                   `json:"can_advance"`
 	Tools       []toolData             `json:"tools"`
-	Policy      map[string]interface{} `json:"policy"`
+	Auth        map[string]interface{} `json:"auth"`
 }
 
 type toolData struct {
@@ -377,14 +403,34 @@ func (gv *GraphVisualizer) prepareNodeData() map[string]nodeData {
 			}
 		}
 
-		policy := map[string]interface{}{
-			"can_advance":       node.Policy.CanAdvance,
-			"advance_condition": node.Policy.AdvanceCondition,
-			"max_open_files":    node.Policy.MaxOpenFiles,
-			"routing_mode":      node.Policy.Routing.Mode,
-			"routing_children":  node.Policy.Routing.Children,
-			"memory_persist":    node.Policy.Memory.Persist,
+		// Build auth data
+		authData := map[string]interface{}{
+			"users": make([]map[string]interface{}, 0),
 		}
+		for userID, perms := range node.Auth.Users {
+			if perms == nil {
+				continue
+			}
+			authData["users"] = append(authData["users"].([]map[string]interface{}), map[string]interface{}{
+				"user_id":          userID,
+				"can_edit":         perms.HasPermission('w'),
+				"can_read":         perms.HasPermission('r'),
+				"can_access_next":  perms.HasPermission('x'),
+				"can_see":          perms.HasPermission('s'),
+				"visible_in_docs":  perms.HasPermission('d'),
+				"visible_in_graph": perms.HasPermission('g'),
+			})
+		}
+
+		// Check if any user can access next
+		canAdvance := len(node.Auth.Users) == 0 || func() bool {
+			for _, perms := range node.Auth.Users {
+				if perms != nil && perms.HasPermission('x') {
+					return true
+				}
+			}
+			return false
+		}()
 
 		data[nodeName] = nodeData{
 			Path:        path,
@@ -392,9 +438,9 @@ func (gv *GraphVisualizer) prepareNodeData() map[string]nodeData {
 			Title:       node.Title,
 			Description: node.Description,
 			Content:     node.Content,
-			CanAdvance:  node.Policy.CanAdvance,
+			CanAdvance:  canAdvance,
 			Tools:       tools,
-			Policy:      policy,
+			Auth:        authData,
 		}
 	}
 
@@ -636,11 +682,11 @@ function showNodeDetails(nodeName) {
 		html += '</div>';
 	}
 
-	// Policy
-	if (data.policy) {
+	// Auth
+	if (data.auth) {
 		html += '<div class="node-modal-section">';
-		html += '<div class="node-modal-section-title">Policy</div>';
-		html += '<div class="node-modal-policy">' + escapeHtml(formatJson(data.policy)) + '</div>';
+		html += '<div class="node-modal-section-title">Auth</div>';
+		html += '<div class="node-modal-policy">' + escapeHtml(formatJson(data.auth)) + '</div>';
 		html += '</div>';
 	}
 
