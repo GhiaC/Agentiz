@@ -385,20 +385,6 @@ templ scripts(treeData, nodesData string) {
 				
 				html += '</div>';
 			}
-			
-			if (nodeData.routing && nodeData.routing.children && nodeData.routing.children.length > 0) {
-				html += '<div class="detail-section">' +
-					'<div class="detail-section-title">Routing Children</div>' +
-					'<div class="detail-field">' +
-					'<div class="detail-field-label">Children:</div>' +
-					'<div class="detail-field-value"><ul class="children-list">';
-				nodeData.routing.children.forEach(function(child) {
-					html += '<li class="children-list-item">' +
-						'<a href="#" onclick="event.preventDefault(); showNodeDetail(\'' + child + '\'); return false;">' + escapeHtml(child) + '</a>' +
-						'</li>';
-				});
-				html += '</ul></div></div></div>';
-			}
 
 			if (nodeData.children && nodeData.children.length > 0) {
 				html += '<div class="detail-section">' +

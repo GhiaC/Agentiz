@@ -17,14 +17,14 @@ type Node struct {
 	// Auth contains user access control rules
 	Auth Auth
 
-	// Routing defines how navigation works
-	Routing Routing
-
 	// Content is the markdown content from node.md
 	Content string
 
 	// Tools are the tools defined at this node level
 	Tools []Tool
+
+	// MCP is a list of MCP servers that this node can connect to
+	MCP []MCP
 
 	// Metadata
 	LoadedAt time.Time
@@ -155,12 +155,6 @@ const (
 	PermVisibleGraph = 'g' // Visible in graph
 )
 
-// Routing defines how navigation works
-type Routing struct {
-	Mode     string   `yaml:"mode"`     // "sequential" for now
-	Children []string `yaml:"children"` // List of child node names (instead of "next")
-}
-
 // ToolStatus represents the status of a tool
 type ToolStatus string
 
@@ -212,11 +206,11 @@ type Tool struct {
 
 // NodeMeta is the parsed structure from node.yaml
 type NodeMeta struct {
-	ID          string  `yaml:"id"`
-	Title       string  `yaml:"title"`
-	Description string  `yaml:"description"`
-	Auth        Auth    `yaml:"auth"`
-	Routing     Routing `yaml:"routing"`
+	ID          string `yaml:"id"`
+	Title       string `yaml:"title"`
+	Description string `yaml:"description"`
+	Auth        Auth   `yaml:"auth"`
+	MCP         []MCP  `yaml:"mcp,omitempty"`
 }
 
 // ResolvePermissions resolves permissions for a user, considering inheritance

@@ -73,16 +73,13 @@ func (r *NodeRepository) LoadNode(path string) (*model.Node, error) {
 		node.Title = meta.Title
 		node.Description = meta.Description
 		node.Auth = meta.Auth
-		node.Routing = meta.Routing
+		node.MCP = meta.MCP
 	} else {
 		// Use defaults if node.yaml doesn't exist
 		node.ID = path
 		node.Auth = model.Auth{
 			Inherit: true,
 			Users:   make(map[string]*model.Permissions),
-		}
-		node.Routing = model.Routing{
-			Mode: "sequential",
 		}
 	}
 
@@ -111,34 +108,13 @@ func (r *NodeRepository) LoadNode(path string) (*model.Node, error) {
 }
 
 // GetChildren returns all child nodes for a given path
-// It checks both the Routing.Children field and scans the directory for subdirectories
+// It scans the directory for subdirectories
 func (r *NodeRepository) GetChildren(path string) ([]string, error) {
 	fullPath := filepath.Join(r.rootPath, path)
 
-	// Load node to check Routing.Children
-	node, err := r.LoadNode(path)
-	if err != nil {
-		return nil, err
-	}
-
 	var children []string
 
-	// If Routing.Children is specified, use those names
-	if len(node.Routing.Children) > 0 {
-		for _, childName := range node.Routing.Children {
-			childPath := filepath.Join(fullPath, childName)
-			if info, err := os.Stat(childPath); err == nil && info.IsDir() {
-				if path == "root" {
-					children = append(children, "root/"+childName)
-				} else {
-					children = append(children, path+"/"+childName)
-				}
-			}
-		}
-		return children, nil
-	}
-
-	// Otherwise, scan directory for all subdirectories (excluding special files)
+	// Scan directory for all subdirectories (excluding special files)
 	entries, err := os.ReadDir(fullPath)
 	if err != nil {
 		return nil, err

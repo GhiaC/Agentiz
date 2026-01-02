@@ -25,10 +25,6 @@ func TestGenerateHTML(t *testing.T) {
 					},
 				},
 			},
-			Routing: model.Routing{
-				Mode:     "sequential",
-				Children: []string{"child1"},
-			},
 			Tools: []model.Tool{
 				{
 					Name:        "test_tool",
@@ -53,9 +49,6 @@ func TestGenerateHTML(t *testing.T) {
 			Content:     "# Child\n\nChild content.",
 			Auth: model.Auth{
 				Users: map[string]*model.Permissions{},
-			},
-			Routing: model.Routing{
-				Mode: "sequential",
 			},
 			Tools: []model.Tool{},
 		},
@@ -155,9 +148,6 @@ func TestGenerateHTMLWithEmptyData(t *testing.T) {
 			Auth: model.Auth{
 				Users: map[string]*model.Permissions{},
 			},
-			Routing: model.Routing{
-				Mode: "sequential",
-			},
 		},
 	}
 
@@ -193,9 +183,6 @@ func TestGenerateHTMLWithSpecialCharacters(t *testing.T) {
 			Content:     "Content with `backticks` and <script>alert('xss')</script>",
 			Auth: model.Auth{
 				Users: map[string]*model.Permissions{},
-			},
-			Routing: model.Routing{
-				Mode: "sequential",
 			},
 		},
 	}

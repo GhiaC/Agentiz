@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/go-echarts/go-echarts/v2/charts"
@@ -13,67 +14,81 @@ import (
 	"agentize/model"
 )
 
-// GraphVisualizer creates graph visualizations of knowledge trees
+// GraphVisualizer renders the knowledge tree as an interactive graph.
 type GraphVisualizer struct {
-	nodes map[string]*model.Node
+	nodes           map[string]*model.Node
+	visibilityCache map[string]bool
 }
 
-// NewGraphVisualizer creates a new graph visualizer
+// NewGraphVisualizer creates a new graph visualizer instance.
 func NewGraphVisualizer(nodes map[string]*model.Node) *GraphVisualizer {
-	return &GraphVisualizer{
-		nodes: nodes,
-	}
+	return &GraphVisualizer{nodes: nodes}
 }
 
-// GenerateGraph creates an ECharts graph from the knowledge tree
-func (gv *GraphVisualizer) GenerateGraph(title string) *charts.Graph {
-	// Count total nodes including tools
-	totalTools := 0
-	for _, node := range gv.nodes {
-		totalTools += len(node.Tools)
-	}
+type graphPayload struct {
+	nodes      []opts.GraphNode
+	links      []opts.GraphLink
+	categories []*opts.GraphCategory
+	summary    graphSummary
+	nodeMeta   map[string]nodeData
+}
 
+type graphSummary struct {
+	nodes int
+	tools int
+}
+
+// GenerateGraph builds the go-echarts graph component.
+func (gv *GraphVisualizer) GenerateGraph(title string) *charts.Graph {
+	graph, _ := gv.graphWithPayload(title)
+	return graph
+}
+
+func (gv *GraphVisualizer) graphWithPayload(title string) (*charts.Graph, graphPayload) {
+	payload := gv.buildGraphPayload()
+	graph := gv.buildGraph(title, payload)
+	return graph, payload
+}
+
+func (gv *GraphVisualizer) buildGraph(title string, payload graphPayload) *charts.Graph {
 	graph := charts.NewGraph()
 	graph.SetGlobalOptions(
 		charts.WithTitleOpts(opts.Title{
 			Title:    title,
-			Subtitle: fmt.Sprintf("Knowledge Tree with %d nodes and %d tools", len(gv.nodes), totalTools),
+			Subtitle: fmt.Sprintf("%d nodes • %d tools", payload.summary.nodes, payload.summary.tools),
 		}),
+		charts.WithTooltipOpts(opts.Tooltip{Show: opts.Bool(true)}),
+		charts.WithLegendOpts(opts.Legend{Show: opts.Bool(true)}),
 		charts.WithInitializationOpts(opts.Initialization{
 			Width:  "1200px",
 			Height: "800px",
 		}),
-		charts.WithTooltipOpts(opts.Tooltip{
-			Show: opts.Bool(true),
-		}),
-		charts.WithLegendOpts(opts.Legend{
-			Show: opts.Bool(true),
-		}),
 	)
 
-	// Convert nodes to graph nodes
-	graphNodes := gv.convertNodes()
+	if len(payload.nodes) == 0 {
+		return graph
+	}
 
-	// Create links between nodes
-	links := gv.createLinks()
-
-	// Add series
-	graph.AddSeries("knowledge-tree", graphNodes, links,
+	graph.AddSeries(
+		"knowledge-tree",
+		payload.nodes,
+		payload.links,
 		charts.WithGraphChartOpts(opts.GraphChart{
-			Layout: "force",
-			Roam:   opts.Bool(true),
+			Layout:             "force",
+			Roam:               opts.Bool(true),
+			FocusNodeAdjacency: opts.Bool(true),
 			Force: &opts.GraphForce{
-				Repulsion:  1000,
+				Repulsion:  1200,
 				Gravity:    0.1,
 				EdgeLength: 200,
 			},
-			Categories: gv.createCategories(),
+			Categories: payload.categories,
 		}),
 		charts.WithLabelOpts(opts.Label{
 			Show: opts.Bool(true),
 		}),
 		charts.WithLineStyleOpts(opts.LineStyle{
-			Curveness: 0.3,
+			Curveness: 0.25,
 			Width:     2,
 		}),
 	)
@@ -81,8 +96,341 @@ func (gv *GraphVisualizer) GenerateGraph(title string) *charts.Graph {
 	return graph
 }
 
-// getNodeName extracts the node name from a path (last part after "/")
+// SaveToFile renders the graph and augments it with the modal + JS handlers.
+func (gv *GraphVisualizer) SaveToFile(filename, title string) error {
+	graph, payload := gv.graphWithPayload(title)
+
+	page := components.NewPage()
+	page.AddCharts(graph)
+
+	tmpFile, err := os.CreateTemp("", "graph-*.html")
+	if err != nil {
+		return fmt.Errorf("failed to create temp file: %w", err)
+	}
+	tmpFileName := tmpFile.Name()
+	tmpFile.Close()
+	defer os.Remove(tmpFileName)
+
+	tmpOutput, err := os.Create(tmpFileName)
+	if err != nil {
+		return fmt.Errorf("failed to open temp file: %w", err)
+	}
+	if err := page.Render(tmpOutput); err != nil {
+		tmpOutput.Close()
+		return fmt.Errorf("failed to render graph page: %w", err)
+	}
+	tmpOutput.Close()
+
+	renderedContent, err := os.ReadFile(tmpFileName)
+	if err != nil {
+		return fmt.Errorf("failed to read rendered content: %w", err)
+	}
+
+	modalHTML, err := gv.generateModalHTML(payload.nodeMeta)
+	if err != nil {
+		return fmt.Errorf("failed to build modal markup: %w", err)
+	}
+
+	finalContent := string(renderedContent)
+	bodyCloseIdx := strings.LastIndex(finalContent, "</body>")
+	if bodyCloseIdx == -1 {
+		finalContent += modalHTML
+	} else {
+		finalContent = finalContent[:bodyCloseIdx] + modalHTML + finalContent[bodyCloseIdx:]
+	}
+
+	return os.WriteFile(filename, []byte(finalContent), 0o644)
+}
+
+func (gv *GraphVisualizer) buildGraphPayload() graphPayload {
+	payload := graphPayload{
+		categories: gv.createCategories(),
+		nodeMeta:   make(map[string]nodeData),
+	}
+
+	if len(gv.nodes) == 0 {
+		return payload
+	}
+
+	gv.visibilityCache = make(map[string]bool)
+
+	paths := gv.sortedPaths()
+	children := gv.buildChildrenIndex(paths)
+
+	nameRegistry := &nameAllocator{}
+	nodeNames := make(map[string]string, len(paths))
+	visibleTools := make(map[string][]model.Tool)
+
+	for _, path := range paths {
+		node := gv.nodes[path]
+		if node == nil || !gv.isPathVisible(path) {
+			continue
+		}
+
+		displayName := nameRegistry.Unique(gv.displayNameForNode(node))
+		nodeNames[path] = displayName
+
+		tools := gv.collectVisibleTools(node)
+		visibleTools[path] = tools
+
+		payload.nodes = append(payload.nodes, gv.buildGraphNode(displayName, node, len(tools)))
+		payload.nodeMeta[displayName] = gv.buildNodeMeta(node, tools)
+		payload.summary.nodes++
+	}
+
+	toolNames := make(map[string][]string)
+	for _, path := range paths {
+		if _, ok := nodeNames[path]; !ok {
+			continue
+		}
+		tools := visibleTools[path]
+		if len(tools) == 0 {
+			continue
+		}
+
+		names := make([]string, 0, len(tools))
+		for _, tool := range tools {
+			toolName := nameRegistry.Unique(tool.Name)
+			names = append(names, toolName)
+			payload.nodes = append(payload.nodes, gv.buildToolGraphNode(toolName))
+			payload.summary.tools++
+		}
+		toolNames[path] = names
+	}
+
+	for _, path := range paths {
+		sourceName := nodeNames[path]
+		if sourceName == "" {
+			continue
+		}
+
+		for _, childPath := range children[path] {
+			targetName := nodeNames[childPath]
+			if targetName == "" {
+				continue
+			}
+			payload.links = append(payload.links, opts.GraphLink{
+				Source: sourceName,
+				Target: targetName,
+				Value:  1,
+				LineStyle: &opts.LineStyle{
+					Width:     2,
+					Curveness: 0.2,
+				},
+			})
+		}
+
+		for _, toolName := range toolNames[path] {
+			payload.links = append(payload.links, opts.GraphLink{
+				Source: sourceName,
+				Target: toolName,
+				Value:  0.5,
+				LineStyle: &opts.LineStyle{
+					Width:     1,
+					Curveness: 0.05,
+					Type:      "dashed",
+				},
+			})
+		}
+	}
+
+	return payload
+}
+
+func (gv *GraphVisualizer) sortedPaths() []string {
+	paths := make([]string, 0, len(gv.nodes))
+	for path := range gv.nodes {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	return paths
+}
+
+func (gv *GraphVisualizer) buildChildrenIndex(paths []string) map[string][]string {
+	children := make(map[string][]string)
+	for _, path := range paths {
+		parent := gv.parentPath(path)
+		if parent == "" {
+			continue
+		}
+		children[parent] = append(children[parent], path)
+	}
+	for _, list := range children {
+		sort.Strings(list)
+	}
+	return children
+}
+
+func (gv *GraphVisualizer) parentPath(path string) string {
+	if path == "" || path == "root" {
+		return ""
+	}
+	if idx := strings.LastIndex(path, "/"); idx >= 0 {
+		if idx == 0 {
+			return ""
+		}
+		return path[:idx]
+	}
+	return "root"
+}
+
+func (gv *GraphVisualizer) displayNameForNode(node *model.Node) string {
+	if node == nil {
+		return ""
+	}
+	if title := strings.TrimSpace(node.Title); title != "" {
+		return title
+	}
+	if id := strings.TrimSpace(node.ID); id != "" {
+		return id
+	}
+	return gv.getNodeName(node.Path)
+}
+
+func (gv *GraphVisualizer) collectVisibleTools(node *model.Node) []model.Tool {
+	if node == nil || len(node.Tools) == 0 {
+		return nil
+	}
+	tools := make([]model.Tool, 0, len(node.Tools))
+	for _, tool := range node.Tools {
+		if tool.Status == model.ToolStatusHidden {
+			continue
+		}
+		tools = append(tools, tool)
+	}
+	return tools
+}
+
+func (gv *GraphVisualizer) buildGraphNode(name string, node *model.Node, toolCount int) opts.GraphNode {
+	category := gv.getNodeCategory(node)
+	return opts.GraphNode{
+		Name:       name,
+		Value:      float32(toolCount + 1),
+		Category:   category,
+		SymbolSize: gv.calculateNodeSize(node),
+		ItemStyle:  gv.getNodeStyle(category),
+	}
+}
+
+func (gv *GraphVisualizer) buildToolGraphNode(name string) opts.GraphNode {
+	return opts.GraphNode{
+		Name:       name,
+		Value:      1,
+		Category:   4,
+		SymbolSize: 18,
+		ItemStyle:  gv.getNodeStyle(4),
+	}
+}
+
+func (gv *GraphVisualizer) buildNodeMeta(node *model.Node, tools []model.Tool) nodeData {
+	meta := nodeData{
+		Path:        node.Path,
+		ID:          node.ID,
+		Title:       gv.displayNameForNode(node),
+		Description: node.Description,
+		Content:     node.Content,
+		CanAdvance:  gv.canAdvance(node),
+		Tools:       make([]toolData, 0, len(tools)),
+		Auth:        gv.buildAuthData(node),
+	}
+
+	for _, tool := range tools {
+		meta.Tools = append(meta.Tools, toolData{
+			Name:        tool.Name,
+			Description: tool.Description,
+			InputSchema: tool.InputSchema,
+			Status:      string(tool.Status),
+		})
+	}
+
+	return meta
+}
+
+func (gv *GraphVisualizer) buildAuthData(node *model.Node) map[string]interface{} {
+	authData := map[string]interface{}{
+		"users": make([]map[string]interface{}, 0),
+	}
+	if node.Auth.Users == nil {
+		return authData
+	}
+
+	userIDs := make([]string, 0, len(node.Auth.Users))
+	for id := range node.Auth.Users {
+		userIDs = append(userIDs, id)
+	}
+	sort.Strings(userIDs)
+
+	for _, id := range userIDs {
+		perms := node.Auth.Users[id]
+		if perms == nil {
+			continue
+		}
+		authData["users"] = append(authData["users"].([]map[string]interface{}), map[string]interface{}{
+			"user_id":          id,
+			"can_edit":         perms.HasPermission(model.PermWrite),
+			"can_read":         perms.HasPermission(model.PermRead),
+			"can_access_next":  perms.HasPermission(model.PermExecute),
+			"can_see":          perms.HasPermission(model.PermSee),
+			"visible_in_docs":  perms.HasPermission(model.PermVisibleDocs),
+			"visible_in_graph": perms.HasPermission(model.PermVisibleGraph),
+		})
+	}
+
+	return authData
+}
+
+func (gv *GraphVisualizer) canAdvance(node *model.Node) bool {
+	if node == nil || len(node.Auth.Users) == 0 {
+		return true
+	}
+	for _, perms := range node.Auth.Users {
+		if perms != nil && perms.HasPermission(model.PermExecute) {
+			return true
+		}
+	}
+	return false
+}
+
+func (gv *GraphVisualizer) isPathVisible(path string) bool {
+	if gv.visibilityCache == nil {
+		gv.visibilityCache = make(map[string]bool)
+	}
+	if visible, ok := gv.visibilityCache[path]; ok {
+		return visible
+	}
+	node := gv.nodes[path]
+	if node == nil {
+		gv.visibilityCache[path] = false
+		return false
+	}
+
+	visible := gv.evaluateVisibility(node)
+	gv.visibilityCache[path] = visible
+	return visible
+}
+
+func (gv *GraphVisualizer) evaluateVisibility(node *model.Node) bool {
+	if node.Auth.Default != nil {
+		if node.Auth.Default.VisibleGraph != nil {
+			return *node.Auth.Default.VisibleGraph
+		}
+		if node.Auth.Default.Perms != "" && strings.ContainsRune(node.Auth.Default.Perms, model.PermVisibleGraph) {
+			return true
+		}
+	}
+	if node.Auth.Inherit && node.Path != "root" {
+		parent := gv.parentPath(node.Path)
+		if parent != "" {
+			return gv.isPathVisible(parent)
+		}
+	}
+	return true
+}
+
 func (gv *GraphVisualizer) getNodeName(path string) string {
+	if path == "" {
+		return ""
+	}
 	if path == "root" {
 		return "root"
 	}
@@ -90,282 +438,368 @@ func (gv *GraphVisualizer) getNodeName(path string) string {
 	return parts[len(parts)-1]
 }
 
-// convertNodes converts model.Node to opts.GraphNode
-func (gv *GraphVisualizer) convertNodes() []opts.GraphNode {
-	// Pre-allocate with estimated size (nodes + tools)
-	estimatedSize := len(gv.nodes)
-	for _, node := range gv.nodes {
-		estimatedSize += len(node.Tools)
+func (gv *GraphVisualizer) getNodeCategory(node *model.Node) int {
+	if node == nil {
+		return 1
 	}
-	graphNodes := make([]opts.GraphNode, 0, estimatedSize)
-
-	for path, node := range gv.nodes {
-		// Determine node category based on properties
-		category := gv.getNodeCategory(node)
-
-		// Extract node name from path (just the last part)
-		nodeName := gv.getNodeName(path)
-
-		// Create label with title and tool count
-		label := node.Title
-		if label == "" {
-			label = node.ID
-		}
-		if label == "" {
-			label = nodeName
-		}
-
-		// Add tool count to label
-		toolCount := len(node.Tools)
-		if toolCount > 0 {
-			label = fmt.Sprintf("%s\n(%d tools)", label, toolCount)
-		}
-
-		// Create tooltip with more details
-		tooltip := fmt.Sprintf("Path: %s\nTitle: %s\nDescription: %s\nTools: %d",
-			path, node.Title, node.Description, toolCount)
-
-		// Check if any user can access next (for display purposes)
-		canAdvance := len(node.Auth.Users) == 0 || func() bool {
-			for _, perms := range node.Auth.Users {
-				if perms != nil && perms.HasPermission('x') {
-					return true
-				}
-			}
-			return false
-		}()
-		if !canAdvance {
-			tooltip += "\n⚠ Cannot advance"
-		}
-
-		graphNode := opts.GraphNode{
-			Name:       nodeName,               // Use node name instead of full path
-			Value:      float32(toolCount + 1), // Size based on tool count
-			Category:   category,
-			SymbolSize: gv.calculateNodeSize(node),
-			ItemStyle:  gv.getNodeStyle(category),
-		}
-
-		graphNodes = append(graphNodes, graphNode)
-
-		// Add tool nodes
-		for _, tool := range node.Tools {
-			// Skip hidden tools
-			if tool.Status == model.ToolStatusHidden {
-				continue
-			}
-
-			toolNodeName := tool.Name
-			toolCategory := 4 // Tool category
-
-			toolNode := opts.GraphNode{
-				Name:       toolNodeName,
-				Value:      1,
-				Category:   toolCategory,
-				SymbolSize: 20, // Smaller size for tools
-				ItemStyle:  gv.getNodeStyle(toolCategory),
-			}
-
-			graphNodes = append(graphNodes, toolNode)
-		}
-	}
-
-	return graphNodes
-}
-
-// createLinks creates links between nodes based on parent-child relationships
-func (gv *GraphVisualizer) createLinks() []opts.GraphLink {
-	links := make([]opts.GraphLink, 0)
-
-	for path, node := range gv.nodes {
-		// Find all direct children of this node
-		// A child path is path + "/" + childName where childName doesn't contain "/"
-		for childPath := range gv.nodes {
-			if strings.HasPrefix(childPath, path+"/") {
-				remaining := strings.TrimPrefix(childPath, path+"/")
-				// Check if this is a direct child (no more slashes)
-				if !strings.Contains(remaining, "/") {
-					// Use node names instead of full paths for Source and Target
-					sourceName := gv.getNodeName(path)
-					targetName := gv.getNodeName(childPath)
-					links = append(links, opts.GraphLink{
-						Source: sourceName,
-						Target: targetName,
-						Value:  1,
-						LineStyle: &opts.LineStyle{
-							Width:     2,
-							Curveness: 0.3,
-						},
-					})
-				}
-			}
-		}
-
-		// Create links from node to its tools
-		nodeName := gv.getNodeName(path)
-		for _, tool := range node.Tools {
-			// Skip hidden tools
-			if tool.Status == model.ToolStatusHidden {
-				continue
-			}
-
-			toolNodeName := tool.Name
-			links = append(links, opts.GraphLink{
-				Source: nodeName,
-				Target: toolNodeName,
-				Value:  0.5, // Lighter weight for tool links
-				LineStyle: &opts.LineStyle{
-					Width:     1,
-					Curveness: 0.1,
-					Type:      "dashed", // Dashed line for tool links
-				},
-			})
-		}
-	}
-
-	return links
-}
-
-// getNextPath determines child paths for a given node path
-// This is a helper that tries to infer child paths from the nodes map
-func (gv *GraphVisualizer) getNextPath(path string) string {
-	// Try to find children by checking if any node path starts with path + "/"
-	for nodePath := range gv.nodes {
-		if strings.HasPrefix(nodePath, path+"/") {
-			// Extract the immediate child name
-			remaining := strings.TrimPrefix(nodePath, path+"/")
-			if !strings.Contains(remaining, "/") {
-				// This is a direct child
-				if path == "root" {
-					return "root/" + remaining
-				}
-				return path + "/" + remaining
-			}
-		}
-	}
-	return ""
-}
-
-// getNodeCategory determines the category of a node for styling
-func (gv *GraphVisualizer) getNodeCategory(n *model.Node) int {
-	// Category 0: Root node
-	// Category 1: Intermediate nodes
-	// Category 2: Leaf nodes (cannot advance)
-	// Category 3: Nodes with many tools
-
-	if n.Path == "root" {
+	if node.Path == "root" {
 		return 0
 	}
-
-	// Check if any user can access next
-	canAdvance := len(n.Auth.Users) == 0 || func() bool {
-		for _, perms := range n.Auth.Users {
-			if perms != nil && perms.HasPermission('x') {
-				return true
-			}
-		}
-		return false
-	}()
-	if !canAdvance {
+	if !gv.canAdvance(node) {
 		return 2
 	}
-
-	if len(n.Tools) >= 3 {
+	if len(node.Tools) >= 3 {
 		return 3
 	}
-
 	return 1
 }
 
-// createCategories creates category definitions for the graph
 func (gv *GraphVisualizer) createCategories() []*opts.GraphCategory {
 	return []*opts.GraphCategory{
 		{
 			Name: "Root",
 			ItemStyle: &opts.ItemStyle{
-				Color: "#5470c6", // Blue
+				Color: "#5470c6",
 			},
 		},
 		{
 			Name: "Intermediate",
 			ItemStyle: &opts.ItemStyle{
-				Color: "#91cc75", // Green
+				Color: "#91cc75",
 			},
 		},
 		{
 			Name: "Leaf",
 			ItemStyle: &opts.ItemStyle{
-				Color: "#fac858", // Yellow
+				Color: "#fac858",
 			},
 		},
 		{
 			Name: "Tool Rich",
 			ItemStyle: &opts.ItemStyle{
-				Color: "#ee6666", // Red
+				Color: "#ee6666",
 			},
 		},
 		{
 			Name: "Tool",
 			ItemStyle: &opts.ItemStyle{
-				Color: "#73c0de", // Light Blue
+				Color: "#73c0de",
 			},
 		},
 	}
 }
 
-// calculateNodeSize calculates the size of a node based on its properties
 func (gv *GraphVisualizer) calculateNodeSize(node *model.Node) float32 {
-	baseSize := 30.0
-	toolSize := float32(len(node.Tools)) * 5.0
+	if node == nil {
+		return 30
+	}
+	base := float32(30)
+	toolBoost := float32(len(node.Tools)) * 5
 
-	// Root node is larger
 	if node.Path == "root" {
-		return float32(baseSize) + toolSize + 20
+		return base + toolBoost + 20
 	}
-
-	// Leaf nodes are slightly smaller
-	canAdvance := len(node.Auth.Users) == 0 || func() bool {
-		for _, perms := range node.Auth.Users {
-			if perms != nil && perms.HasPermission('x') {
-				return true
-			}
-		}
-		return false
-	}()
-	if !canAdvance {
-		return float32(baseSize) + toolSize
+	if !gv.canAdvance(node) {
+		return base + toolBoost
 	}
-
-	return float32(baseSize) + toolSize + 10
+	return base + toolBoost + 10
 }
 
-// getNodeStyle returns the style for a node based on its category
 func (gv *GraphVisualizer) getNodeStyle(category int) *opts.ItemStyle {
 	colors := []string{
-		"#5470c6", // Root - Blue
-		"#91cc75", // Intermediate - Green
-		"#fac858", // Leaf - Yellow
-		"#ee6666", // Tool Rich - Red
-		"#73c0de", // Tool - Light Blue
+		"#5470c6",
+		"#91cc75",
+		"#fac858",
+		"#ee6666",
+		"#73c0de",
 	}
-
-	if category >= len(colors) {
+	if category < 0 || category >= len(colors) {
 		category = 1
 	}
 
-	borderWidth := float32(2)
-	if category == 4 { // Tools have thinner border
-		borderWidth = float32(1)
+	border := float32(2)
+	if category == 4 {
+		border = 1
 	}
 
 	return &opts.ItemStyle{
 		Color:       colors[category],
 		BorderColor: "#fff",
-		BorderWidth: borderWidth,
+		BorderWidth: border,
 	}
 }
 
-// nodeData represents node data for JavaScript
+func (gv *GraphVisualizer) generateModalHTML(meta map[string]nodeData) (string, error) {
+	if meta == nil {
+		meta = map[string]nodeData{}
+	}
+	payload, err := json.Marshal(meta)
+	if err != nil {
+		return "", err
+	}
+
+	data := strings.ReplaceAll(string(payload), "</script>", "<\\/script>")
+
+	var builder strings.Builder
+	builder.WriteString(`<style>
+.node-modal {
+	display: none;
+	position: fixed;
+	z-index: 10000;
+	left: 0;
+	top: 0;
+	width: 100%;
+	height: 100%;
+	background-color: rgba(0,0,0,0.5);
+	overflow: auto;
+}
+.node-modal-content {
+	background-color: #fefefe;
+	margin: 5% auto;
+	padding: 20px;
+	border: 1px solid #888;
+	border-radius: 8px;
+	width: 80%;
+	max-width: 900px;
+	max-height: 90%;
+	overflow-y: auto;
+	box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+}
+.node-modal-header {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	margin-bottom: 16px;
+	padding-bottom: 10px;
+	border-bottom: 2px solid #eee;
+}
+.node-modal-title {
+	font-size: 24px;
+	font-weight: bold;
+	color: #333;
+	margin: 0;
+}
+.node-modal-close {
+	color: #888;
+	font-size: 28px;
+	font-weight: bold;
+	cursor: pointer;
+	line-height: 20px;
+}
+.node-modal-close:hover,
+.node-modal-close:focus {
+	color: #000;
+	text-decoration: none;
+}
+.node-modal-section {
+	margin-bottom: 18px;
+}
+.node-modal-section-title {
+	font-size: 18px;
+	font-weight: bold;
+	color: #5470c6;
+	margin-bottom: 8px;
+}
+.node-modal-section-content {
+	color: #555;
+	line-height: 1.6;
+	white-space: pre-wrap;
+	word-break: break-word;
+}
+.node-modal-tools {
+	display: grid;
+	grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+	gap: 12px;
+}
+.node-modal-tool {
+	background-color: #f5f5f5;
+	padding: 10px;
+	border-radius: 4px;
+	border-left: 3px solid #73c0de;
+}
+.node-modal-tool-name {
+	font-weight: bold;
+	color: #333;
+	margin-bottom: 4px;
+}
+.node-modal-tool-desc {
+	font-size: 14px;
+	color: #666;
+}
+.node-modal-content-text {
+	background-color: #f9f9f9;
+	padding: 15px;
+	border-radius: 4px;
+	max-height: 320px;
+	overflow-y: auto;
+	font-family: 'Courier New', monospace;
+	font-size: 13px;
+	line-height: 1.5;
+}
+</style>
+<div id="nodeModal" class="node-modal">
+	<div class="node-modal-content">
+		<div class="node-modal-header">
+			<h2 class="node-modal-title" id="modalTitle">Node Details</h2>
+			<span class="node-modal-close" id="modalClose">&times;</span>
+		</div>
+		<div id="modalBody"></div>
+	</div>
+</div>
+<script>
+const nodeData = `)
+	builder.WriteString(data)
+	builder.WriteString(`;
+
+(function () {
+	const modal = document.getElementById('nodeModal');
+	const modalTitle = document.getElementById('modalTitle');
+	const modalBody = document.getElementById('modalBody');
+	const modalClose = document.getElementById('modalClose');
+
+	function escapeHtml(text) {
+		if (text === undefined || text === null) {
+			return '';
+		}
+		const div = document.createElement('div');
+		div.textContent = text;
+		return div.innerHTML;
+	}
+
+	function formatJson(obj) {
+		try {
+			return JSON.stringify(obj, null, 2);
+		} catch (e) {
+			return '';
+		}
+	}
+
+	function closeModal() {
+		modal.style.display = 'none';
+	}
+
+	function showNodeDetails(name) {
+		const data = nodeData[name];
+		if (!data) {
+			console.warn('No graph metadata for node:', name);
+			return;
+		}
+
+		modalTitle.textContent = data.title || data.id || name;
+
+		let html = '';
+
+		if (data.path) {
+			html += '<div class="node-modal-section">';
+			html += '<div class="node-modal-section-title">Path</div>';
+			html += '<div class="node-modal-section-content">' + escapeHtml(data.path) + '</div>';
+			html += '</div>';
+		}
+
+		if (data.description) {
+			html += '<div class="node-modal-section">';
+			html += '<div class="node-modal-section-title">Description</div>';
+			html += '<div class="node-modal-section-content">' + escapeHtml(data.description) + '</div>';
+			html += '</div>';
+		}
+
+		if (data.auth) {
+			html += '<div class="node-modal-section">';
+			html += '<div class="node-modal-section-title">Auth</div>';
+			html += '<div class="node-modal-content-text">' + escapeHtml(formatJson(data.auth)) + '</div>';
+			html += '</div>';
+		}
+
+		if (Array.isArray(data.tools) && data.tools.length > 0) {
+			html += '<div class="node-modal-section">';
+			html += '<div class="node-modal-section-title">Tools (' + data.tools.length + ')</div>';
+			html += '<div class="node-modal-tools">';
+			data.tools.forEach(function(tool) {
+				html += '<div class="node-modal-tool">';
+				html += '<div class="node-modal-tool-name">' + escapeHtml(tool.name || '') + '</div>';
+				if (tool.description) {
+					html += '<div class="node-modal-tool-desc">' + escapeHtml(tool.description) + '</div>';
+				}
+				if (tool.status && tool.status !== 'active') {
+					html += '<div style="color:#ee6666;font-size:12px;margin-top:6px;">Status: ' + escapeHtml(tool.status) + '</div>';
+				}
+				html += '</div>';
+			});
+			html += '</div></div>';
+		}
+
+		if (data.content) {
+			html += '<div class="node-modal-section">';
+			html += '<div class="node-modal-section-title">Content</div>';
+			html += '<div class="node-modal-content-text">' + escapeHtml(data.content) + '</div>';
+			html += '</div>';
+		}
+
+		modalBody.innerHTML = html;
+		modal.style.display = 'block';
+	}
+
+	modalClose.addEventListener('click', closeModal);
+	window.addEventListener('click', function (event) {
+		if (event.target === modal) {
+			closeModal();
+		}
+	});
+
+	function attachChartHandler() {
+		if (typeof echarts === 'undefined') {
+			setTimeout(attachChartHandler, 250);
+			return;
+		}
+		const containers = document.querySelectorAll('[id^="chart"], div[id*="chart"]');
+		for (const container of containers) {
+			const instance = echarts.getInstanceByDom(container);
+			if (instance) {
+				instance.off('click');
+				instance.on('click', function (params) {
+					if (params && params.data && params.data.name) {
+						showNodeDetails(params.data.name);
+					}
+				});
+				return;
+			}
+		}
+		setTimeout(attachChartHandler, 300);
+	}
+
+	function attachSvgFallback() {
+		const svg = document.querySelector('svg');
+		if (!svg) {
+			setTimeout(attachSvgFallback, 800);
+			return;
+		}
+		svg.addEventListener('click', function (event) {
+			if (!event.target || event.target.tagName !== 'text') {
+				return;
+			}
+			const label = event.target.textContent.trim();
+			if (nodeData[label]) {
+				showNodeDetails(label);
+			}
+		}, true);
+	}
+
+	if (document.readyState === 'loading') {
+		document.addEventListener('DOMContentLoaded', function () {
+			attachChartHandler();
+			setTimeout(attachSvgFallback, 800);
+		});
+	} else {
+		attachChartHandler();
+		setTimeout(attachSvgFallback, 800);
+	}
+})();
+</script>
+`)
+
+	return builder.String(), nil
+}
+
 type nodeData struct {
 	Path        string                 `json:"path"`
 	ID          string                 `json:"id"`
@@ -384,502 +818,24 @@ type toolData struct {
 	Status      string                 `json:"status"`
 }
 
-// prepareNodeData prepares node data for JavaScript
-func (gv *GraphVisualizer) prepareNodeData() map[string]nodeData {
-	data := make(map[string]nodeData)
+type nameAllocator struct {
+	counts map[string]int
+}
 
-	for path, node := range gv.nodes {
-		nodeName := gv.getNodeName(path)
-
-		tools := make([]toolData, 0, len(node.Tools))
-		for _, tool := range node.Tools {
-			if tool.Status != model.ToolStatusHidden {
-				tools = append(tools, toolData{
-					Name:        tool.Name,
-					Description: tool.Description,
-					InputSchema: tool.InputSchema,
-					Status:      string(tool.Status),
-				})
-			}
-		}
-
-		// Build auth data
-		authData := map[string]interface{}{
-			"users": make([]map[string]interface{}, 0),
-		}
-		for userID, perms := range node.Auth.Users {
-			if perms == nil {
-				continue
-			}
-			authData["users"] = append(authData["users"].([]map[string]interface{}), map[string]interface{}{
-				"user_id":          userID,
-				"can_edit":         perms.HasPermission('w'),
-				"can_read":         perms.HasPermission('r'),
-				"can_access_next":  perms.HasPermission('x'),
-				"can_see":          perms.HasPermission('s'),
-				"visible_in_docs":  perms.HasPermission('d'),
-				"visible_in_graph": perms.HasPermission('g'),
-			})
-		}
-
-		// Check if any user can access next
-		canAdvance := len(node.Auth.Users) == 0 || func() bool {
-			for _, perms := range node.Auth.Users {
-				if perms != nil && perms.HasPermission('x') {
-					return true
-				}
-			}
-			return false
-		}()
-
-		data[nodeName] = nodeData{
-			Path:        path,
-			ID:          node.ID,
-			Title:       node.Title,
-			Description: node.Description,
-			Content:     node.Content,
-			CanAdvance:  canAdvance,
-			Tools:       tools,
-			Auth:        authData,
-		}
+func (a *nameAllocator) Unique(base string) string {
+	base = strings.TrimSpace(base)
+	if base == "" {
+		base = "node"
 	}
-
-	return data
-}
-
-// SaveToFile saves the graph to an HTML file with click-to-view details functionality
-func (gv *GraphVisualizer) SaveToFile(filename string, title string) error {
-	graph := gv.GenerateGraph(title)
-
-	page := components.NewPage()
-	page.AddCharts(graph)
-
-	// Create a temporary file to render the page
-	tmpFile, err := os.CreateTemp("", "graph-*.html")
-	if err != nil {
-		return fmt.Errorf("failed to create temp file: %w", err)
+	if a.counts == nil {
+		a.counts = make(map[string]int)
 	}
-	tmpFileName := tmpFile.Name()
-	defer os.Remove(tmpFileName)
-	tmpFile.Close()
-
-	// Render the page to temp file
-	tmpF, err := os.Create(tmpFileName)
-	if err != nil {
-		return fmt.Errorf("failed to create temp file: %w", err)
+	count := a.counts[base]
+	if count == 0 {
+		a.counts[base] = 1
+		return base
 	}
-	if err := page.Render(tmpF); err != nil {
-		tmpF.Close()
-		return fmt.Errorf("failed to render page: %w", err)
-	}
-	tmpF.Close()
-
-	// Read the rendered content
-	renderedContent, err := os.ReadFile(tmpFileName)
-	if err != nil {
-		return fmt.Errorf("failed to read rendered content: %w", err)
-	}
-
-	// Prepare node data for JavaScript
-	nodeData := gv.prepareNodeData()
-	nodeDataJSON, err := json.Marshal(nodeData)
-	if err != nil {
-		return fmt.Errorf("failed to marshal node data: %w", err)
-	}
-
-	// Prepare modal HTML, CSS, and JavaScript
-	modalHTML := gv.generateModalHTML(string(nodeDataJSON))
-
-	// Find the closing </body> tag and insert modal before it
-	content := string(renderedContent)
-	bodyCloseIdx := strings.LastIndex(content, "</body>")
-	if bodyCloseIdx == -1 {
-		// If no </body> tag, append at the end
-		content += modalHTML
-	} else {
-		// Insert modal before </body>
-		content = content[:bodyCloseIdx] + modalHTML + content[bodyCloseIdx:]
-	}
-
-	// Write the final content to file
-	return os.WriteFile(filename, []byte(content), 0644)
-}
-
-// generateModalHTML generates the HTML, CSS, and JavaScript for the modal
-func (gv *GraphVisualizer) generateModalHTML(nodeDataJSON string) string {
-	return fmt.Sprintf(`
-<style>
-.node-modal {
-	display: none;
-	position: fixed;
-	z-index: 10000;
-	left: 0;
-	top: 0;
-	width: 100%%;
-	height: 100%%;
-	background-color: rgba(0,0,0,0.5);
-	overflow: auto;
-}
-
-.node-modal-content {
-	background-color: #fefefe;
-	margin: 5%% auto;
-	padding: 20px;
-	border: 1px solid #888;
-	border-radius: 8px;
-	width: 80%%;
-	max-width: 800px;
-	max-height: 90%%;
-	overflow-y: auto;
-	box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-}
-
-.node-modal-header {
-	display: flex;
-	justify-content: space-between;
-	align-items: center;
-	margin-bottom: 20px;
-	padding-bottom: 10px;
-	border-bottom: 2px solid #eee;
-}
-
-.node-modal-title {
-	font-size: 24px;
-	font-weight: bold;
-	color: #333;
-	margin: 0;
-}
-
-.node-modal-close {
-	color: #aaa;
-	font-size: 28px;
-	font-weight: bold;
-	cursor: pointer;
-	line-height: 20px;
-}
-
-.node-modal-close:hover,
-.node-modal-close:focus {
-	color: #000;
-	text-decoration: none;
-}
-
-.node-modal-section {
-	margin-bottom: 20px;
-}
-
-.node-modal-section-title {
-	font-size: 18px;
-	font-weight: bold;
-	color: #5470c6;
-	margin-bottom: 10px;
-	padding-bottom: 5px;
-	border-bottom: 1px solid #eee;
-}
-
-.node-modal-section-content {
-	color: #666;
-	line-height: 1.6;
-	white-space: pre-wrap;
-	word-wrap: break-word;
-}
-
-.node-modal-tools {
-	display: grid;
-	grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
-	gap: 10px;
-}
-
-.node-modal-tool {
-	background-color: #f5f5f5;
-	padding: 10px;
-	border-radius: 4px;
-	border-left: 3px solid #73c0de;
-}
-
-.node-modal-tool-name {
-	font-weight: bold;
-	color: #333;
-	margin-bottom: 5px;
-}
-
-.node-modal-tool-desc {
-	font-size: 14px;
-	color: #666;
-}
-
-.node-modal-policy {
-	background-color: #f9f9f9;
-	padding: 10px;
-	border-radius: 4px;
-	font-family: monospace;
-	font-size: 12px;
-}
-
-.node-modal-content-text {
-	background-color: #f9f9f9;
-	padding: 15px;
-	border-radius: 4px;
-	max-height: 300px;
-	overflow-y: auto;
-	font-family: 'Courier New', monospace;
-	font-size: 13px;
-	line-height: 1.5;
-}
-</style>
-
-<div id="nodeModal" class="node-modal">
-	<div class="node-modal-content">
-		<div class="node-modal-header">
-			<h2 class="node-modal-title" id="modalTitle">Node Details</h2>
-			<span class="node-modal-close" id="modalClose">&times;</span>
-		</div>
-		<div id="modalBody"></div>
-	</div>
-</div>
-
-<script>
-const nodeData = %s;
-
-function escapeHtml(text) {
-	const div = document.createElement('div');
-	div.textContent = text;
-	return div.innerHTML;
-}
-
-function formatJson(obj) {
-	return JSON.stringify(obj, null, 2);
-}
-
-function showNodeDetails(nodeName) {
-	const data = nodeData[nodeName];
-	if (!data) {
-		console.warn('Node data not found for:', nodeName);
-		return;
-	}
-
-	const modal = document.getElementById('nodeModal');
-	const modalTitle = document.getElementById('modalTitle');
-	const modalBody = document.getElementById('modalBody');
-
-	modalTitle.textContent = data.title || data.id || nodeName;
-
-	let html = '';
-
-	// Path
-	if (data.path) {
-		html += '<div class="node-modal-section">';
-		html += '<div class="node-modal-section-title">Path</div>';
-		html += '<div class="node-modal-section-content">' + escapeHtml(data.path) + '</div>';
-		html += '</div>';
-	}
-
-	// Description
-	if (data.description) {
-		html += '<div class="node-modal-section">';
-		html += '<div class="node-modal-section-title">Description</div>';
-		html += '<div class="node-modal-section-content">' + escapeHtml(data.description) + '</div>';
-		html += '</div>';
-	}
-
-	// Auth
-	if (data.auth) {
-		html += '<div class="node-modal-section">';
-		html += '<div class="node-modal-section-title">Auth</div>';
-		html += '<div class="node-modal-policy">' + escapeHtml(formatJson(data.auth)) + '</div>';
-		html += '</div>';
-	}
-
-	// Tools
-	if (data.tools && data.tools.length > 0) {
-		html += '<div class="node-modal-section">';
-		html += '<div class="node-modal-section-title">Tools (' + data.tools.length + ')</div>';
-		html += '<div class="node-modal-tools">';
-		data.tools.forEach(tool => {
-			html += '<div class="node-modal-tool">';
-			html += '<div class="node-modal-tool-name">' + escapeHtml(tool.name) + '</div>';
-			if (tool.description) {
-				html += '<div class="node-modal-tool-desc">' + escapeHtml(tool.description) + '</div>';
-			}
-			if (tool.status && tool.status !== 'active') {
-				html += '<div style="color: #ee6666; font-size: 12px; margin-top: 5px;">Status: ' + escapeHtml(tool.status) + '</div>';
-			}
-			html += '</div>';
-		});
-		html += '</div>';
-		html += '</div>';
-	}
-
-	// Content
-	if (data.content) {
-		html += '<div class="node-modal-section">';
-		html += '<div class="node-modal-section-title">Content</div>';
-		html += '<div class="node-modal-content-text">' + escapeHtml(data.content) + '</div>';
-		html += '</div>';
-	}
-
-	modalBody.innerHTML = html;
-	modal.style.display = 'block';
-}
-
-function closeModal() {
-	document.getElementById('nodeModal').style.display = 'none';
-}
-
-// Close modal when clicking outside
-window.onclick = function(event) {
-	const modal = document.getElementById('nodeModal');
-	if (event.target == modal) {
-		closeModal();
-	}
-}
-
-// Close modal button
-document.getElementById('modalClose').onclick = closeModal;
-
-// Add click event listener to chart after it's rendered
-(function() {
-	let chart = null;
-	let attempts = 0;
-	const maxAttempts = 30;
-	
-	function findAndAttachChart() {
-		attempts++;
-		
-		// Wait for echarts to be available
-		if (typeof echarts === 'undefined') {
-			if (attempts < maxAttempts) {
-				setTimeout(findAndAttachChart, 200);
-			}
-			return;
-		}
-		
-		// Try to find chart instance
-		const chartContainers = document.querySelectorAll('div[id], div[style*="width"]');
-		for (let i = 0; i < chartContainers.length; i++) {
-			try {
-				const instance = echarts.getInstanceByDom(chartContainers[i]);
-				if (instance) {
-					chart = instance;
-					break;
-				}
-			} catch (e) {
-				// Continue
-			}
-		}
-		
-		// If not found, try getting all instances
-		if (!chart) {
-			try {
-				const allInstances = echarts.getInstanceByDom(document.body);
-				if (allInstances && allInstances.length > 0) {
-					chart = allInstances[0];
-				}
-			} catch (e) {
-				// Continue
-			}
-		}
-		
-		// If still not found, try document
-		if (!chart) {
-			try {
-				const allInstances = echarts.getInstanceByDom(document);
-				if (allInstances && allInstances.length > 0) {
-					chart = allInstances[0];
-				}
-			} catch (e) {
-				// Continue
-			}
-		}
-		
-		if (chart) {
-			// Attach click handler using echarts API
-			chart.on('click', function(params) {
-				console.log('ECharts click event:', params);
-				if (params && params.data && params.data.name) {
-					const nodeName = params.data.name;
-					console.log('Node clicked:', nodeName);
-					showNodeDetails(nodeName);
-				}
-			});
-			console.log('ECharts click handler attached successfully');
-			
-			// Also add event delegation as backup
-			setupEventDelegation();
-		} else {
-			if (attempts < maxAttempts) {
-				setTimeout(findAndAttachChart, 300);
-			} else {
-				console.warn('Could not find chart instance, using event delegation fallback');
-				setupEventDelegation();
-			}
-		}
-	}
-	
-	// Fallback: Event delegation on SVG elements
-	function setupEventDelegation() {
-		// Wait for SVG to be rendered
-		setTimeout(function() {
-			const svg = document.querySelector('svg');
-			if (svg) {
-				svg.addEventListener('click', function(e) {
-					const target = e.target;
-					let nodeName = null;
-					
-					// Method 1: Check if target is a circle/ellipse (node symbol)
-					if (target && (target.tagName === 'circle' || target.tagName === 'ellipse')) {
-						// Find the parent group that contains this node
-						let parent = target.parentElement;
-						while (parent && parent.tagName !== 'g') {
-							parent = parent.parentElement;
-						}
-						
-						if (parent) {
-							// Look for text element in the same group
-							const textElement = parent.querySelector('text');
-							if (textElement) {
-								// Extract node name from text (might be multiline, take first line)
-								const textContent = textElement.textContent.trim();
-								const lines = textContent.split('\n');
-								if (lines.length > 0) {
-									// Remove tool count if present: "Title\n(5 tools)" -> "Title"
-									nodeName = lines[0].replace(/\s*\(.*tools?\)\s*$/i, '').trim();
-								}
-							}
-						}
-					}
-					
-					// Method 2: Check if clicked on text element directly
-					if (!nodeName && target && target.tagName === 'text') {
-						const textContent = target.textContent.trim();
-						const lines = textContent.split('\n');
-						if (lines.length > 0) {
-							nodeName = lines[0].replace(/\s*\(.*tools?\)\s*$/i, '').trim();
-						}
-					}
-					
-					if (nodeName && nodeData[nodeName]) {
-						console.log('SVG element clicked, node:', nodeName);
-						showNodeDetails(nodeName);
-					}
-				}, true); // Use capture phase
-				console.log('Event delegation setup complete');
-			} else {
-				// Retry if SVG not found yet
-				setTimeout(setupEventDelegation, 500);
-			}
-		}, 1000);
-	}
-	
-	// Start looking for chart
-	if (document.readyState === 'loading') {
-		document.addEventListener('DOMContentLoaded', function() {
-			setTimeout(findAndAttachChart, 500);
-		});
-	} else {
-		setTimeout(findAndAttachChart, 500);
-	}
-})();
-</script>
-`, nodeDataJSON)
+	count++
+	a.counts[base] = count
+	return fmt.Sprintf("%s (%d)", base, count)
 }

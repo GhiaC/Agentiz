@@ -27,7 +27,6 @@ type NodeDocument struct {
 	Children    []string `json:"children,omitempty"`
 	Tools       []Tool   `json:"tools,omitempty"`
 	Auth        Auth     `json:"auth,omitempty"`
-	Routing     Routing  `json:"routing,omitempty"`
 }
 
 // Tool represents a tool definition
@@ -52,12 +51,6 @@ type UserPermissions struct {
 	CanSee         bool   `json:"can_see"`
 	VisibleInDocs  bool   `json:"visible_in_docs"`
 	VisibleInGraph bool   `json:"visible_in_graph"`
-}
-
-// Routing represents routing configuration
-type Routing struct {
-	Mode     string   `json:"mode,omitempty"`
-	Children []string `json:"children,omitempty"`
 }
 
 // TreeNode represents a node in the tree structure
@@ -107,10 +100,6 @@ func NewAgentizeDocument(nodes map[string]*model.Node, getChildren func(string) 
 			Children:    children,
 			Auth: Auth{
 				Users: authUsers,
-			},
-			Routing: Routing{
-				Mode:     node.Routing.Mode,
-				Children: node.Routing.Children,
 			},
 		}
 

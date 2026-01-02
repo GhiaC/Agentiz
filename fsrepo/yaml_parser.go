@@ -19,14 +19,23 @@ func parseYAML(data []byte, v interface{}) error {
 
 	var currentSection string
 	var authStarted bool
-	var routingStarted bool
 	var currentUserID string
 	var currentPerms *model.Permissions
+	var inDefaultSection bool
+	var inheritExplicitlySet bool
 
 	// Initialize Users map if nil
 	if meta.Auth.Users == nil {
 		meta.Auth.Users = make(map[string]*model.Permissions)
 	}
+
+	// Initialize Default permissions if needed
+	if meta.Auth.Default == nil {
+		meta.Auth.Default = &model.Permissions{}
+	}
+
+	// Default inherit to true (as documented)
+	meta.Auth.Inherit = true
 
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
@@ -40,18 +49,19 @@ func parseYAML(data []byte, v interface{}) error {
 			currentSection = strings.TrimSpace(section)
 			if currentSection == "auth" {
 				authStarted = true
-				routingStarted = false
 				currentUserID = ""
 				currentPerms = nil
-			} else if currentSection == "routing" {
-				routingStarted = true
-				authStarted = false
+				inDefaultSection = false
+			} else if authStarted && currentSection == "default" {
+				// Handle default section in auth
+				inDefaultSection = true
 				currentUserID = ""
-				currentPerms = nil
+				currentPerms = meta.Auth.Default
 			} else if authStarted && !strings.Contains(section, ":") {
 				// This might be a user ID (quoted or unquoted)
 				userID := strings.Trim(section, `"'`)
-				if userID != "" {
+				if userID != "" && userID != "default" {
+					inDefaultSection = false
 					currentUserID = userID
 					currentPerms = &model.Permissions{}
 					meta.Auth.Users[currentUserID] = currentPerms
@@ -59,19 +69,28 @@ func parseYAML(data []byte, v interface{}) error {
 			} else {
 				// Reset all flags for other sections
 				authStarted = false
-				routingStarted = false
 				currentUserID = ""
 				currentPerms = nil
+				inDefaultSection = false
 			}
 			continue
 		}
 
-		// Handle array items (lines starting with -) in routing section
-		if strings.HasPrefix(line, "-") && routingStarted {
-			childName := strings.TrimSpace(strings.TrimPrefix(line, "-"))
-			childName = strings.Trim(childName, `"'`)
-			if childName != "" {
-				meta.Routing.Children = append(meta.Routing.Children, childName)
+		// Handle array items in auth.users section (e.g., "- user_id: test")
+		if strings.HasPrefix(line, "-") && authStarted {
+			rest := strings.TrimSpace(strings.TrimPrefix(line, "-"))
+			if strings.Contains(rest, ":") {
+				parts := strings.SplitN(rest, ":", 2)
+				if len(parts) == 2 {
+					key := strings.TrimSpace(parts[0])
+					value := strings.TrimSpace(parts[1])
+					value = strings.Trim(value, `"'`)
+					if key == "user_id" && value != "" {
+						currentUserID = value
+						currentPerms = &model.Permissions{}
+						meta.Auth.Users[currentUserID] = currentPerms
+					}
+				}
 			}
 			continue
 		}
@@ -95,45 +114,38 @@ func parseYAML(data []byte, v interface{}) error {
 				meta.Description = value
 			case key == "inherit" && authStarted:
 				meta.Auth.Inherit = parseBool(value)
-			case currentPerms != nil && currentUserID != "":
-				// Parse user permissions
+				inheritExplicitlySet = true
+			case currentPerms != nil && (currentUserID != "" || inDefaultSection):
+				// Parse user permissions or default permissions
 				switch key {
 				case "perms":
 					currentPerms.Perms = value
-				case "read":
+				case "read", "can_read":
 					b := parseBool(value)
 					currentPerms.Read = &b
-				case "write":
+				case "write", "can_edit":
 					b := parseBool(value)
 					currentPerms.Write = &b
-				case "execute":
+				case "execute", "can_access_next":
 					b := parseBool(value)
 					currentPerms.Execute = &b
-				case "see":
+				case "see", "can_see":
 					b := parseBool(value)
 					currentPerms.See = &b
-				case "visible_docs":
+				case "visible_docs", "visible_in_docs":
 					b := parseBool(value)
 					currentPerms.VisibleDocs = &b
-				case "visible_graph":
+				case "visible_graph", "visible_in_graph":
 					b := parseBool(value)
 					currentPerms.VisibleGraph = &b
-				}
-			case routingStarted:
-				if key == "mode" {
-					meta.Routing.Mode = value
-				} else if key == "children" {
-					// Children is an array - parse it
-					meta.Routing.Children = parseStringArray(value)
 				}
 			}
 		}
 	}
 
-	// Set defaults if not specified
-	if meta.Routing.Mode == "" {
-		meta.Routing.Mode = "sequential"
-	}
+	// Inherit defaults to true if not explicitly set
+	// (we already set it to true at the beginning, so if it wasn't explicitly set to false, it stays true)
+	_ = inheritExplicitlySet // Keep for future use if needed
 
 	return nil
 }

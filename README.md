@@ -2,9 +2,6 @@
 
 > Build intelligent agentic services from hierarchical knowledge trees
 
-[![Go Version](https://img.shields.io/badge/go-1.23+-00ADD8?style=flat&logo=go)](https://golang.org)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-
 Agentize is a powerful Go library for building agentic services that navigate through hierarchical knowledge structures. Transform your filesystem-based knowledge tree into an intelligent agent that manages sessions, accumulates tools, and makes context-aware decisions.
 
 ## ✨ Key Features
@@ -245,26 +242,3 @@ Check out the `example/` directory for:
 - Function registry usage
 - Session management
 - Tool disabling/enabling
-
-## 🛣️ Roadmap
-
-**MVP-1** ✅ (Current)
-- Filesystem-based knowledge tree parsing
-- Node loading and navigation
-- Tool accumulation with merge strategies
-- In-memory session store
-- Sequential routing
-- Graph visualization
-- HTTP server with chat endpoint
-
-**MVP-2** (Planned)
-- Persistent session storage (Redis, PostgreSQL)
-- LLM-based decision provider
-- Tool execution sandbox
-- Parallel and conditional routing modes
-
-**MVP-3** (Future)
-- WebSocket support for real-time chat
-- Advanced memory management
-- Multi-tenant support
-- Plugin system
