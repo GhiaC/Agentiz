@@ -243,3 +243,10 @@ func (ag *Agentize) GenerateGraphVisualization(filename string, title string) er
 func Version() string {
 	return "0.1.0"
 }
+
+// GetRegisteredTools returns the list of registered tool names
+// For Agentize, this returns nil as tools are registered externally
+// Implementations like InfraAgentBot should override this method
+func (ag *Agentize) GetRegisteredTools() []string {
+	return nil
+}

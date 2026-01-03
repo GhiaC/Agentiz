@@ -233,6 +233,34 @@ templ styles() {
 			margin-top: 5px;
 		}
 
+		.tool-name-row {
+			display: flex;
+			align-items: center;
+			gap: 10px;
+			flex-wrap: wrap;
+		}
+
+		.tool-badge {
+			padding: 3px 8px;
+			border-radius: 12px;
+			font-size: 0.75em;
+			font-weight: bold;
+			text-transform: uppercase;
+			white-space: nowrap;
+		}
+
+		.tool-badge-registered {
+			background: #d4edda;
+			color: #155724;
+			border: 1px solid #c3e6cb;
+		}
+
+		.tool-badge-unregistered {
+			background: #fff3cd;
+			color: #856404;
+			border: 1px solid #ffeaa7;
+		}
+
 		.search-box {
 			margin-bottom: 20px;
 			padding: 15px;
@@ -500,6 +528,217 @@ templ styles() {
 		.content-markdown table th {
 			background-color: #f8f9fa;
 			font-weight: bold;
+		}
+
+		.header-links {
+			margin-top: 20px;
+			display: flex;
+			gap: 15px;
+			justify-content: center;
+			flex-wrap: wrap;
+		}
+
+		.header-link {
+			color: white;
+			text-decoration: none;
+			padding: 8px 16px;
+			background: rgba(255, 255, 255, 0.2);
+			border-radius: 6px;
+			transition: background 0.3s;
+			font-size: 0.95em;
+		}
+
+		.header-link:hover {
+			background: rgba(255, 255, 255, 0.3);
+			text-decoration: none;
+		}
+
+		.tools-view {
+			display: none;
+		}
+
+		.tools-view.active {
+			display: block;
+		}
+
+		.tools-view-header {
+			margin-bottom: 30px;
+			text-align: center;
+		}
+
+		.tools-view-header h2 {
+			color: #667eea;
+			font-size: 2em;
+			margin-bottom: 10px;
+		}
+
+		.tools-view-header p {
+			color: #6c757d;
+			font-size: 1.1em;
+		}
+
+		.tools-summary {
+			background: #f8f9fa;
+			padding: 15px;
+			border-radius: 8px;
+			margin-bottom: 20px;
+			text-align: center;
+			font-size: 1.1em;
+			color: #333;
+		}
+
+		.tools-grid {
+			display: grid;
+			grid-template-columns: repeat(auto-fill, minmax(400px, 1fr));
+			gap: 20px;
+		}
+
+		.tool-card {
+			background: white;
+			border: 2px solid #e9ecef;
+			border-radius: 8px;
+			padding: 20px;
+			transition: all 0.3s ease;
+			box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+		}
+
+		.tool-card:hover {
+			border-color: #667eea;
+			box-shadow: 0 4px 12px rgba(102, 126, 234, 0.2);
+			transform: translateY(-2px);
+		}
+
+		.tool-card-header {
+			display: flex;
+			justify-content: space-between;
+			align-items: center;
+			margin-bottom: 15px;
+			padding-bottom: 15px;
+			border-bottom: 2px solid #f8f9fa;
+		}
+
+		.tool-name-large {
+			font-size: 1.3em;
+			font-weight: bold;
+			color: #333;
+			font-family: 'Courier New', monospace;
+		}
+
+		.tool-status {
+			padding: 4px 12px;
+			border-radius: 12px;
+			font-size: 0.85em;
+			font-weight: bold;
+			text-transform: uppercase;
+		}
+
+		.status-active {
+			background: #d4edda;
+			color: #155724;
+		}
+
+		.status-disabled {
+			background: #f8d7da;
+			color: #721c24;
+		}
+
+		.status-hidden {
+			background: #e2e3e5;
+			color: #383d41;
+		}
+
+		.status-unknown {
+			background: #fff3cd;
+			color: #856404;
+		}
+
+		.tool-description-full {
+			color: #555;
+			line-height: 1.6;
+			margin-bottom: 15px;
+		}
+
+		.tool-schema-section {
+			margin-top: 15px;
+			padding-top: 15px;
+			border-top: 1px solid #e9ecef;
+		}
+
+		.tool-schema-title {
+			font-weight: bold;
+			color: #667eea;
+			margin-bottom: 10px;
+			cursor: pointer;
+			user-select: none;
+			display: flex;
+			align-items: center;
+			gap: 8px;
+		}
+
+		.tool-schema-title:hover {
+			opacity: 0.8;
+		}
+
+		.tool-schema-content {
+			display: none;
+			margin-top: 10px;
+		}
+
+		.tool-schema-content.expanded {
+			display: block;
+		}
+
+		.tool-nodes-section {
+			margin-top: 15px;
+			padding-top: 15px;
+			border-top: 1px solid #e9ecef;
+		}
+
+		.tool-nodes-title {
+			font-weight: bold;
+			color: #333;
+			margin-bottom: 10px;
+		}
+
+		.tool-nodes-list {
+			list-style: none;
+			padding: 0;
+			margin: 0;
+		}
+
+		.tool-nodes-list li {
+			padding: 8px;
+			margin: 5px 0;
+			background: #f8f9fa;
+			border-radius: 4px;
+		}
+
+		.tool-nodes-list li a {
+			color: #667eea;
+			text-decoration: none;
+		}
+
+		.tool-nodes-list li a:hover {
+			text-decoration: underline;
+		}
+
+		.node-path-small {
+			color: #6c757d;
+			font-size: 0.85em;
+			font-family: 'Courier New', monospace;
+		}
+
+		.no-tools {
+			text-align: center;
+			padding: 40px;
+			color: #6c757d;
+			font-size: 1.2em;
+		}
+
+		@media (max-width: 768px) {
+			.tools-grid {
+				grid-template-columns: 1fr;
+			}
 		}
 	</style>
 }

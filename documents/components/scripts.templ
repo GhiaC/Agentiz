@@ -1,10 +1,15 @@
 package components
 
-templ scripts(treeData, nodesData string) {
+templ scripts(treeData, nodesData, registeredTools string) {
 	<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 	<script>
 		{ treeData }
 		{ nodesData }
+		{ registeredTools }
+		// Ensure registeredTools is always an object
+		if (typeof registeredTools === 'undefined' || registeredTools === null) {
+			registeredTools = {};
+		}
 	</script>
 	<script>
 		function calculateStats() {
@@ -81,8 +86,16 @@ templ scripts(treeData, nodesData string) {
 					'</div>';
 				html += '<div class="tools-content" id="tools-content-' + escapeHtml(node.path) + '">';
 				nodeData.tools.forEach(function(tool) {
+					const isRegistered = registeredTools && typeof registeredTools === 'object' && registeredTools[tool.name] === true;
 					html += '<div class="tool-item">' +
-						'<div class="tool-name">' + escapeHtml(tool.name) + '</div>' +
+						'<div class="tool-name-row">' +
+						'<div class="tool-name">' + escapeHtml(tool.name) + '</div>';
+					if (isRegistered) {
+						html += '<span class="tool-badge tool-badge-registered" title="This tool is registered in FunctionRegistry">✓ Registered</span>';
+					} else {
+						html += '<span class="tool-badge tool-badge-unregistered" title="This tool is not registered in FunctionRegistry">⚠️ Not Registered</span>';
+					}
+					html += '</div>' +
 						'<div class="tool-description">' + escapeHtml(tool.description || '') + '</div>' +
 						'</div>';
 				});
@@ -325,10 +338,12 @@ templ scripts(treeData, nodesData string) {
 
 			const treeView = document.getElementById('tree-view');
 			const detailView = document.getElementById('detail-view');
+			const toolsView = document.getElementById('tools-view');
 			const detailContent = document.getElementById('detail-content');
 
 			treeView.classList.add('hidden');
 			detailView.classList.add('active');
+			if (toolsView) toolsView.classList.remove('active');
 
 			let html = '';
 
@@ -417,8 +432,16 @@ templ scripts(treeData, nodesData string) {
 					'<div class="tools-content" id="tools-content-' + path + '">';
 				
 				nodeData.tools.forEach(function(tool, index) {
+					const isRegistered = registeredTools && typeof registeredTools === 'object' && registeredTools[tool.name] === true;
 					html += '<div class="detail-field" style="margin-bottom: 12px;">' +
-						'<div class="detail-field-label">' + (index + 1) + '. ' + escapeHtml(tool.name) + '</div>' +
+						'<div class="detail-field-label" style="display: flex; align-items: center; gap: 10px;">' +
+						'<span>' + (index + 1) + '. ' + escapeHtml(tool.name) + '</span>';
+					if (isRegistered) {
+						html += '<span class="tool-badge tool-badge-registered" title="This tool is registered in FunctionRegistry">✓ Registered</span>';
+					} else {
+						html += '<span class="tool-badge tool-badge-unregistered" title="This tool is not registered in FunctionRegistry">⚠️ Not Registered</span>';
+					}
+					html += '</div>' +
 						'<div class="detail-field-value">' +
 						'<div style="margin-bottom: 6px;"><strong>Description:</strong> ' + escapeHtml(tool.description || 'N/A') + '</div>';
 					
@@ -445,15 +468,144 @@ templ scripts(treeData, nodesData string) {
 		function showTreeView() {
 			const treeView = document.getElementById('tree-view');
 			const detailView = document.getElementById('detail-view');
+			const toolsView = document.getElementById('tools-view');
 
 			treeView.classList.remove('hidden');
 			detailView.classList.remove('active');
+			if (toolsView) toolsView.classList.remove('active');
 			window.location.hash = '';
+		}
+
+		function showAllTools() {
+			const treeView = document.getElementById('tree-view');
+			const detailView = document.getElementById('detail-view');
+			const toolsView = document.getElementById('tools-view');
+
+			treeView.classList.add('hidden');
+			detailView.classList.remove('active');
+			if (toolsView) {
+				toolsView.classList.add('active');
+				renderAllTools();
+			}
+			window.location.hash = '#tools';
+		}
+
+		function renderAllTools() {
+			const container = document.getElementById('tools-list-container');
+			if (!container) return;
+
+			// Collect all tools from all nodes
+			const allTools = [];
+			const toolMap = new Map(); // To deduplicate tools by name
+
+			for (const path in nodesData) {
+				const nodeData = nodesData[path];
+				if (nodeData.tools && nodeData.tools.length > 0) {
+					nodeData.tools.forEach(function(tool) {
+						// Use tool name as key to deduplicate
+						if (!toolMap.has(tool.name)) {
+							toolMap.set(tool.name, {
+								tool: tool,
+								nodes: []
+							});
+						}
+						const entry = toolMap.get(tool.name);
+						entry.nodes.push({
+							path: path,
+							title: nodeData.title || nodeData.id || path
+						});
+					});
+				}
+			}
+
+			// Convert map to array and sort by tool name
+			const toolsArray = Array.from(toolMap.values()).sort(function(a, b) {
+				return a.tool.name.localeCompare(b.tool.name);
+			});
+
+			if (toolsArray.length === 0) {
+				container.innerHTML = '<div class="no-tools">No tools found in the knowledge tree.</div>';
+				return;
+			}
+
+			let html = '<div class="tools-summary">Total: <strong>' + toolsArray.length + '</strong> unique tools</div>';
+			html += '<div class="tools-grid">';
+
+			toolsArray.forEach(function(entry, index) {
+				const tool = entry.tool;
+				const statusClass = tool.status === 'active' ? 'status-active' : 
+									tool.status === 'disabled' ? 'status-disabled' : 
+									tool.status === 'hidden' ? 'status-hidden' : 'status-unknown';
+				const isRegistered = registeredTools && typeof registeredTools === 'object' && registeredTools[tool.name] === true;
+				
+				html += '<div class="tool-card">';
+				html += '<div class="tool-card-header">';
+				html += '<div class="tool-name-large">' + escapeHtml(tool.name) + '</div>';
+				html += '<div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">';
+				html += '<span class="tool-status ' + statusClass + '">' + escapeHtml(tool.status || 'unknown') + '</span>';
+				if (isRegistered) {
+					html += '<span class="tool-badge tool-badge-registered" title="This tool is registered in FunctionRegistry">✓ Registered</span>';
+				} else {
+					html += '<span class="tool-badge tool-badge-unregistered" title="This tool is not registered in FunctionRegistry">⚠️ Not Registered</span>';
+				}
+				html += '</div>';
+				html += '</div>';
+				
+				if (tool.description) {
+					html += '<div class="tool-description-full">' + escapeHtml(tool.description) + '</div>';
+				}
+
+				if (tool.input_schema) {
+					html += '<div class="tool-schema-section">';
+					html += '<div class="tool-schema-title" onclick="toggleSchema(\'schema-' + index + '\')">';
+					html += '<span class="toggle-icon" id="toggle-schema-' + index + '"></span>';
+					html += '<span>📋 Input Schema</span>';
+					html += '</div>';
+					html += '<div class="tool-schema-content" id="schema-' + index + '">';
+					html += '<pre class="json-viewer">' + JSON.stringify(tool.input_schema, null, 2) + '</pre>';
+					html += '</div>';
+					html += '</div>';
+				}
+
+				if (entry.nodes.length > 0) {
+					html += '<div class="tool-nodes-section">';
+					html += '<div class="tool-nodes-title">📍 Available in ' + entry.nodes.length + ' node(s):</div>';
+					html += '<ul class="tool-nodes-list">';
+					entry.nodes.forEach(function(node) {
+						html += '<li><a href="#" onclick="event.preventDefault(); showNodeDetail(\'' + escapeHtml(node.path) + '\'); return false;">' + 
+								escapeHtml(node.title) + ' <span class="node-path-small">(' + escapeHtml(node.path) + ')</span></a></li>';
+					});
+					html += '</ul>';
+					html += '</div>';
+				}
+
+				html += '</div>';
+			});
+
+			html += '</div>';
+			container.innerHTML = html;
+		}
+
+		function toggleSchema(schemaId) {
+			const schemaContent = document.getElementById(schemaId);
+			const toggleIcon = document.getElementById('toggle-' + schemaId);
+			
+			if (!schemaContent) return;
+			
+			if (schemaContent.classList.contains('expanded')) {
+				schemaContent.classList.remove('expanded');
+				if (toggleIcon) toggleIcon.classList.remove('expanded');
+			} else {
+				schemaContent.classList.add('expanded');
+				if (toggleIcon) toggleIcon.classList.add('expanded');
+			}
 		}
 
 		window.addEventListener('hashchange', function() {
 			const hash = window.location.hash;
-			if (hash && hash.startsWith('#node-')) {
+			if (hash === '#tools') {
+				showAllTools();
+			} else if (hash && hash.startsWith('#node-')) {
 				const path = decodeURIComponent(hash.substring(6));
 				showNodeDetail(path);
 			} else {
@@ -464,7 +616,9 @@ templ scripts(treeData, nodesData string) {
 		renderTree();
 		setupSearch();
 		
-		if (window.location.hash && window.location.hash.startsWith('#node-')) {
+		if (window.location.hash === '#tools') {
+			showAllTools();
+		} else if (window.location.hash && window.location.hash.startsWith('#node-')) {
 			const path = decodeURIComponent(window.location.hash.substring(6));
 			showNodeDetail(path);
 		}

@@ -30,6 +30,9 @@ type AgentizeInterface interface {
 	GetToolStrategy() model.MergeStrategy
 	GenerateGraphVisualization(filename string, title string) error
 	GetAllNodes() map[string]*model.Node
+	// GetRegisteredTools returns the list of registered tool names (optional)
+	// If not implemented, returns nil
+	GetRegisteredTools() []string
 }
 
 // NewServer creates a new HTTP server
@@ -202,8 +205,20 @@ func (s *Server) handleDocs(w http.ResponseWriter, r *http.Request) {
 		return repo.GetChildren(path)
 	})
 
-	// Generate HTML
-	html, err := doc.GenerateHTML()
+	// Get registered tools - first try from AgentizeInterface if it implements GetRegisteredTools
+	var registeredTools []string
+	if registeredToolsGetter, ok := s.ag.(interface{ GetRegisteredTools() []string }); ok {
+		registeredTools = registeredToolsGetter.GetRegisteredTools()
+	} else if s.engine != nil {
+		// Fallback to engine's function registry
+		functionRegistry := s.engine.GetFunctionRegistry()
+		if functionRegistry != nil {
+			registeredTools = functionRegistry.GetAllRegistered()
+		}
+	}
+
+	// Generate HTML with registered tools information
+	html, err := doc.GenerateHTMLWithRegisteredTools(registeredTools)
 	if err != nil {
 		respondJSON(w, http.StatusInternalServerError, map[string]string{
 			"error": fmt.Sprintf("Failed to generate documentation: %v", err),

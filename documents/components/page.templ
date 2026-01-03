@@ -1,6 +1,6 @@
 package components
 
-templ Page(treeData, nodesData string) {
+templ Page(treeData, nodesData, registeredTools string) {
 	<!DOCTYPE html>
 	<html lang="en">
 	<head>
@@ -16,9 +16,10 @@ templ Page(treeData, nodesData string) {
 			<div class="content">
 				@treeView()
 				@detailView()
+				@toolsView()
 			</div>
 		</div>
-		@scripts(treeData, nodesData)
+		@scripts(treeData, nodesData, registeredTools)
 	</body>
 	</html>
 }

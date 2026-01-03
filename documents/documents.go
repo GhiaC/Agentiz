@@ -227,18 +227,36 @@ func (d *AgentizeDocument) GetAllPaths() []string {
 
 // GenerateHTML generates an HTML page using templ components
 func (d *AgentizeDocument) GenerateHTML() ([]byte, error) {
+	return d.GenerateHTMLWithRegisteredTools(nil)
+}
+
+// GenerateHTMLWithRegisteredTools generates an HTML page with registered tools information
+// registeredTools is a list of tool names that have functions registered in FunctionRegistry
+func (d *AgentizeDocument) GenerateHTMLWithRegisteredTools(registeredTools []string) ([]byte, error) {
 	// Prepare JSON data
 	treeJSON, _ := json.Marshal(d.tree)
 	nodesJSON, _ := json.Marshal(d.nodes)
 
+	// Prepare registered tools as a Set for efficient lookup
+	registeredToolsSet := make(map[string]bool)
+	if registeredTools != nil {
+		for _, toolName := range registeredTools {
+			registeredToolsSet[toolName] = true
+		}
+	}
+	// Always marshal as an object (even if empty) to ensure it's never undefined in JS
+	registeredToolsJSON, _ := json.Marshal(registeredToolsSet)
+
 	// Construct JavaScript assignment strings
 	treeDataJS := "const treeData = " + string(treeJSON) + ";"
 	nodesDataJS := "const nodesData = " + string(nodesJSON) + ";"
+	// Use let instead of const so we can reassign if needed
+	registeredToolsJS := "let registeredTools = " + string(registeredToolsJSON) + ";"
 
 	// Render using templ
 	var buf bytes.Buffer
 	ctx := context.Background()
-	if err := components.Page(treeDataJS, nodesDataJS).Render(ctx, &buf); err != nil {
+	if err := components.Page(treeDataJS, nodesDataJS, registeredToolsJS).Render(ctx, &buf); err != nil {
 		return nil, err
 	}
 
@@ -246,6 +264,7 @@ func (d *AgentizeDocument) GenerateHTML() ([]byte, error) {
 	html := buf.Bytes()
 	html = bytes.ReplaceAll(html, []byte("{ treeData }"), []byte(treeDataJS))
 	html = bytes.ReplaceAll(html, []byte("{ nodesData }"), []byte(nodesDataJS))
+	html = bytes.ReplaceAll(html, []byte("{ registeredTools }"), []byte(registeredToolsJS))
 
 	return html, nil
 }
