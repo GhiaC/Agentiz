@@ -21,7 +21,7 @@ Agentize is a powerful Go library for building agentic services that navigate th
 ### Installation
 
 ```bash
-go get agentize
+go get github.com/ghiac/agentize
 ```
 
 ### Basic Usage
@@ -29,7 +29,7 @@ go get agentize
 ```go
 package main
 
-import "agentize"
+import "github.com/ghiac/agentize"
 
 func main() {
     // Create Agentize instance - automatically loads all nodes
@@ -179,27 +179,6 @@ output, err := engine.Step(sessionID, userInput)
 ## 🌐 HTTP API
 
 When HTTP server is enabled:
-
-### POST `/chat`
-
-```bash
-curl -X POST http://localhost:8080/chat \
-  -H "Content-Type: application/json" \
-  -d '{
-    "query": "Hello, I want to proceed",
-    "userID": "user123"
-  }'
-```
-
-**Response:**
-```json
-{
-  "action": "respond",
-  "message": "Processing input at node: Root Node",
-  "current_node": "root",
-  "opened_files": ["root/node.md", "root/node.yaml", "root/tools.json"]
-}
-```
 
 ### GET `/graph`
 

@@ -5,9 +5,9 @@ import (
 	"log"
 	"os"
 
-	"agentize"
-	"agentize/config"
-	"agentize/server"
+	"github.com/ghiac/agentize"
+	"github.com/ghiac/agentize/config"
+	"github.com/ghiac/agentize/server"
 )
 
 func main() {

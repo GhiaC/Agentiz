@@ -11,7 +11,7 @@ import (
 	"github.com/go-echarts/go-echarts/v2/components"
 	"github.com/go-echarts/go-echarts/v2/opts"
 
-	"agentize/model"
+	"github.com/ghiac/agentize/model"
 )
 
 // GraphVisualizer renders the knowledge tree as an interactive graph.

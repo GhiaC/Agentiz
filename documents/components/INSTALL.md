@@ -39,7 +39,7 @@ templ generate
 پس از اجرای `templ generate`، می‌توانید از کامپوننت‌ها در کد Go استفاده کنید:
 
 ```go
-import "agentize/documents/components"
+import "github.com/ghiac/agentize/documents/components"
 
 // استفاده از کامپوننت
 components.Page(treeData, nodesData).Render(ctx, w)

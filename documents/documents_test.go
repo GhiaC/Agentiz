@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"agentize/model"
+	"github.com/ghiac/agentize/model"
 )
 
 // TestGenerateHTML tests that GenerateHTML works correctly with templ components

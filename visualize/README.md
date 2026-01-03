@@ -22,7 +22,7 @@ go mod tidy
 package main
 
 import (
-    "agentize"
+    "github.com/ghiac/agentize"
 )
 
 func main() {

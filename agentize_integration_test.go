@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"agentize/model"
+	"github.com/ghiac/agentize/model"
 )
 
 // TestFullKnowledgeTreeIntegration tests the complete Agentize functionality

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"log"
 
-	"agentize/model"
+	"github.com/ghiac/agentize/model"
 )
 
 // This example demonstrates how to work with disabled and hidden tools

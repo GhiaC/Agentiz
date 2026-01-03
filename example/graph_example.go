@@ -6,7 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"agentize"
+	"github.com/ghiac/agentize"
 )
 
 // This example demonstrates how to generate a graph visualization of the knowledge tree

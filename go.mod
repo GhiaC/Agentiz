@@ -1,4 +1,4 @@
-module agentize
+module github.com/ghiac/agentize
 
 go 1.23.0
 

@@ -6,9 +6,9 @@ import (
 	"strings"
 	"time"
 
-	"agentize/fsrepo"
-	"agentize/model"
-	"agentize/store"
+	"github.com/ghiac/agentize/fsrepo"
+	"github.com/ghiac/agentize/model"
+	"github.com/ghiac/agentize/store"
 )
 
 // Engine is the main agent engine

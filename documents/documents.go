@@ -6,8 +6,8 @@ import (
 	"encoding/json"
 	"log"
 
-	"agentize/documents/components"
-	"agentize/model"
+	"github.com/ghiac/agentize/documents/components"
+	"github.com/ghiac/agentize/model"
 )
 
 // AgentizeDocument represents the knowledge tree structure

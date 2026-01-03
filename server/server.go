@@ -8,12 +8,12 @@ import (
 	"os"
 	"path/filepath"
 
-	"agentize/config"
-	"agentize/documents"
-	"agentize/engine"
-	"agentize/fsrepo"
-	"agentize/model"
-	"agentize/store"
+	"github.com/ghiac/agentize/config"
+	"github.com/ghiac/agentize/documents"
+	"github.com/ghiac/agentize/engine"
+	"github.com/ghiac/agentize/fsrepo"
+	"github.com/ghiac/agentize/model"
+	"github.com/ghiac/agentize/store"
 )
 
 // Server represents the HTTP server
@@ -59,7 +59,6 @@ func (s *Server) Start() error {
 	}
 
 	// Setup routes
-	http.HandleFunc("/chat", s.handleChat)
 	http.HandleFunc("/graph", s.handleGraph)
 	http.HandleFunc("/docs", s.handleDocs)
 	http.HandleFunc("/health", s.handleHealth)
@@ -67,89 +66,11 @@ func (s *Server) Start() error {
 	address := s.config.GetAddress()
 	log.Printf("Starting HTTP server on %s", address)
 	log.Printf("Available endpoints:")
-	log.Printf("  POST /chat - Chat endpoint (requires query and userID)")
 	log.Printf("  GET  /graph - Graph visualization")
 	log.Printf("  GET  /docs - Knowledge tree documentation")
 	log.Printf("  GET  /health - Health check")
 
 	return http.ListenAndServe(address, nil)
-}
-
-// ChatRequest represents a chat request
-type ChatRequest struct {
-	Query  string `json:"query"`
-	UserID string `json:"userID"`
-}
-
-// ChatResponse represents a chat response
-type ChatResponse struct {
-	Action      string                 `json:"action"`
-	Message     string                 `json:"message"`
-	ToolCall    *engine.ToolCall       `json:"tool_call,omitempty"`
-	CurrentNode string                 `json:"current_node"`
-	OpenedFiles []string               `json:"opened_files,omitempty"`
-	Debug       map[string]interface{} `json:"debug,omitempty"`
-	Error       string                 `json:"error,omitempty"`
-}
-
-// handleChat handles chat requests
-func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var req ChatRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondJSON(w, http.StatusBadRequest, ChatResponse{
-			Error: fmt.Sprintf("Invalid request: %v", err),
-		})
-		return
-	}
-
-	// Validate required fields
-	if req.Query == "" {
-		respondJSON(w, http.StatusBadRequest, ChatResponse{
-			Error: "query is required",
-		})
-		return
-	}
-	if req.UserID == "" {
-		respondJSON(w, http.StatusBadRequest, ChatResponse{
-			Error: "userID is required",
-		})
-		return
-	}
-
-	// Get or create session
-	session, err := s.getOrCreateSession(req.UserID)
-	if err != nil {
-		respondJSON(w, http.StatusInternalServerError, ChatResponse{
-			Error: fmt.Sprintf("Failed to get/create session: %v", err),
-		})
-		return
-	}
-
-	// Process the query
-	output, err := s.engine.Step(session.SessionID, req.Query)
-	if err != nil {
-		respondJSON(w, http.StatusInternalServerError, ChatResponse{
-			Error: fmt.Sprintf("Failed to process query: %v", err),
-		})
-		return
-	}
-
-	// Convert to response
-	response := ChatResponse{
-		Action:      output.Action,
-		Message:     output.Message,
-		ToolCall:    output.ToolCall,
-		CurrentNode: output.CurrentNode,
-		OpenedFiles: output.OpenedFiles,
-		Debug:       output.Debug,
-	}
-
-	respondJSON(w, http.StatusOK, response)
 }
 
 // handleGraph handles graph visualization requests
@@ -236,22 +157,6 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, map[string]string{
 		"status": "ok",
 	})
-}
-
-// getOrCreateSession gets an existing session or creates a new one
-func (s *Server) getOrCreateSession(userID string) (*model.Session, error) {
-	// Try to get existing session from store
-	sessionStore := s.engine.GetSessionStore()
-
-	// List sessions for user to find active one
-	sessions, err := sessionStore.List(userID)
-	if err == nil && len(sessions) > 0 {
-		// Return the most recent session
-		return sessions[len(sessions)-1], nil
-	}
-
-	// Create new session
-	return s.engine.StartSession(userID)
 }
 
 // respondJSON sends a JSON response

@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"agentize/model"
+	"github.com/ghiac/agentize/model"
 
 	"github.com/sashabaranov/go-openai"
 )

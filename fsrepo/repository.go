@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"agentize/model"
+	"github.com/ghiac/agentize/model"
 )
 
 // NodeRepository handles loading nodes from the filesystem

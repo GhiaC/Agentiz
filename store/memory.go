@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"agentize/model"
+	"github.com/ghiac/agentize/model"
 )
 
 // MemoryStore is an in-memory implementation of SessionStore

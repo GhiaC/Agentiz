@@ -6,8 +6,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"agentize"
-	"agentize/model"
+	"github.com/ghiac/agentize"
+	"github.com/ghiac/agentize/model"
 )
 
 // This example demonstrates the new Agentize.New() API

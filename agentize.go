@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"sync"
 
-	"agentize/fsrepo"
-	"agentize/model"
-	"agentize/store"
-	"agentize/visualize"
+	"github.com/ghiac/agentize/fsrepo"
+	"github.com/ghiac/agentize/model"
+	"github.com/ghiac/agentize/store"
+	"github.com/ghiac/agentize/visualize"
 )
 
 // Agentize is the main entry point for the library

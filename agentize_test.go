@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"agentize/model"
+	"github.com/ghiac/agentize/model"
 )
 
 func TestNew(t *testing.T) {

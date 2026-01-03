@@ -6,10 +6,10 @@ import (
 	"os"
 	"path/filepath"
 
-	"agentize/engine"
-	"agentize/fsrepo"
-	"agentize/model"
-	"agentize/store"
+	"github.com/ghiac/agentize/engine"
+	"github.com/ghiac/agentize/fsrepo"
+	"github.com/ghiac/agentize/model"
+	"github.com/ghiac/agentize/store"
 )
 
 func main() {

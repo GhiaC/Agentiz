@@ -1,7 +1,7 @@
 package fsrepo
 
 import (
-	"agentize/model"
+	"github.com/ghiac/agentize/model"
 	"fmt"
 	"strings"
 )
