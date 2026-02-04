@@ -131,7 +131,10 @@ func (ch *CoreHandler) ProcessMessage(
 	}
 
 	// Get or create Core session for this user
-	coreSession := ch.getOrCreateCoreSession(userID)
+	coreSession, err := ch.getOrCreateCoreSession(userID)
+	if err != nil {
+		return "", fmt.Errorf("failed to get or create core session: %w", err)
+	}
 
 	// Build system prompts
 	systemPrompts, err := ch.buildSystemPrompts(userID)
@@ -147,6 +150,11 @@ func (ch *CoreHandler) ProcessMessage(
 			Content: userMessage,
 		},
 	)
+
+	// Save Core session after adding user message
+	if err := ch.saveCoreSession(coreSession); err != nil {
+		return "", fmt.Errorf("failed to save core session: %w", err)
+	}
 
 	// Build messages for LLM call
 	messages := ch.buildMessages(systemPrompts, coreSession.ConversationState.Msgs)
@@ -170,21 +178,37 @@ func (ch *CoreHandler) ProcessMessage(
 	)
 	coreSession.ConversationState.LastActivity = time.Now()
 
+	// Save Core session after adding assistant response
+	if err := ch.saveCoreSession(coreSession); err != nil {
+		return "", fmt.Errorf("failed to save core session: %w", err)
+	}
+
 	return response, nil
 }
 
 // getOrCreateCoreSession gets or creates a Core session for a user
-func (ch *CoreHandler) getOrCreateCoreSession(userID string) *model.Session {
+// It uses SessionHandler to ensure persistence in the database
+func (ch *CoreHandler) getOrCreateCoreSession(userID string) (*model.Session, error) {
+	// First check in-memory cache
 	ch.coreSessionsMu.RLock()
 	session, exists := ch.coreSessions[userID]
 	ch.coreSessionsMu.RUnlock()
 
 	if exists {
-		// Get user's total sessions count from SessionHandler
-		userSessions, _ := ch.sessionHandler.ListUserSessions(userID)
-		log.Log.Infof("[CoreHandler] 🔄 Using existing Core session | UserID: %s | SessionID: %s | User sessions: %d | Total Core sessions: %d",
-			userID, session.SessionID, len(userSessions), len(ch.coreSessions))
-		return session
+		// Verify session still exists in database and refresh if needed
+		dbSession, err := ch.sessionHandler.GetSession(session.SessionID)
+		if err == nil && dbSession != nil {
+			// Update cache with fresh data from database
+			ch.coreSessionsMu.Lock()
+			ch.coreSessions[userID] = dbSession
+			ch.coreSessionsMu.Unlock()
+
+			userSessions, _ := ch.sessionHandler.ListUserSessions(userID)
+			log.Log.Infof("[CoreHandler] 🔄 Using existing Core session | UserID: %s | SessionID: %s | User sessions: %d",
+				userID, dbSession.SessionID, len(userSessions))
+			return dbSession, nil
+		}
+		// Session not found in DB, will create new one below
 	}
 
 	ch.coreSessionsMu.Lock()
@@ -192,22 +216,74 @@ func (ch *CoreHandler) getOrCreateCoreSession(userID string) *model.Session {
 
 	// Double-check after acquiring write lock
 	if session, exists = ch.coreSessions[userID]; exists {
-		// Get user's total sessions count from SessionHandler
-		userSessions, _ := ch.sessionHandler.ListUserSessions(userID)
-		log.Log.Infof("[CoreHandler] 🔄 Using existing Core session (after lock) | UserID: %s | SessionID: %s | User sessions: %d | Total Core sessions: %d",
-			userID, session.SessionID, len(userSessions), len(ch.coreSessions))
-		return session
+		dbSession, err := ch.sessionHandler.GetSession(session.SessionID)
+		if err == nil && dbSession != nil {
+			ch.coreSessions[userID] = dbSession
+			userSessions, _ := ch.sessionHandler.ListUserSessions(userID)
+			log.Log.Infof("[CoreHandler] 🔄 Using existing Core session (after lock) | UserID: %s | SessionID: %s | User sessions: %d",
+				userID, dbSession.SessionID, len(userSessions))
+			return dbSession, nil
+		}
 	}
 
-	session = model.NewSessionWithType(userID, model.AgentTypeCore)
+	// Try to get existing Core session from database
+	// Check if store has GetCoreSession method (e.g., SQLiteStore)
+	store := ch.sessionHandler.GetStore()
+	if sqliteStore, ok := store.(interface {
+		GetCoreSession(string) (*model.Session, error)
+	}); ok {
+		existingCore, err := sqliteStore.GetCoreSession(userID)
+		if err == nil && existingCore != nil {
+			ch.coreSessions[userID] = existingCore
+			userSessions, _ := ch.sessionHandler.ListUserSessions(userID)
+			log.Log.Infof("[CoreHandler] 🔄 Loaded Core session from database | UserID: %s | SessionID: %s | User sessions: %d",
+				userID, existingCore.SessionID, len(userSessions))
+			return existingCore, nil
+		}
+	} else {
+		// Fallback: search through all sessions for Core type
+		allSessions, err := ch.sessionHandler.ListUserSessions(userID)
+		if err == nil {
+			for _, s := range allSessions {
+				if s.AgentType == model.AgentTypeCore {
+					ch.coreSessions[userID] = s
+					log.Log.Infof("[CoreHandler] 🔄 Found Core session from list | UserID: %s | SessionID: %s",
+						userID, s.SessionID)
+					return s, nil
+				}
+			}
+		}
+	}
+
+	// Create new Core session through SessionHandler (which will persist it)
+	session, err := ch.sessionHandler.CreateSession(userID, model.AgentTypeCore)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create core session: %w", err)
+	}
+
 	ch.coreSessions[userID] = session
 
-	// Get user's total sessions count from SessionHandler
 	userSessions, _ := ch.sessionHandler.ListUserSessions(userID)
 	log.Log.Infof("[CoreHandler] ✨ Created new Core session | UserID: %s | SessionID: %s", userID, session.SessionID)
-	log.Log.Infof("[CoreHandler] 📊 User sessions: %d | Total Core sessions in memory: %d", len(userSessions), len(ch.coreSessions))
+	log.Log.Infof("[CoreHandler] 📊 User sessions: %d", len(userSessions))
 
-	return session
+	return session, nil
+}
+
+// saveCoreSession saves the Core session to the database
+func (ch *CoreHandler) saveCoreSession(session *model.Session) error {
+	// Update in-memory cache
+	ch.coreSessionsMu.Lock()
+	ch.coreSessions[session.UserID] = session
+	ch.coreSessionsMu.Unlock()
+
+	// Save to database through SessionHandler
+	store := ch.sessionHandler.GetStore()
+	if err := store.Put(session); err != nil {
+		return fmt.Errorf("failed to save core session: %w", err)
+	}
+
+	return nil
 }
 
 // buildSystemPrompts builds the array of system prompts for the Core

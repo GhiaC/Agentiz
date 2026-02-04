@@ -52,6 +52,11 @@ type SessionHandler struct {
 	mu        sync.RWMutex
 }
 
+// GetStore returns the underlying SessionStore for direct access
+func (sh *SessionHandler) GetStore() SessionStore {
+	return sh.store
+}
+
 // NewSessionHandler creates a new SessionHandler with the given store
 func NewSessionHandler(store SessionStore, config SessionHandlerConfig) *SessionHandler {
 	if config.AutoSummarizeThreshold <= 0 {
