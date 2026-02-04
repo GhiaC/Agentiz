@@ -1,6 +1,7 @@
 package fsrepo
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -10,14 +11,21 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ghiac/agentize/log"
 	"github.com/ghiac/agentize/model"
+	"gopkg.in/yaml.v3"
 )
+
+// SummaryGenerator generates a keyword-based English summary for a node's content
+// It receives the node content and returns a short summary string
+type SummaryGenerator func(ctx context.Context, content string) (string, error)
 
 // NodeRepository handles loading nodes from the filesystem
 type NodeRepository struct {
-	rootPath string
-	cache    map[string]*model.Node
-	mu       sync.RWMutex
+	rootPath         string
+	cache            map[string]*model.Node
+	mu               sync.RWMutex
+	summaryGenerator SummaryGenerator
 }
 
 // NewNodeRepository creates a new repository with the given root path
@@ -36,6 +44,11 @@ func NewNodeRepository(rootPath string) (*NodeRepository, error) {
 		rootPath: absPath,
 		cache:    make(map[string]*model.Node),
 	}, nil
+}
+
+// SetSummaryGenerator sets the function used to generate summaries for nodes
+func (r *NodeRepository) SetSummaryGenerator(generator SummaryGenerator) {
+	r.summaryGenerator = generator
 }
 
 // LoadNode loads a node from the filesystem by its path
@@ -72,6 +85,7 @@ func (r *NodeRepository) LoadNode(path string) (*model.Node, error) {
 		node.ID = meta.ID
 		node.Title = meta.Title
 		node.Description = meta.Description
+		node.Summary = meta.Summary
 		node.Auth = meta.Auth
 		node.MCP = meta.MCP
 	} else {
@@ -221,4 +235,146 @@ func (r *NodeRepository) InvalidateCache(path string) {
 	} else {
 		delete(r.cache, path)
 	}
+}
+
+// LoadAllTools recursively loads all nodes starting from "root" and returns all tools.
+// This is a temporary/test method for the first version to get all tools without needing to open nodes.
+func (r *NodeRepository) LoadAllTools() ([]model.Tool, error) {
+	var allTools []model.Tool
+	err := r.collectToolsRecursive("root", &allTools)
+	if err != nil {
+		return nil, err
+	}
+	return allTools, nil
+}
+
+// collectToolsRecursive recursively collects tools from a node and all its children
+func (r *NodeRepository) collectToolsRecursive(path string, tools *[]model.Tool) error {
+	// Load the node
+	node, err := r.LoadNode(path)
+	if err != nil {
+		return err
+	}
+
+	// Add tools from this node
+	*tools = append(*tools, node.Tools...)
+
+	// Recursively collect tools from children
+	children, err := r.GetChildren(path)
+	if err != nil {
+		return nil // No children, not an error
+	}
+
+	for _, childPath := range children {
+		if err := r.collectToolsRecursive(childPath, tools); err != nil {
+			// Log warning but continue with other children
+			continue
+		}
+	}
+
+	return nil
+}
+
+// saveNodeMeta writes the NodeMeta to node.yaml file
+func (r *NodeRepository) saveNodeMeta(path string, meta *model.NodeMeta) error {
+	fullPath := filepath.Join(r.rootPath, path, "node.yaml")
+
+	data, err := yaml.Marshal(meta)
+	if err != nil {
+		return fmt.Errorf("failed to marshal node meta: %w", err)
+	}
+
+	if err := os.WriteFile(fullPath, data, 0644); err != nil {
+		return fmt.Errorf("failed to write node.yaml: %w", err)
+	}
+
+	return nil
+}
+
+// EnsureSummaries iterates through all nodes and generates summaries for those missing them.
+// It uses the configured SummaryGenerator to create concise English summaries.
+// Summaries are saved to the node.yaml files.
+// If forceSummary is true, it will regenerate summaries for all nodes, even if they already have one.
+func (r *NodeRepository) EnsureSummaries(ctx context.Context, forceSummary bool) error {
+	if r.summaryGenerator == nil {
+		return fmt.Errorf("summary generator not configured")
+	}
+
+	return r.ensureSummariesRecursive(ctx, "root", forceSummary)
+}
+
+// ensureSummariesRecursive recursively ensures summaries for a node and all its children
+func (r *NodeRepository) ensureSummariesRecursive(ctx context.Context, path string, forceSummary bool) error {
+	// Invalidate cache to get fresh data
+	r.InvalidateCache(path)
+
+	// Load the node
+	node, err := r.LoadNode(path)
+	if err != nil {
+		return err
+	}
+
+	// Check if summary needs to be generated:
+	// - forceSummary: regenerate even if exists
+	// - node.Summary == "": generate if missing
+	// - node.Content != "": only if there's content to summarize
+	needsSummary := (forceSummary || node.Summary == "") && node.Content != ""
+
+	if needsSummary {
+		action := "Generating"
+		if forceSummary && node.Summary != "" {
+			action = "Regenerating"
+		}
+		log.Log.Infof("%s summary for node: %s", action, path)
+
+		// Generate summary using LLM
+		summary, err := r.summaryGenerator(ctx, node.Content)
+		if err != nil {
+			log.Log.Warnf("Failed to generate summary for %s: %v", path, err)
+		} else {
+			// Load existing meta to preserve other fields
+			fullPath := filepath.Join(r.rootPath, path)
+			meta, err := r.loadNodeMeta(fullPath)
+			if err != nil {
+				// Create new meta if it doesn't exist
+				meta = &model.NodeMeta{
+					ID:    node.ID,
+					Title: node.Title,
+				}
+			}
+
+			// Update summary
+			meta.Summary = summary
+
+			// Save back to file
+			if err := r.saveNodeMeta(path, meta); err != nil {
+				log.Log.Warnf("Failed to save summary for %s: %v", path, err)
+			} else {
+				log.Log.Infof("Summary saved for node: %s", path)
+
+				// Update cache
+				r.mu.Lock()
+				if cached, ok := r.cache[path]; ok {
+					cached.Summary = summary
+				}
+				r.mu.Unlock()
+			}
+		}
+	}
+
+	// Process children
+	children, err := r.GetChildren(path)
+	if err != nil {
+		return nil // No children, not an error
+	}
+
+	for _, childPath := range children {
+		if err := r.ensureSummariesRecursive(ctx, childPath, forceSummary); err != nil {
+			// Log warning but continue with other children
+			log.Log.Warnf("Error processing child %s: %v", childPath, err)
+			continue
+		}
+	}
+
+	return nil
 }

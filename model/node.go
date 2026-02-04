@@ -6,26 +6,21 @@ import "time"
 type Node struct {
 	// Path is the relative path from root (e.g., "root", "root/next", "root/next/next")
 	Path string
-
 	// ID is the node identifier (from node.yaml or derived from Path)
 	ID string
-
 	// Title and Description from node.yaml
 	Title       string
 	Description string
-
+	// Summary is a short English keyword-based summary of the node content (for AI context/caching)
+	Summary string
 	// Auth contains user access control rules
 	Auth Auth
-
 	// Content is the markdown content from node.md
 	Content string
-
 	// Tools are the tools defined at this node level
 	Tools []Tool
-
 	// MCP is a list of MCP servers that this node can connect to
 	MCP []MCP
-
 	// Metadata
 	LoadedAt time.Time
 	Hash     string // Content hash for cache invalidation
@@ -209,6 +204,7 @@ type NodeMeta struct {
 	ID          string `yaml:"id"`
 	Title       string `yaml:"title"`
 	Description string `yaml:"description"`
+	Summary     string `yaml:"summary,omitempty"`
 	Auth        Auth   `yaml:"auth"`
 	MCP         []MCP  `yaml:"mcp,omitempty"`
 }

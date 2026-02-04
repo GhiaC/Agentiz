@@ -12,20 +12,14 @@ type Session struct {
 	// SessionID is a unique identifier for this session
 	SessionID string
 
-	// CurrentNodePath is the path of the current node (e.g., "root", "root/next")
-	CurrentNodePath string
-
-	// OpenedFiles tracks which files have been loaded (for debugging/tracing)
-	OpenedFiles []string
-
-	// AccumulatedTools are all tools aggregated from root to current node
-	AccumulatedTools []Tool
-
-	// Memory stores conversation/interaction data
-	Memory map[string]interface{}
+	// ConversationState stores conversation/interaction data
+	ConversationState *ConversationState
 
 	// NodeDigests stores lightweight information about visited nodes
 	NodeDigests []NodeDigest
+
+	// ToolResults stores tool execution results by unique ID (for large results)
+	ToolResults map[string]string
 
 	// Metadata
 	CreatedAt time.Time
@@ -46,15 +40,13 @@ type NodeDigest struct {
 func NewSession(userID string) *Session {
 	now := time.Now()
 	return &Session{
-		UserID:           userID,
-		SessionID:        generateSessionID(),
-		CurrentNodePath:  "root",
-		OpenedFiles:      []string{},
-		AccumulatedTools: []Tool{},
-		Memory:           make(map[string]interface{}),
-		NodeDigests:      []NodeDigest{},
-		CreatedAt:        now,
-		UpdatedAt:        now,
+		UserID:            userID,
+		SessionID:         generateSessionID(),
+		ConversationState: NewConversationState(),
+		NodeDigests:       []NodeDigest{},
+		ToolResults:       make(map[string]string),
+		CreatedAt:         now,
+		UpdatedAt:         now,
 	}
 }
 

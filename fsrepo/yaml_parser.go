@@ -1,8 +1,8 @@
 package fsrepo
 
 import (
-	"github.com/ghiac/agentize/model"
 	"fmt"
+	"github.com/ghiac/agentize/model"
 	"strings"
 )
 
@@ -112,6 +112,8 @@ func parseYAML(data []byte, v interface{}) error {
 				meta.Title = value
 			case key == "description":
 				meta.Description = value
+			case key == "summary":
+				meta.Summary = value
 			case key == "inherit" && authStarted:
 				meta.Auth.Inherit = parseBool(value)
 				inheritExplicitlySet = true

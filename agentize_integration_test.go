@@ -222,17 +222,11 @@ func TestFullKnowledgeTreeIntegration(t *testing.T) {
 	})
 
 	t.Run("Test with options", func(t *testing.T) {
-		opts := &Options{
-			ToolStrategy: model.MergeStrategyAppend,
-		}
+		opts := &Options{}
 
 		ag, err := NewWithOptions(knowledgePath, opts)
 		if err != nil {
 			t.Fatalf("Failed to create Agentize with options: %v", err)
-		}
-
-		if ag.GetToolStrategy() != model.MergeStrategyAppend {
-			t.Errorf("Expected tool strategy 'append', got '%s'", ag.GetToolStrategy())
 		}
 
 		// Verify nodes still loaded

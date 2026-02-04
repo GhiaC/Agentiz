@@ -1,35 +1,32 @@
 package agentize
 
 import (
+	"context"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 
+	"github.com/ghiac/agentize/documents"
+	"github.com/ghiac/agentize/engine"
 	"github.com/ghiac/agentize/fsrepo"
+	"github.com/ghiac/agentize/llmutils"
 	"github.com/ghiac/agentize/model"
 	"github.com/ghiac/agentize/store"
 	"github.com/ghiac/agentize/visualize"
+	"github.com/gin-gonic/gin"
 )
 
 // Agentize is the main entry point for the library
 // It loads and manages the entire knowledge tree
 type Agentize struct {
-	// Repository for loading nodes from filesystem
-	repo *fsrepo.NodeRepository
+	// Core processing engine (holds repo, sessions, functions)
+	engine *engine.Engine
 
-	// All loaded nodes indexed by path
+	// Knowledge tree cache (for visualization/docs)
 	nodes map[string]*model.Node
-
-	// Root node
-	root *model.Node
-
-	// Mutex for thread-safe access
-	mu sync.RWMutex
-
-	// Session store (optional, can be set later)
-	sessionStore store.SessionStore
-
-	// Tool merge strategy
-	toolStrategy model.MergeStrategy
+	mu    sync.RWMutex
 }
 
 // New creates a new Agentize instance by loading the entire knowledge tree from the given path
@@ -40,8 +37,6 @@ func New(path string) (*Agentize, error) {
 
 // Options allows configuring Agentize behavior
 type Options struct {
-	// ToolStrategy defines how tools with the same name should be merged
-	ToolStrategy model.MergeStrategy
 	// SessionStore allows providing a custom session store
 	SessionStore store.SessionStore
 }
@@ -54,25 +49,32 @@ func NewWithOptions(path string, opts *Options) (*Agentize, error) {
 		return nil, fmt.Errorf("failed to create repository: %w", err)
 	}
 
+	// Determine session store
+	sessionStore := store.SessionStore(store.NewMemoryStore())
+	if opts != nil && opts.SessionStore != nil {
+		sessionStore = opts.SessionStore
+	}
+
+	// Create engine
+	eng := &engine.Engine{
+		Repo:      repo,
+		Sessions:  sessionStore,
+		Functions: model.NewFunctionRegistry(),
+	}
+	eng.Executor = func(toolName string, args map[string]interface{}) (string, error) {
+		if eng.Functions == nil {
+			return "", fmt.Errorf("function registry is not configured")
+		}
+		return eng.Functions.Execute(toolName, args)
+	}
+
 	// Create Agentize instance
 	ag := &Agentize{
-		repo:         repo,
-		nodes:        make(map[string]*model.Node),
-		sessionStore: store.NewMemoryStore(),
-		toolStrategy: model.MergeStrategyOverride,
+		engine: eng,
+		nodes:  make(map[string]*model.Node),
 	}
 
-	// Apply options
-	if opts != nil {
-		if opts.SessionStore != nil {
-			ag.sessionStore = opts.SessionStore
-		}
-		if opts.ToolStrategy != "" {
-			ag.toolStrategy = opts.ToolStrategy
-		}
-	}
-
-	// Load all nodes recursively
+	// Load all nodes recursively (for visualization cache)
 	if err := ag.loadAllNodes(); err != nil {
 		return nil, fmt.Errorf("failed to load knowledge tree: %w", err)
 	}
@@ -98,7 +100,7 @@ func (ag *Agentize) loadNodeRecursiveLocked(path string) error {
 	}
 
 	// Load the node (repository has its own locking)
-	node, err := ag.repo.LoadNode(path)
+	node, err := ag.engine.Repo.LoadNode(path)
 	if err != nil {
 		return fmt.Errorf("failed to load node %s: %w", path, err)
 	}
@@ -106,13 +108,8 @@ func (ag *Agentize) loadNodeRecursiveLocked(path string) error {
 	// Store the node
 	ag.nodes[path] = node
 
-	// Set root if this is the root node
-	if path == "root" {
-		ag.root = node
-	}
-
 	// Load all child nodes recursively
-	children, err := ag.repo.GetChildren(path)
+	children, err := ag.engine.Repo.GetChildren(path)
 	if err == nil {
 		for _, childPath := range children {
 			if err := ag.loadNodeRecursiveLocked(childPath); err != nil {
@@ -153,7 +150,7 @@ func (ag *Agentize) GetAllNodes() map[string]*model.Node {
 func (ag *Agentize) GetRoot() *model.Node {
 	ag.mu.RLock()
 	defer ag.mu.RUnlock()
-	return ag.root
+	return ag.nodes["root"]
 }
 
 // GetNodePaths returns all node paths in order (from root to deepest)
@@ -173,7 +170,7 @@ func (ag *Agentize) GetNodePaths() []string {
 		visited[path] = true
 		paths = append(paths, path)
 
-		children, err := ag.repo.GetChildren(path)
+		children, err := ag.engine.Repo.GetChildren(path)
 		if err == nil {
 			for _, childPath := range children {
 				traverse(childPath)
@@ -190,7 +187,7 @@ func (ag *Agentize) Reload() error {
 	ag.mu.Lock()
 	// Clear cache
 	ag.nodes = make(map[string]*model.Node)
-	ag.repo.InvalidateCache("")
+	ag.engine.Repo.InvalidateCache("")
 	ag.mu.Unlock()
 
 	// Reload all nodes (will acquire lock internally)
@@ -203,7 +200,7 @@ func (ag *Agentize) ReloadNode(path string) error {
 	defer ag.mu.Unlock()
 
 	// Invalidate cache for this node
-	ag.repo.InvalidateCache(path)
+	ag.engine.Repo.InvalidateCache(path)
 	delete(ag.nodes, path)
 
 	// Reload the node and its children recursively
@@ -212,17 +209,78 @@ func (ag *Agentize) ReloadNode(path string) error {
 
 // GetRepository returns the underlying repository
 func (ag *Agentize) GetRepository() *fsrepo.NodeRepository {
-	return ag.repo
+	return ag.engine.Repo
 }
 
 // GetSessionStore returns the session store
 func (ag *Agentize) GetSessionStore() store.SessionStore {
-	return ag.sessionStore
+	return ag.engine.Sessions
 }
 
-// GetToolStrategy returns the tool merge strategy
-func (ag *Agentize) GetToolStrategy() model.MergeStrategy {
-	return ag.toolStrategy
+// GetEngine returns the internal engine
+func (ag *Agentize) GetEngine() *engine.Engine {
+	return ag.engine
+}
+
+// UseLLMConfig configures the LLM client for the agentize instance
+func (ag *Agentize) UseLLMConfig(config engine.LLMConfig) error {
+	return ag.engine.UseLLMConfig(config)
+}
+
+// InitializeSummaries generates concise summaries for all nodes that don't have one.
+// This should be called after UseLLMConfig to ensure the LLM is configured.
+// It runs synchronously and may take time for large knowledge trees.
+// If forceSummary is true, it will regenerate summaries for all nodes, even if they already have one.
+func (ag *Agentize) InitializeSummaries(ctx context.Context, forceSummary bool) error {
+	llmClient := ag.engine.GetLLMClient()
+	if llmClient == nil {
+		return fmt.Errorf("LLM client is not configured")
+	}
+
+	llmConfig := ag.engine.GetLLMConfig()
+
+	// Determine model to use for summary generation
+	modelName := llmConfig.CollectResultModel
+	if modelName == "" {
+		modelName = llmConfig.Model
+	}
+
+	// Create summary config
+	summaryConfig := llmutils.SummaryConfig{
+		Model: modelName,
+	}
+
+	// Set up the summary generator using llmutils
+	ag.engine.Repo.SetSummaryGenerator(func(ctx context.Context, content string) (string, error) {
+		return llmutils.GenerateSummary(ctx, llmClient, content, summaryConfig)
+	})
+
+	// Generate summaries (force regeneration if requested)
+	return ag.engine.Repo.EnsureSummaries(ctx, forceSummary)
+}
+
+// UseFunctionRegistry configures the function registry for tool execution
+func (ag *Agentize) UseFunctionRegistry(registry *model.FunctionRegistry) {
+	ag.engine.UseFunctionRegistry(registry)
+}
+
+// ProcessMessage routes a user message through the LLM workflow and tool executor
+func (ag *Agentize) ProcessMessage(
+	ctx context.Context,
+	sessionID string,
+	userMessage string,
+) (string, int, error) {
+	return ag.engine.ProcessMessage(ctx, sessionID, userMessage)
+}
+
+// CreateSession initializes a fresh session anchored at the root node
+func (ag *Agentize) CreateSession(userID string) (*model.Session, error) {
+	return ag.engine.CreateSession(userID)
+}
+
+// SetProgress sets the progress state for a session
+func (ag *Agentize) SetProgress(sessionID string, inProgress bool) error {
+	return ag.engine.SetProgress(sessionID, inProgress)
 }
 
 // GenerateGraphVisualization generates a graph visualization of the knowledge tree
@@ -239,14 +297,77 @@ func (ag *Agentize) GenerateGraphVisualization(filename string, title string) er
 	return visualizer.SaveToFile(filename, title)
 }
 
+// RegisterRoutes registers HTTP routes on the given gin.Engine
+// Routes: /graph, /docs, /health
+func (ag *Agentize) RegisterRoutes(router *gin.Engine) {
+	router.GET("/agentize/graph", ag.handleGraph)
+	router.GET("/agentize/docs", ag.handleDocs)
+	router.GET("/agentize/health", ag.handleHealth)
+}
+
+// handleGraph handles graph visualization requests
+func (ag *Agentize) handleGraph(c *gin.Context) {
+	// Generate graph to a temporary file
+	tmpFile := filepath.Join(os.TempDir(), "agentize_graph.html")
+	if err := ag.GenerateGraphVisualization(tmpFile, "Knowledge Tree Graph"); err != nil {
+		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to generate graph: %v", err)})
+		return
+	}
+
+	// Read and serve the file
+	content, err := os.ReadFile(tmpFile)
+	if err != nil {
+		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to read graph file: %v", err)})
+		return
+	}
+
+	contentStr := strings.Replace(string(content),
+		`<script src="https://go-echarts.github.io/go-echarts-assets/assets/echarts.min.js"></script>`,
+		`<script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>`,
+		-1)
+
+	c.Header("Content-Type", "text/html; charset=utf-8")
+	c.String(200, contentStr)
+}
+
+// handleDocs handles documentation requests
+func (ag *Agentize) handleDocs(c *gin.Context) {
+	nodes := ag.GetAllNodes()
+	repo := ag.GetRepository()
+
+	doc := documents.NewAgentizeDocument(nodes, func(path string) ([]string, error) {
+		return repo.GetChildren(path)
+	})
+
+	registeredTools := ag.GetRegisteredTools()
+	html, err := doc.GenerateHTMLWithRegisteredTools(registeredTools)
+	if err != nil {
+		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to generate documentation: %v", err)})
+		return
+	}
+
+	c.Header("Content-Type", "text/html; charset=utf-8")
+	c.String(200, string(html))
+}
+
+// handleHealth handles health check requests
+func (ag *Agentize) handleHealth(c *gin.Context) {
+	c.JSON(200, gin.H{
+		"status":  "ok",
+		"nodes":   len(ag.nodes),
+		"version": Version(),
+	})
+}
+
 // Version returns the current version of the library
 func Version() string {
 	return "0.1.0"
 }
 
-// GetRegisteredTools returns the list of registered tool names
-// For Agentize, this returns nil as tools are registered externally
-// Implementations like InfraAgentBot should override this method
+// GetRegisteredTools returns the list of registered tool names from the FunctionRegistry
 func (ag *Agentize) GetRegisteredTools() []string {
+	if ag.engine != nil && ag.engine.Functions != nil {
+		return ag.engine.Functions.GetAllRegistered()
+	}
 	return nil
 }

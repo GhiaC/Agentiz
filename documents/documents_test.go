@@ -78,7 +78,7 @@ func TestGenerateHTML(t *testing.T) {
 	}
 
 	htmlStr := string(html)
-	
+
 	// Debug: Print first 500 characters of HTML
 	if len(htmlStr) > 500 {
 		t.Logf("First 500 chars of HTML: %s", htmlStr[:500])
@@ -199,7 +199,7 @@ func TestGenerateHTMLWithSpecialCharacters(t *testing.T) {
 	}
 
 	htmlStr := string(html)
-	
+
 	// Check that JSON is properly escaped (should contain escaped quotes)
 	// The JSON should be valid even with special characters
 	if !strings.Contains(htmlStr, "const treeData") {
@@ -211,4 +211,3 @@ func TestGenerateHTMLWithSpecialCharacters(t *testing.T) {
 		t.Error("Generated HTML should start with DOCTYPE even with special characters")
 	}
 }
-
