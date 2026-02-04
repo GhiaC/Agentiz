@@ -199,10 +199,8 @@ func (s *MemoryStore) ClearVisitedNodes(userID string) {
 	s.userNodes.Delete(userID)
 }
 
-// SessionStore defines the interface for session storage
-type SessionStore interface {
-	Get(sessionID string) (*model.Session, error)
-	Put(session *model.Session) error
-	Delete(sessionID string) error
-	List(userID string) ([]*model.Session, error)
-}
+// SessionStore is an alias for model.SessionStore for backward compatibility
+type SessionStore = model.SessionStore
+
+// Ensure MemoryStore implements model.SessionStore
+var _ model.SessionStore = (*MemoryStore)(nil)

@@ -89,6 +89,8 @@ func (e *Engine) CreateSession(userID string) (*model.Session, error) {
 		return nil, fmt.Errorf("failed to persist session: %w", err)
 	}
 
+	log.Log.Infof("[Engine] ✅ Created new session | UserID: %s | SessionID: %s", userID, session.SessionID)
+
 	return session, nil
 }
 
@@ -182,12 +184,23 @@ func (e *Engine) ProcessMessage(
 	sessionID string,
 	userMessage string,
 ) (string, int, error) {
+	log.Log.Infof("[Engine] 🚀 Processing message | SessionID: %s | Message length: %d chars", sessionID, len(userMessage))
+
 	if e.llmClient == nil {
 		return "", 0, errors.New("LLM client is not configured. Call UseLLMConfig first")
 	}
 
 	// Get conversation state from session
 	convState := e.getConversationState(sessionID)
+
+	// Get session for logging
+	session, err := e.Sessions.Get(sessionID)
+	if err == nil {
+		log.Log.Infof("[Engine] 🔍 Retrieved session | SessionID: %s | UserID: %s | Messages in history: %d",
+			sessionID, session.UserID, len(convState.Msgs))
+	} else {
+		log.Log.Warnf("[Engine] ⚠️  Session not found | SessionID: %s | Error: %v", sessionID, err)
+	}
 
 	// Check if already in progress
 	if convState.InProgress {
@@ -232,8 +245,12 @@ func (e *Engine) ProcessMessage(
 
 	response, tokens, err := e.processChatRequest(ctx, sessionID)
 	if err != nil {
+		log.Log.Errorf("[Engine] ❌ LLM processing failed | SessionID: %s | Error: %v", sessionID, err)
 		return "", tokens, fmt.Errorf("LLM processing failed: %w", err)
 	}
+
+	log.Log.Infof("[Engine] ✅ Message processed successfully | SessionID: %s | Response length: %d chars | Tokens: %d",
+		sessionID, len(response), tokens)
 
 	return response, tokens, nil
 }
@@ -842,13 +859,6 @@ func (e *Engine) processChatRequest(
 
 	// Handle text response
 	textResponse := choice.Message.Content
-
-	// If response is empty, don't add to memory and don't return empty string
-	// This can happen when LLM uses send_message tool and considers job done
-	if textResponse == "" {
-		return "", tokenUsage, nil
-	}
-
 	e.appendMessages(sessionID, []openai.ChatCompletionMessage{
 		{
 			Role:    openai.ChatMessageRoleAssistant,
