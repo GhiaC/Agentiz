@@ -186,20 +186,6 @@ You can navigate to specialized areas:
 	rootTools := `{
   "tools": [
     {
-      "name": "clarify_question",
-      "description": "Clarify question when requests are unclear",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "statement": {
-            "type": "string",
-            "description": "Query statement to clarify"
-          }
-        },
-        "required": ["statement"]
-      }
-    },
-    {
       "name": "send_message",
       "description": "Send message to the user",
       "input_schema": {
@@ -626,17 +612,14 @@ func TestScenario_TBD(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Failed to get root node: %v", err)
 		}
-		if len(root.Tools) < 2 {
-			t.Errorf("Root should have at least 2 tools, got %d", len(root.Tools))
+		if len(root.Tools) < 1 {
+			t.Errorf("Root should have at least 1 tool, got %d", len(root.Tools))
 		}
 
 		// Check for expected root tools
 		toolNames := make(map[string]bool)
 		for _, tool := range root.Tools {
 			toolNames[tool.Name] = true
-		}
-		if !toolNames["clarify_question"] {
-			t.Error("Root should have 'clarify_question' tool")
 		}
 		if !toolNames["send_message"] {
 			t.Error("Root should have 'send_message' tool")

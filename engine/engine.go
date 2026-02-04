@@ -6,15 +6,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"sort"
+	"strings"
+	"time"
+
 	"github.com/ghiac/agentize/fsrepo"
 	"github.com/ghiac/agentize/log"
 	"github.com/ghiac/agentize/model"
 	"github.com/ghiac/agentize/store"
 	"github.com/sashabaranov/go-openai"
-	"net/http"
-	"sort"
-	"strings"
-	"time"
 )
 
 //go:embed engine.md
@@ -215,29 +216,6 @@ func (e *Engine) ProcessMessage(
 			return "", 0, fmt.Errorf("failed to clean up function calls: %w", err)
 		}
 		convState = e.getConversationState(sessionID)
-	}
-
-	// Handle clarify_question tool response
-	// Note: The assistant message with tool calls was already added to memory
-	// when clarify_question was first called (in processChatRequest).
-	// Here we only need to add the tool response (user's answer).
-	if convState.ToolID != "" && len(userMessage) > 1 {
-		if err := e.appendMessages(sessionID, []openai.ChatCompletionMessage{
-			{
-				Role:       openai.ChatMessageRoleTool,
-				Content:    userMessage,
-				Name:       "clarify_question",
-				ToolCallID: convState.ToolID,
-			},
-		}); err != nil {
-			return "", 0, fmt.Errorf("failed to update session: %w", err)
-		}
-		if err := e.clearToolState(sessionID); err != nil {
-			return "", 0, fmt.Errorf("failed to update session: %w", err)
-		}
-		// Continue processing without recursive ProcessMessage call
-		// (which would get stuck on InProgress check)
-		return e.processChatRequest(ctx, sessionID)
 	}
 
 	// Add user message
@@ -536,14 +514,6 @@ func (e *Engine) processQueuedMessages(sessionID string) error {
 	return e.setConversationState(sessionID, state)
 }
 
-// clearToolState clears tool state
-func (e *Engine) clearToolState(sessionID string) error {
-	state := e.getConversationState(sessionID)
-	state.ToolID = ""
-	state.ToolsMsg = nil
-	return e.setConversationState(sessionID, state)
-}
-
 // removeFunctionCalls removes function/tool call messages
 func (e *Engine) removeFunctionCalls(sessionID string) error {
 	state := e.getConversationState(sessionID)
@@ -828,22 +798,6 @@ func (e *Engine) processChatRequest(
 				log.Log.Infof("Tool execution result: name=%s, result_len=%d, result=%s", toolCall.Function.Name, len(result), truncateForLog(result, 500))
 			}
 
-			// Handle clarify_question specially - it needs to wait for user input
-			if toolCall.Function.Name == "clarify_question" {
-				// For clarify_question, we need to store the tool call state and return the statement
-				if statement, ok := args["statement"].(string); ok && statement != "" {
-					// Store tool state in session
-					state := e.getConversationState(sessionID)
-					state.ToolID = toolCall.ID
-					state.ToolsMsg = &openai.ChatCompletionMessage{
-						Role:      openai.ChatMessageRoleAssistant,
-						ToolCalls: choice.Message.ToolCalls,
-					}
-					e.setConversationState(sessionID, state)
-					return statement, tokenUsage, nil
-				}
-			}
-
 			// Process tool result (truncate if too long)
 			// Skip truncation for collect_result to avoid infinite loop
 			var processedResult string
@@ -888,6 +842,13 @@ func (e *Engine) processChatRequest(
 
 	// Handle text response
 	textResponse := choice.Message.Content
+
+	// If response is empty, don't add to memory and don't return empty string
+	// This can happen when LLM uses send_message tool and considers job done
+	if textResponse == "" {
+		return "", tokenUsage, nil
+	}
+
 	e.appendMessages(sessionID, []openai.ChatCompletionMessage{
 		{
 			Role:    openai.ChatMessageRoleAssistant,

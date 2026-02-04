@@ -10,8 +10,6 @@ import (
 // ConversationState represents the memory structure for a user/session
 type ConversationState struct {
 	Msgs         []openai.ChatCompletionMessage
-	ToolID       string
-	ToolsMsg     *openai.ChatCompletionMessage
 	InProgress   bool
 	Queue        []openai.ChatCompletionMessage
 	LastActivity time.Time
@@ -83,19 +81,6 @@ func (m *Memory) Append(userID string, msg []openai.ChatCompletionMessage) {
 	}
 }
 
-// InWaiting checks if a user is waiting for a tool response
-func (m *Memory) InWaiting(userID string) bool {
-	lock := m.getOrCreateLock(userID)
-	lock.Lock()
-	defer lock.Unlock()
-
-	if mem, ok := m.usersMemory.Load(userID); ok {
-		userMem := mem.(*ConversationState)
-		return userMem.ToolID != ""
-	}
-	return false
-}
-
 // GetMemory retrieves a user's memory
 func (m *Memory) GetMemory(userID string) *ConversationState {
 	lock := m.getOrCreateLock(userID)
@@ -107,26 +92,6 @@ func (m *Memory) GetMemory(userID string) *ConversationState {
 	}
 	return &ConversationState{
 		Msgs: make([]openai.ChatCompletionMessage, 0),
-	}
-}
-
-// ClearTool clears the tool state for a user
-func (m *Memory) ClearTool(userID string) {
-	m.SetTool(userID, "", nil)
-}
-
-// SetTool sets the tool state for a user
-func (m *Memory) SetTool(userID string, toolID string, toolMsg *openai.ChatCompletionMessage) {
-	lock := m.getOrCreateLock(userID)
-	lock.Lock()
-	defer lock.Unlock()
-
-	if mem, ok := m.usersMemory.Load(userID); ok {
-		userMem := mem.(*ConversationState)
-		userMem.LastActivity = time.Now()
-		userMem.ToolID = toolID
-		userMem.ToolsMsg = toolMsg
-		m.usersMemory.Store(userID, userMem)
 	}
 }
 
