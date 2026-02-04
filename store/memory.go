@@ -202,5 +202,18 @@ func (s *MemoryStore) ClearVisitedNodes(userID string) {
 // SessionStore is an alias for model.SessionStore for backward compatibility
 type SessionStore = model.SessionStore
 
+// GetAllSessions returns all sessions grouped by userID
+func (s *MemoryStore) GetAllSessions() (map[string][]*model.Session, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	sessionsByUser := make(map[string][]*model.Session)
+	for _, session := range s.sessions {
+		sessionsByUser[session.UserID] = append(sessionsByUser[session.UserID], session)
+	}
+
+	return sessionsByUser, nil
+}
+
 // Ensure MemoryStore implements model.SessionStore
 var _ model.SessionStore = (*MemoryStore)(nil)

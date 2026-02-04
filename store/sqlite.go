@@ -246,6 +246,47 @@ func (s *SQLiteStore) List(userID string) ([]*model.Session, error) {
 	return sessions, nil
 }
 
+// GetAllSessions returns all sessions grouped by userID
+func (s *SQLiteStore) GetAllSessions() (map[string][]*model.Session, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.Query(
+		"SELECT data, created_at, updated_at FROM sessions ORDER BY updated_at DESC",
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query all sessions: %w", err)
+	}
+	defer rows.Close()
+
+	sessionsByUser := make(map[string][]*model.Session)
+	for rows.Next() {
+		var data string
+		var createdAt, updatedAt int64
+
+		if err := rows.Scan(&data, &createdAt, &updatedAt); err != nil {
+			return nil, fmt.Errorf("failed to scan session: %w", err)
+		}
+
+		session := &model.Session{}
+		if err := json.Unmarshal([]byte(data), session); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal session: %w", err)
+		}
+
+		// Restore timestamps
+		session.CreatedAt = time.Unix(createdAt, 0)
+		session.UpdatedAt = time.Unix(updatedAt, 0)
+
+		sessionsByUser[session.UserID] = append(sessionsByUser[session.UserID], session)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating sessions: %w", err)
+	}
+
+	return sessionsByUser, nil
+}
+
 // GetCoreSession returns the Core session for a user
 // For each user, there should be only one Core session
 // If no Core session exists, it returns nil without error
