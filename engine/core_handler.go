@@ -126,6 +126,11 @@ func (ch *CoreHandler) ProcessMessage(
 	log.Log.Infof("[CoreHandler] 🚀 Processing new message | UserID: %s | Message length: %d chars | User sessions: %d | Total Core sessions: %d",
 		userID, len(userMessage), len(userSessions), totalCoreSessions)
 
+	// Check if database is ready (check both UserAgents)
+	if !ch.userAgentHigh.IsDBReady() || !ch.userAgentLow.IsDBReady() {
+		return "", fmt.Errorf("database is not ready. Call Init() on UserAgents first to ensure database is fully loaded")
+	}
+
 	if ch.llmClient == nil {
 		return "", fmt.Errorf("LLM client not configured. Call UseLLMConfig first")
 	}
@@ -334,7 +339,7 @@ func (ch *CoreHandler) getCoreToolsForLLM() []openai.Tool {
 					"properties": map[string]interface{}{
 						"session_id": map[string]interface{}{
 							"type":        "string",
-							"description": "The session ID to use for this conversation",
+							"description": "The session ID to use for this conversation. This is the value inside the square brackets [XXX] from the sessions list, NOT the title in quotes. Example: if you see '[1802460620-260205-ahov] \"Some Title\"', use '1802460620-260205-ahov' as session_id.",
 						},
 						"message": map[string]interface{}{
 							"type":        "string",
@@ -355,7 +360,7 @@ func (ch *CoreHandler) getCoreToolsForLLM() []openai.Tool {
 					"properties": map[string]interface{}{
 						"session_id": map[string]interface{}{
 							"type":        "string",
-							"description": "The session ID to use for this conversation",
+							"description": "The session ID to use for this conversation. This is the value inside the square brackets [XXX] from the sessions list, NOT the title in quotes. Example: if you see '[1802460620-260205-ahov] \"Some Title\"', use '1802460620-260205-ahov' as session_id.",
 						},
 						"message": map[string]interface{}{
 							"type":        "string",
@@ -462,7 +467,7 @@ func (ch *CoreHandler) processWithTools(
 			Tools:    tools,
 		})
 		if err != nil {
-			return "", fmt.Errorf("LLM request failed: %w", err)
+			return "", formatLLMError(err)
 		}
 
 		if len(resp.Choices) == 0 {

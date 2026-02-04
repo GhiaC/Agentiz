@@ -201,3 +201,70 @@ func TestFunctionRegistryWithDisabledTools(t *testing.T) {
 		t.Errorf("Expected no error (disabled/hidden tools don't need functions), got: %v", err)
 	}
 }
+
+func TestFunctionRegistry_DisableToolTemporarily(t *testing.T) {
+	registry := NewFunctionRegistry()
+
+	// Register initial function
+	fn1 := func(args map[string]interface{}) (string, error) {
+		return "working", nil
+	}
+	if err := registry.Register("test_tool", fn1); err != nil {
+		t.Fatalf("Failed to register: %v", err)
+	}
+
+	// Verify it's working
+	result, err := registry.Execute("test_tool", nil)
+	if err != nil {
+		t.Fatalf("Failed to execute: %v", err)
+	}
+	if result != "working" {
+		t.Errorf("Expected 'working', got %s", result)
+	}
+
+	// Disable the tool temporarily
+	if err := registry.DisableToolTemporarily(
+		"test_tool",
+		DisableReasonRateLimit,
+		"API quota exceeded. Please try again later.",
+	); err != nil {
+		t.Fatalf("Failed to disable tool: %v", err)
+	}
+
+	// Verify it's disabled - should return ToolDisabledError
+	_, err = registry.Execute("test_tool", nil)
+	if err == nil {
+		t.Fatal("Expected error when executing disabled tool")
+	}
+	var disabledErr *ToolDisabledError
+	if !errors.As(err, &disabledErr) {
+		t.Errorf("Expected ToolDisabledError, got %T: %v", err, err)
+	}
+	if disabledErr.ToolName != "test_tool" {
+		t.Errorf("Expected tool name 'test_tool', got %s", disabledErr.ToolName)
+	}
+	if disabledErr.DisableReason != DisableReasonRateLimit {
+		t.Errorf("Expected reason 'rate_limit', got %s", disabledErr.DisableReason)
+	}
+	if disabledErr.ErrorMessage != "API quota exceeded. Please try again later." {
+		t.Errorf("Expected error message 'API quota exceeded. Please try again later.', got %s", disabledErr.ErrorMessage)
+	}
+
+	// Test disabling a non-existent tool (should still work)
+	if err := registry.DisableToolTemporarily(
+		"nonexistent_tool",
+		DisableReasonMaintenance,
+		"Under maintenance",
+	); err != nil {
+		t.Fatalf("Failed to disable non-existent tool: %v", err)
+	}
+
+	// Verify non-existent tool is also disabled
+	_, err = registry.Execute("nonexistent_tool", nil)
+	if err == nil {
+		t.Fatal("Expected error when executing disabled non-existent tool")
+	}
+	if !errors.As(err, &disabledErr) {
+		t.Errorf("Expected ToolDisabledError, got %T", err)
+	}
+}

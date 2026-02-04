@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -27,9 +29,20 @@ type SQLiteStore struct {
 // NewSQLiteStore creates a new SQLite session store
 // If dbPath is empty, it uses ":memory:" for in-memory database
 // For file-based storage, use a path like "./data/sessions.db"
+// The function automatically creates the directory if it doesn't exist
 func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
 	if dbPath == "" {
 		dbPath = ":memory:"
+	}
+
+	// For file-based storage (not in-memory), ensure directory exists
+	if dbPath != ":memory:" {
+		dir := filepath.Dir(dbPath)
+		if dir != "." && dir != "" {
+			if err := os.MkdirAll(dir, 0755); err != nil {
+				return nil, fmt.Errorf("failed to create directory for database: %w", err)
+			}
+		}
 	}
 
 	db, err := sql.Open("sqlite", dbPath)
@@ -303,8 +316,10 @@ func (s *SQLiteStore) PutCoreSession(session *model.Session) error {
 	createdAt := session.CreatedAt.Unix()
 	updatedAt := session.UpdatedAt.Unix()
 
+	// Use INSERT OR REPLACE to handle case where session_id might already exist
+	// (e.g., from a previous session with different agent_type)
 	_, err = s.db.Exec(
-		`INSERT INTO sessions (session_id, user_id, agent_type, data, created_at, updated_at)
+		`INSERT OR REPLACE INTO sessions (session_id, user_id, agent_type, data, created_at, updated_at)
 		 VALUES (?, ?, ?, ?, ?, ?)`,
 		session.SessionID,
 		session.UserID,

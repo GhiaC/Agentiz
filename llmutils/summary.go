@@ -2,6 +2,7 @@ package llmutils
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/sashabaranov/go-openai"
@@ -74,7 +75,7 @@ Example bad summary: "Kubernetes pod management and monitoring overview"
 	)
 
 	if err != nil {
-		return "", fmt.Errorf("LLM request failed: %w", err)
+		return "", formatLLMError(err)
 	}
 
 	if len(resp.Choices) == 0 {
@@ -136,7 +137,7 @@ Example: "Debugged Kubernetes pod restart issue. Found memory limits too low. Ap
 	})
 
 	if err != nil {
-		return "", fmt.Errorf("LLM request failed: %w", err)
+		return "", formatLLMError(err)
 	}
 
 	if len(resp.Choices) == 0 {
@@ -176,7 +177,7 @@ Example outputs:
 	})
 
 	if err != nil {
-		return "", fmt.Errorf("LLM request failed: %w", err)
+		return "", formatLLMError(err)
 	}
 
 	if len(resp.Choices) == 0 {
@@ -184,6 +185,26 @@ Example outputs:
 	}
 
 	return resp.Choices[0].Message.Content, nil
+}
+
+// formatLLMError formats OpenAI API errors with detailed information
+func formatLLMError(err error) error {
+	if err == nil {
+		return nil
+	}
+
+	// Check if it's an OpenAI APIError
+	var apiErr *openai.APIError
+	if errors.As(err, &apiErr) {
+		// Format error with status code and message
+		if apiErr.Message != "" {
+			return fmt.Errorf("LLM request failed: error, status code: %d, message: %s", apiErr.HTTPStatusCode, apiErr.Message)
+		}
+		return fmt.Errorf("LLM request failed: error, status code: %d", apiErr.HTTPStatusCode)
+	}
+
+	// For other errors, return as-is with prefix
+	return fmt.Errorf("LLM request failed: %w", err)
 }
 
 // FormatMessagesForSummary converts OpenAI messages to a readable format for summarization

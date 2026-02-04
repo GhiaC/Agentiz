@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ghiac/agentize/fsrepo"
@@ -47,6 +48,47 @@ type Engine struct {
 	// LLM client and configuration
 	llmClient *openai.Client
 	llmConfig LLMConfig
+	// Database readiness flag
+	dbReady   bool
+	dbReadyMu sync.RWMutex
+}
+
+// Init initializes the engine by loading the root node and verifying Sessions store is ready.
+// This must be called before ProcessMessage to ensure the database is fully loaded.
+func (e *Engine) Init() error {
+	e.dbReadyMu.Lock()
+	defer e.dbReadyMu.Unlock()
+
+	// Try to load root node to verify repository is ready
+	_, err := e.Repo.LoadNode("root")
+	if err != nil {
+		e.dbReady = false
+		return fmt.Errorf("failed to initialize engine: repository not ready - %w", err)
+	}
+
+	// Verify Sessions store is ready by testing a basic operation
+	if e.Sessions == nil {
+		e.dbReady = false
+		return fmt.Errorf("failed to initialize engine: Sessions store is nil")
+	}
+
+	// Test Sessions store by performing a List operation (should not fail even with empty result)
+	_, err = e.Sessions.List("__init_test__")
+	if err != nil {
+		e.dbReady = false
+		return fmt.Errorf("failed to initialize engine: Sessions store not ready - %w", err)
+	}
+
+	e.dbReady = true
+	log.Log.Infof("[Engine] ✅ Database initialized and ready (Repo + Sessions)")
+	return nil
+}
+
+// IsDBReady returns whether the database is ready
+func (e *Engine) IsDBReady() bool {
+	e.dbReadyMu.RLock()
+	defer e.dbReadyMu.RUnlock()
+	return e.dbReady
 }
 
 // UseFunctionRegistry configures the registry that will be used for executing tools.
@@ -185,6 +227,11 @@ func (e *Engine) ProcessMessage(
 	userMessage string,
 ) (string, int, error) {
 	log.Log.Infof("[Engine] 🚀 Processing message | SessionID: %s | Message length: %d chars", sessionID, len(userMessage))
+
+	// Check if database is ready
+	if !e.IsDBReady() {
+		return "", 0, errors.New("database is not ready. Call Init() first to ensure database is fully loaded")
+	}
 
 	if e.llmClient == nil {
 		return "", 0, errors.New("LLM client is not configured. Call UseLLMConfig first")
@@ -689,7 +736,7 @@ Extract the relevant information from the data that answers the query:`, fullRes
 	)
 
 	if err != nil {
-		return "", fmt.Errorf("LLM request failed: %w", err)
+		return "", formatLLMError(err)
 	}
 
 	if len(resp.Choices) == 0 {
@@ -707,6 +754,26 @@ func (e *Engine) GetLLMClient() *openai.Client {
 // GetLLMConfig returns the LLM configuration
 func (e *Engine) GetLLMConfig() LLMConfig {
 	return e.llmConfig
+}
+
+// formatLLMError formats OpenAI API errors with detailed information
+func formatLLMError(err error) error {
+	if err == nil {
+		return nil
+	}
+
+	// Check if it's an OpenAI APIError
+	var apiErr *openai.APIError
+	if errors.As(err, &apiErr) {
+		// Format error with status code and message
+		if apiErr.Message != "" {
+			return fmt.Errorf("LLM request failed: error, status code: %d, message: %s", apiErr.HTTPStatusCode, apiErr.Message)
+		}
+		return fmt.Errorf("LLM request failed: error, status code: %d", apiErr.HTTPStatusCode)
+	}
+
+	// For other errors, return as-is with prefix
+	return fmt.Errorf("LLM request failed: %w", err)
 }
 
 // processChatRequest processes an LLM chat request with support for tool calls and memory management.
@@ -765,7 +832,7 @@ func (e *Engine) processChatRequest(
 	)
 
 	if err != nil {
-		return "", 0, fmt.Errorf("LLM request failed: %w", err)
+		return "", 0, formatLLMError(err)
 	}
 
 	if len(resp.Choices) == 0 {

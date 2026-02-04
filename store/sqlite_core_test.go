@@ -180,6 +180,7 @@ func TestSQLiteStore_CoreAndOtherSessions(t *testing.T) {
 
 	// Create Core session
 	coreSession := model.NewSessionWithType(userID, model.AgentTypeCore)
+	coreSession.SessionID = "core-session-1"
 	coreSession.Title = "Core Session"
 	if err := store.Put(coreSession); err != nil {
 		t.Fatalf("Failed to put core session: %v", err)
@@ -187,6 +188,7 @@ func TestSQLiteStore_CoreAndOtherSessions(t *testing.T) {
 
 	// Create High session
 	highSession := model.NewSessionWithType(userID, model.AgentTypeHigh)
+	highSession.SessionID = "high-session-1"
 	highSession.Title = "High Session"
 	if err := store.Put(highSession); err != nil {
 		t.Fatalf("Failed to put high session: %v", err)
@@ -194,6 +196,7 @@ func TestSQLiteStore_CoreAndOtherSessions(t *testing.T) {
 
 	// Create Low session
 	lowSession := model.NewSessionWithType(userID, model.AgentTypeLow)
+	lowSession.SessionID = "low-session-1"
 	lowSession.Title = "Low Session"
 	if err := store.Put(lowSession); err != nil {
 		t.Fatalf("Failed to put low session: %v", err)
@@ -219,5 +222,72 @@ func TestSQLiteStore_CoreAndOtherSessions(t *testing.T) {
 
 	if coreCount != 1 {
 		t.Errorf("Expected 1 Core session, got %d", coreCount)
+	}
+}
+
+func TestSQLiteStore_PutCoreSession_WithExistingSessionID(t *testing.T) {
+	tmpFile := "/tmp/agentize_test_existing_session_id.db"
+	defer os.Remove(tmpFile)
+
+	store, err := NewSQLiteStore(tmpFile)
+	if err != nil {
+		t.Fatalf("Failed to create SQLiteStore: %v", err)
+	}
+	defer store.Close()
+
+	userID := "user123"
+
+	// First, create a UserAgent session with a specific session_id
+	userAgentSession := model.NewSessionWithType(userID, model.AgentTypeLow)
+	userAgentSession.SessionID = "test-session-id-123"
+	userAgentSession.Title = "UserAgent Session"
+
+	err = store.Put(userAgentSession)
+	if err != nil {
+		t.Fatalf("Failed to store UserAgent session: %v", err)
+	}
+
+	// Now try to create a Core session with the same session_id
+	// This should work because we use INSERT OR REPLACE
+	coreSession := model.NewSessionWithType(userID, model.AgentTypeCore)
+	coreSession.SessionID = "test-session-id-123" // Same session_id
+	coreSession.Title = "Core Session"
+
+	err = store.PutCoreSession(coreSession)
+	if err != nil {
+		t.Fatalf("Failed to store Core session with existing session_id: %v", err)
+	}
+
+	// Verify Core session exists
+	retrieved, err := store.GetCoreSession(userID)
+	if err != nil {
+		t.Fatalf("Failed to retrieve Core session: %v", err)
+	}
+	if retrieved == nil {
+		t.Fatal("Core session should exist")
+	}
+	if retrieved.SessionID != "test-session-id-123" {
+		t.Errorf("Expected session_id 'test-session-id-123', got '%s'", retrieved.SessionID)
+	}
+	if retrieved.AgentType != model.AgentTypeCore {
+		t.Errorf("Expected AgentType Core, got %s", retrieved.AgentType)
+	}
+
+	// Verify the session with this ID is now a Core session (it was replaced)
+	retrievedByID, err := store.Get("test-session-id-123")
+	if err != nil {
+		t.Fatalf("Session should exist: %v", err)
+	}
+	if retrievedByID.AgentType != model.AgentTypeCore {
+		t.Errorf("Session should be Core type, got %s", retrievedByID.AgentType)
+	}
+
+	// Verify only one session exists for this user
+	allSessions, err := store.List(userID)
+	if err != nil {
+		t.Fatalf("Failed to list sessions: %v", err)
+	}
+	if len(allSessions) != 1 {
+		t.Errorf("Expected 1 session, got %d", len(allSessions))
 	}
 }

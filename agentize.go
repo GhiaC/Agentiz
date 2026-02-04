@@ -39,14 +39,22 @@ func New(path string) (*Agentize, error) {
 type Options struct {
 	// SessionStore allows providing a custom session store
 	SessionStore store.SessionStore
+	// Repository allows providing an existing repository instead of creating a new one
+	Repository *fsrepo.NodeRepository
 }
 
 // NewWithOptions creates a new Agentize instance with custom options
 func NewWithOptions(path string, opts *Options) (*Agentize, error) {
-	// Create repository
-	repo, err := fsrepo.NewNodeRepository(path)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create repository: %w", err)
+	// Use existing repository or create a new one
+	var repo *fsrepo.NodeRepository
+	var err error
+	if opts != nil && opts.Repository != nil {
+		repo = opts.Repository
+	} else {
+		repo, err = fsrepo.NewNodeRepository(path)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create repository: %w", err)
+		}
 	}
 
 	// Determine session store
@@ -300,9 +308,78 @@ func (ag *Agentize) GenerateGraphVisualization(filename string, title string) er
 // RegisterRoutes registers HTTP routes on the given gin.Engine
 // Routes: /graph, /docs, /health
 func (ag *Agentize) RegisterRoutes(router *gin.Engine) {
+	router.GET("/agentize", ag.handleIndex)
 	router.GET("/agentize/graph", ag.handleGraph)
 	router.GET("/agentize/docs", ag.handleDocs)
 	router.GET("/agentize/health", ag.handleHealth)
+}
+
+// handleIndex handles the main index page with links to graph and docs
+func (ag *Agentize) handleIndex(c *gin.Context) {
+	html := `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Agentize</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        }
+        .container {
+            background: white;
+            padding: 3rem;
+            border-radius: 12px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+            text-align: center;
+        }
+        h1 {
+            color: #333;
+            margin-bottom: 2rem;
+            font-size: 2.5rem;
+        }
+        .links {
+            display: flex;
+            gap: 1.5rem;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+        a {
+            display: inline-block;
+            padding: 1rem 2rem;
+            background: #667eea;
+            color: white;
+            text-decoration: none;
+            border-radius: 8px;
+            font-weight: 600;
+            transition: all 0.3s ease;
+            font-size: 1.1rem;
+        }
+        a:hover {
+            background: #5568d3;
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Agentize</h1>
+        <div class="links">
+            <a href="/agentize/graph">Graph</a>
+            <a href="/agentize/docs">Docs</a>
+        </div>
+    </div>
+</body>
+</html>`
+	c.Header("Content-Type", "text/html; charset=utf-8")
+	c.String(200, html)
 }
 
 // handleGraph handles graph visualization requests

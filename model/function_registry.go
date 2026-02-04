@@ -62,6 +62,52 @@ func (fr *FunctionRegistry) MustRegister(toolName string, fn ToolFunction) {
 	}
 }
 
+// RegisterOrReplace registers a function, replacing any existing registration
+// This is useful for runtime updates (e.g., disabling a tool due to quota)
+func (fr *FunctionRegistry) RegisterOrReplace(toolName string, fn ToolFunction) error {
+	if toolName == "" {
+		return fmt.Errorf("tool name cannot be empty")
+	}
+	if fn == nil {
+		return fmt.Errorf("function cannot be nil for tool: %s", toolName)
+	}
+
+	fr.mu.Lock()
+	defer fr.mu.Unlock()
+
+	fr.functions[toolName] = fn
+	return nil
+}
+
+// DisableToolTemporarily temporarily disables a tool by replacing its function
+// with a disabled version that returns an appropriate error message
+// This uses the ToolRegistry's temporary disable mechanism
+func (fr *FunctionRegistry) DisableToolTemporarily(toolName string, reason DisableReason, errorMessage string) error {
+	if toolName == "" {
+		return fmt.Errorf("tool name cannot be empty")
+	}
+
+	// Build error message
+	msg := fmt.Sprintf("Tool '%s' is temporarily disabled", toolName)
+	if reason != DisableReasonNone && reason != "" {
+		msg += fmt.Sprintf(" (reason: %s)", reason)
+	}
+	if errorMessage != "" {
+		msg += fmt.Sprintf(" - %s", errorMessage)
+	}
+
+	// Create disabled function that returns the error message
+	disabledFn := func(args map[string]interface{}) (string, error) {
+		return "", &ToolDisabledError{
+			ToolName:      toolName,
+			DisableReason: reason,
+			ErrorMessage:  errorMessage,
+		}
+	}
+
+	return fr.RegisterOrReplace(toolName, disabledFn)
+}
+
 // Get retrieves a function for a tool name
 func (fr *FunctionRegistry) Get(toolName string) (ToolFunction, bool) {
 	fr.mu.RLock()
