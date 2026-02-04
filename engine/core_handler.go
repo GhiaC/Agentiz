@@ -34,7 +34,8 @@ type CoreHandlerConfig struct {
 // DefaultCoreHandlerConfig returns default configuration
 func DefaultCoreHandlerConfig() CoreHandlerConfig {
 	return CoreHandlerConfig{
-		UserAgentHighModel:     "gpt-4o",
+		//UserAgentHighModel:     "gpt-4o", FOR TESTING
+		UserAgentHighModel:     "gpt-4o-mini",
 		UserAgentLowModel:      "gpt-4o-mini",
 		AutoSummarizeThreshold: 20,
 	}

@@ -131,12 +131,35 @@ func (sh *SessionHandler) ListUserSessions(userID string) ([]*Session, error) {
 
 	// Group by agent type for better visibility
 	byType := make(map[AgentType]int)
+	totalActiveMessages := 0
+	totalArchivedMessages := 0
+
 	for _, s := range sessions {
 		byType[s.AgentType]++
+		activeMsgs := len(s.ConversationState.Msgs)
+		archivedMsgs := len(s.SummarizedMessages)
+		totalActiveMessages += activeMsgs
+		totalArchivedMessages += archivedMsgs
+
+		// Log detailed session info
+		title := s.Title
+		if title == "" {
+			title = "Untitled"
+		}
+		timeAgo := formatTimeAgo(s.UpdatedAt)
+
+		log.Log.Infof("[SessionHandler]   ├─ [%s] %s | Title: \"%s\" | Active: %d msgs | Archived: %d msgs | Last: %s",
+			s.SessionID, agentTypeDisplayName(s.AgentType), title, activeMsgs, archivedMsgs, timeAgo)
 	}
+
+	// Summary by type
 	for agentType, count := range byType {
 		log.Log.Infof("[SessionHandler]   └─ %s sessions: %d", agentTypeDisplayName(agentType), count)
 	}
+
+	// Overall summary
+	log.Log.Infof("[SessionHandler] 📊 Sessions Summary | Total: %d | Active messages: %d | Archived messages: %d",
+		len(sessions), totalActiveMessages, totalArchivedMessages)
 
 	return sessions, nil
 }
