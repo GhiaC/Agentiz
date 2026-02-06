@@ -2016,6 +2016,58 @@ func (h *DebugHandler) GenerateSummarizationLogsHTML() (string, error) {
 		return "", fmt.Errorf("failed to get summarization logs: %w", err)
 	}
 
+	// Get all sessions to calculate statistics
+	sessionsByUser, err := h.GetAllSessions()
+	if err != nil {
+		return "", fmt.Errorf("failed to get sessions: %w", err)
+	}
+
+	// Calculate statistics
+	var allSessions []*model.Session
+	for _, sessions := range sessionsByUser {
+		allSessions = append(allSessions, sessions...)
+	}
+
+	// Count summarization log statuses
+	totalLogs := len(summarizationLogs)
+	successLogs := 0
+	failedLogs := 0
+	pendingLogs := 0
+	for _, log := range summarizationLogs {
+		switch log.Status {
+		case "success":
+			successLogs++
+		case "failed":
+			failedLogs++
+		default:
+			pendingLogs++
+		}
+	}
+
+	// Count sessions that are summarized
+	summarizedSessions := 0
+	for _, session := range allSessions {
+		if !session.SummarizedAt.IsZero() {
+			summarizedSessions++
+		}
+	}
+
+	// Count eligible sessions (have enough messages but not yet summarized)
+	// Using threshold of 40 messages (default AutoSummarizeThreshold from SessionHandlerConfig)
+	const summarizeThreshold = 40
+	eligibleSessions := 0
+	for _, session := range allSessions {
+		if session.SummarizedAt.IsZero() {
+			activeMsgCount := 0
+			if session.ConversationState != nil {
+				activeMsgCount = len(session.ConversationState.Msgs)
+			}
+			if activeMsgCount >= summarizeThreshold {
+				eligibleSessions++
+			}
+		}
+	}
+
 	// Sort by CreatedAt (newest first)
 	sort.Slice(summarizationLogs, func(i, j int) bool {
 		return summarizationLogs[i].CreatedAt.After(summarizationLogs[j].CreatedAt)
@@ -2025,6 +2077,68 @@ func (h *DebugHandler) GenerateSummarizationLogsHTML() (string, error) {
 	html += generateNavigationBar("/agentize/debug/summarized")
 	html += `<div class="container">
     <div class="main-container">
+        <!-- Statistics Cards -->
+        <div class="row g-4 mb-4">
+            <div class="col-md-6 col-lg-3">
+                <div class="card text-center h-100 border-primary">
+                    <div class="card-body d-flex flex-column justify-content-center">
+                        <h2 class="card-title text-primary mb-3" style="font-size: 2.5rem; font-weight: bold;">` + fmt.Sprintf("%d", totalLogs) + `</h2>
+                        <p class="card-text mb-3" style="font-size: 1.1rem;">📝 Total Logs</p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-6 col-lg-3">
+                <div class="card text-center h-100 border-success">
+                    <div class="card-body d-flex flex-column justify-content-center">
+                        <h2 class="card-title text-success mb-3" style="font-size: 2.5rem; font-weight: bold;">` + fmt.Sprintf("%d", successLogs) + `</h2>
+                        <p class="card-text mb-3" style="font-size: 1.1rem;">✅ Successful</p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-6 col-lg-3">
+                <div class="card text-center h-100 border-danger">
+                    <div class="card-body d-flex flex-column justify-content-center">
+                        <h2 class="card-title text-danger mb-3" style="font-size: 2.5rem; font-weight: bold;">` + fmt.Sprintf("%d", failedLogs) + `</h2>
+                        <p class="card-text mb-3" style="font-size: 1.1rem;">❌ Failed</p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-6 col-lg-3">
+                <div class="card text-center h-100 border-warning">
+                    <div class="card-body d-flex flex-column justify-content-center">
+                        <h2 class="card-title text-warning mb-3" style="font-size: 2.5rem; font-weight: bold;">` + fmt.Sprintf("%d", pendingLogs) + `</h2>
+                        <p class="card-text mb-3" style="font-size: 1.1rem;">⏳ Pending</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="row g-4 mb-4">
+            <div class="col-md-6 col-lg-4">
+                <div class="card text-center h-100 border-info">
+                    <div class="card-body d-flex flex-column justify-content-center">
+                        <h2 class="card-title text-info mb-3" style="font-size: 2.5rem; font-weight: bold;">` + fmt.Sprintf("%d", summarizedSessions) + `</h2>
+                        <p class="card-text mb-3" style="font-size: 1.1rem;">📋 Summarized Sessions</p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-6 col-lg-4">
+                <div class="card text-center h-100 border-secondary">
+                    <div class="card-body d-flex flex-column justify-content-center">
+                        <h2 class="card-title text-secondary mb-3" style="font-size: 2.5rem; font-weight: bold;">` + fmt.Sprintf("%d", eligibleSessions) + `</h2>
+                        <p class="card-text mb-3" style="font-size: 1.1rem;">🎯 Eligible Sessions</p>
+                        <small class="text-muted">(≥` + fmt.Sprintf("%d", summarizeThreshold) + ` messages, not summarized)</small>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-6 col-lg-4">
+                <div class="card text-center h-100 border-dark">
+                    <div class="card-body d-flex flex-column justify-content-center">
+                        <h2 class="card-title text-dark mb-3" style="font-size: 2.5rem; font-weight: bold;">` + fmt.Sprintf("%d", len(allSessions)) + `</h2>
+                        <p class="card-text mb-3" style="font-size: 1.1rem;">📊 Total Sessions</p>
+                    </div>
+                </div>
+            </div>
+        </div>
         <div class="card">
             <div class="card-header">
                 <h4 class="mb-0"><i class="bi bi-file-text-fill me-2"></i>All Summarization Logs (` + fmt.Sprintf("%d", len(summarizationLogs)) + `)</h4>
