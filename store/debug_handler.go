@@ -187,6 +187,7 @@ func generateNavigationBar(currentPage string) string {
 		{"/agentize/debug/messages", "💬", "Messages"},
 		{"/agentize/debug/files", "📁", "Files"},
 		{"/agentize/debug/tool-calls", "🔧", "Tool Calls"},
+		{"/agentize/debug/summarized", "📝", "Summarized"},
 	}
 
 	navHTML := `<nav class="navbar navbar-expand-lg navbar-dark" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); box-shadow: 0 2px 10px rgba(0,0,0,0.1);">
@@ -1990,6 +1991,101 @@ func (h *DebugHandler) GenerateToolCallsHTML() (string, error) {
 				template.URLQueryEscaper(tc.SessionID),
 				template.HTMLEscapeString(tc.SessionID[:min(20, len(tc.SessionID))]+"..."),
 				FormatTime(tc.CreatedAt))
+		}
+
+		html += `</tbody>
+                </table>
+            </div>`
+	}
+
+	html += `</div>
+        </div>
+    </div>
+    </div>`
+	html += generateBootstrapFooter()
+
+	return html, nil
+}
+
+// GenerateSummarizationLogsHTML generates the summarization logs list HTML page
+func (h *DebugHandler) GenerateSummarizationLogsHTML() (string, error) {
+	debugStore := h.store.(DebugStore)
+
+	summarizationLogs, err := debugStore.GetAllSummarizationLogs()
+	if err != nil {
+		return "", fmt.Errorf("failed to get summarization logs: %w", err)
+	}
+
+	// Sort by CreatedAt (newest first)
+	sort.Slice(summarizationLogs, func(i, j int) bool {
+		return summarizationLogs[i].CreatedAt.After(summarizationLogs[j].CreatedAt)
+	})
+
+	html := generateBootstrapHeader("Agentize Debug - Summarization Logs")
+	html += generateNavigationBar("/agentize/debug/summarized")
+	html += `<div class="container">
+    <div class="main-container">
+        <div class="card">
+            <div class="card-header">
+                <h4 class="mb-0"><i class="bi bi-file-text-fill me-2"></i>All Summarization Logs (` + fmt.Sprintf("%d", len(summarizationLogs)) + `)</h4>
+            </div>
+            <div class="card-body">`
+
+	if len(summarizationLogs) == 0 {
+		html += `<div class="alert alert-info text-center">
+                <i class="bi bi-info-circle me-2"></i>No summarization logs found.
+            </div>`
+	} else {
+		html += `<div class="table-responsive">
+                <table class="table table-striped table-hover align-middle">
+                    <thead>
+                        <tr>
+                            <th class="text-nowrap">Log ID</th>
+                            <th class="text-nowrap">Status</th>
+                            <th class="text-center text-nowrap">Model</th>
+                            <th class="text-center text-nowrap">Tokens</th>
+                            <th class="text-nowrap">User</th>
+                            <th class="text-nowrap">Session</th>
+                            <th class="text-nowrap">Created At</th>
+                            <th class="text-center text-nowrap">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>`
+
+		for _, log := range summarizationLogs {
+			statusBadge := ""
+			if log.Status == "success" {
+				statusBadge = `<span class="badge bg-success">✅ Success</span>`
+			} else if log.Status == "failed" {
+				statusBadge = `<span class="badge bg-danger">❌ Failed</span>`
+			} else {
+				statusBadge = `<span class="badge bg-warning text-dark">⏳ Pending</span>`
+			}
+
+			tokenBadge := fmt.Sprintf(`<span class="badge bg-info">Total: %d</span><br><small class="text-muted">Prompt: %d, Completion: %d</small>`,
+				log.TotalTokens, log.PromptTokens, log.CompletionTokens)
+
+			html += fmt.Sprintf(`
+                        <tr>
+                            <td><code class="text-break">%s</code></td>
+                            <td>%s</td>
+                            <td class="text-center"><code>%s</code></td>
+                            <td class="text-center">%s</td>
+                            <td class="text-nowrap"><a href="/agentize/debug/users/%s" class="text-decoration-none">%s</a></td>
+                            <td class="text-nowrap"><a href="/agentize/debug/sessions/%s" class="text-decoration-none">%s</a></td>
+                            <td class="text-nowrap">%s</td>
+                            <td class="text-center"><a href="/agentize/debug/sessions/%s#summarization-logs" class="btn btn-sm btn-outline-primary">View Details</a></td>
+                        </tr>`,
+				template.HTMLEscapeString(log.LogID),
+				statusBadge,
+				template.HTMLEscapeString(log.ModelUsed),
+				tokenBadge,
+				template.URLQueryEscaper(log.UserID),
+				template.HTMLEscapeString(log.UserID[:min(20, len(log.UserID))]+"..."),
+				template.URLQueryEscaper(log.SessionID),
+				template.HTMLEscapeString(log.SessionID[:min(20, len(log.SessionID))]+"..."),
+				FormatTime(log.CreatedAt),
+				template.URLQueryEscaper(log.SessionID))
 		}
 
 		html += `</tbody>

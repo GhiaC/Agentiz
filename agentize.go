@@ -487,6 +487,7 @@ func (ag *Agentize) RegisterRoutes(router *gin.Engine) {
 	router.GET("/agentize/debug/messages", ag.handleDebugMessages)
 	router.GET("/agentize/debug/files", ag.handleDebugFiles)
 	router.GET("/agentize/debug/tool-calls", ag.handleDebugToolCalls)
+	router.GET("/agentize/debug/summarized", ag.handleDebugSummarized)
 }
 
 // handleIndex handles the main index page with links to graph and docs
@@ -952,6 +953,30 @@ func (ag *Agentize) handleDebugToolCalls(c *gin.Context) {
 	html, err := debugHandler.GenerateToolCallsHTML()
 	if err != nil {
 		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to generate tool calls page: %v", err)})
+		return
+	}
+
+	c.Header("Content-Type", "text/html; charset=utf-8")
+	c.String(200, html)
+}
+
+// handleDebugSummarized handles summarization logs list page requests
+func (ag *Agentize) handleDebugSummarized(c *gin.Context) {
+	sessionStore := ag.GetSessionStore()
+	if sessionStore == nil {
+		c.JSON(500, gin.H{"error": "Session store not available"})
+		return
+	}
+
+	debugHandler, err := store.NewDebugHandler(sessionStore)
+	if err != nil {
+		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to create debug handler: %v", err)})
+		return
+	}
+
+	html, err := debugHandler.GenerateSummarizationLogsHTML()
+	if err != nil {
+		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to generate summarization logs page: %v", err)})
 		return
 	}
 

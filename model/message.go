@@ -101,8 +101,10 @@ func NewUserMessage(userID string, sessionID string, content string) *Message {
 // generateMessageID generates a unique message ID
 func generateMessageID(userID string, sessionID string, timestamp time.Time) string {
 	// Format: {timestamp}-{userID}-{sessionID}-{random4}
-	date := timestamp.Format("060102150405") // YYMMDDHHMMSS
-	return fmt.Sprintf("%s-%s-%s-%s", date, userID[:min(8, len(userID))], sessionID[:min(8, len(sessionID))], randomString(4))
+	// Include nanoseconds to ensure uniqueness even for messages created in the same second
+	date := timestamp.Format("060102150405")  // YYMMDDHHMMSS
+	nanos := timestamp.Nanosecond() % 1000000 // Last 6 digits of nanoseconds (millisecond precision)
+	return fmt.Sprintf("%s%06d-%s-%s-%s", date, nanos, userID[:min(8, len(userID))], sessionID[:min(8, len(sessionID))], randomString(4))
 }
 
 func min(a, b int) int {
