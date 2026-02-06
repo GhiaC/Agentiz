@@ -3,19 +3,26 @@ package agentize
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
+	"time"
 
 	"github.com/ghiac/agentize/documents"
 	"github.com/ghiac/agentize/engine"
 	"github.com/ghiac/agentize/fsrepo"
 	"github.com/ghiac/agentize/llmutils"
+	"github.com/ghiac/agentize/log"
 	"github.com/ghiac/agentize/model"
 	"github.com/ghiac/agentize/store"
 	"github.com/ghiac/agentize/visualize"
 	"github.com/gin-gonic/gin"
+	"github.com/sashabaranov/go-openai"
 )
 
 // Agentize is the main entry point for the library
@@ -27,6 +34,10 @@ type Agentize struct {
 	// Knowledge tree cache (for visualization/docs)
 	nodes map[string]*model.Node
 	mu    sync.RWMutex
+
+	// Session scheduler for automatic summarization
+	scheduler   *engine.SessionScheduler
+	schedulerMu sync.RWMutex
 }
 
 // New creates a new Agentize instance by loading the entire knowledge tree from the given path
@@ -247,6 +258,135 @@ func (ag *Agentize) GetEngine() *engine.Engine {
 // UseLLMConfig configures the LLM client for the agentize instance
 func (ag *Agentize) UseLLMConfig(config engine.LLMConfig) error {
 	return ag.engine.UseLLMConfig(config)
+}
+
+// StartScheduler starts the session scheduler if enabled
+// It reads configuration from environment variables or uses defaults
+// This should be called after UseLLMConfig to ensure LLM client is configured
+func (ag *Agentize) StartScheduler(ctx context.Context) error {
+	// Get LLM config from engine
+	llmConfig := ag.engine.GetLLMConfig()
+	if llmConfig.APIKey == "" {
+		return fmt.Errorf("LLM client is not configured. Call UseLLMConfig first")
+	}
+
+	// Create a new LLM client with HTTP client wrapper that adds user_id header from context
+	// This ensures that scheduler requests include user_id in headers like other LLM requests
+	var baseHTTPClient *http.Client
+	if llmConfig.HTTPClient != nil {
+		baseHTTPClient = llmConfig.HTTPClient
+	}
+	llmClient := llmutils.NewOpenAIClientWithUserIDHeader(llmConfig.APIKey, llmConfig.BaseURL, baseHTTPClient)
+
+	// Get session store from engine
+	sessionStore := ag.engine.Sessions
+	if sessionStore == nil {
+		return fmt.Errorf("session store is not available")
+	}
+
+	// Create session handler from session store
+	sessionHandlerConfig := model.DefaultSessionHandlerConfig()
+	sessionHandler := model.NewSessionHandler(sessionStore, sessionHandlerConfig)
+
+	// Set LLM client for session handler
+	llmClientWrapper := &OpenAIClientWrapperForSessionHandler{
+		Client: llmClient,
+	}
+	sessionHandler.SetLLMClient(llmClientWrapper)
+
+	// Load scheduler config from environment or use defaults
+	schedulerConfig := engine.DefaultSessionSchedulerConfig()
+
+	// Override with environment variables if set
+	if checkIntervalStr := os.Getenv("AGENTIZE_SCHEDULER_CHECK_INTERVAL_MINUTES"); checkIntervalStr != "" {
+		if minutes, err := strconv.Atoi(checkIntervalStr); err == nil {
+			schedulerConfig.CheckInterval = time.Duration(minutes) * time.Minute
+		}
+	}
+	if thresholdStr := os.Getenv("AGENTIZE_SCHEDULER_SUMMARIZED_AT_THRESHOLD_MINUTES"); thresholdStr != "" {
+		if minutes, err := strconv.Atoi(thresholdStr); err == nil {
+			schedulerConfig.SummarizedAtThreshold = time.Duration(minutes) * time.Minute
+		}
+	}
+	if activityStr := os.Getenv("AGENTIZE_SCHEDULER_LAST_ACTIVITY_THRESHOLD_MINUTES"); activityStr != "" {
+		if minutes, err := strconv.Atoi(activityStr); err == nil {
+			schedulerConfig.LastActivityThreshold = time.Duration(minutes) * time.Minute
+		}
+	}
+	if msgThresholdStr := os.Getenv("AGENTIZE_SCHEDULER_MESSAGE_THRESHOLD"); msgThresholdStr != "" {
+		if threshold, err := strconv.Atoi(msgThresholdStr); err == nil {
+			schedulerConfig.MessageThreshold = threshold
+		}
+	}
+	if modelStr := os.Getenv("AGENTIZE_SCHEDULER_SUMMARY_MODEL"); modelStr != "" {
+		schedulerConfig.SummaryModel = modelStr
+	}
+
+	// Check if scheduler is enabled
+	if enabled := os.Getenv("AGENTIZE_SCHEDULER_ENABLED"); enabled == "false" {
+		log.Log.Infof("[Agentize] ⏸️  Scheduler is disabled via AGENTIZE_SCHEDULER_ENABLED=false")
+		return nil
+	}
+
+	// Create scheduler
+	scheduler := engine.NewSessionScheduler(sessionHandler, llmClient, schedulerConfig)
+
+	ag.schedulerMu.Lock()
+	ag.scheduler = scheduler
+	ag.schedulerMu.Unlock()
+
+	// Start scheduler
+	scheduler.Start(ctx)
+
+	log.Log.Infof("[Agentize] ✅ Session scheduler started | CheckInterval: %v | SummarizedAtThreshold: %v | LastActivityThreshold: %v | MessageThreshold: %d | SummaryModel: %s",
+		schedulerConfig.CheckInterval, schedulerConfig.SummarizedAtThreshold, schedulerConfig.LastActivityThreshold, schedulerConfig.MessageThreshold, schedulerConfig.SummaryModel)
+
+	return nil
+}
+
+// StopScheduler stops the session scheduler gracefully
+func (ag *Agentize) StopScheduler() {
+	ag.schedulerMu.Lock()
+	scheduler := ag.scheduler
+	ag.schedulerMu.Unlock()
+
+	if scheduler != nil {
+		scheduler.Stop()
+		log.Log.Infof("[Agentize] 🛑 Session scheduler stopped")
+	}
+}
+
+// GetScheduler returns the current scheduler instance
+func (ag *Agentize) GetScheduler() *engine.SessionScheduler {
+	ag.schedulerMu.RLock()
+	defer ag.schedulerMu.RUnlock()
+	return ag.scheduler
+}
+
+// WaitForShutdown waits for shutdown signals and performs graceful shutdown
+func (ag *Agentize) WaitForShutdown() {
+	// Create a channel to listen for interrupt signals
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM, syscall.SIGINT)
+
+	// Wait for signal
+	sig := <-sigChan
+	log.Log.Infof("[Agentize] 📡 Received signal: %v, initiating graceful shutdown...", sig)
+
+	// Stop scheduler gracefully
+	ag.StopScheduler()
+
+	log.Log.Infof("[Agentize] ✅ Graceful shutdown completed")
+}
+
+// OpenAIClientWrapperForSessionHandler wraps openai.Client to implement model.LLMClient interface for SessionHandler
+type OpenAIClientWrapperForSessionHandler struct {
+	Client *openai.Client
+}
+
+// CreateChatCompletion implements model.LLMClient interface
+func (w *OpenAIClientWrapperForSessionHandler) CreateChatCompletion(ctx context.Context, request openai.ChatCompletionRequest) (openai.ChatCompletionResponse, error) {
+	return w.Client.CreateChatCompletion(ctx, request)
 }
 
 // InitializeSummaries generates concise summaries for all nodes that don't have one.

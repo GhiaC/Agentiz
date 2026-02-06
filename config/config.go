@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"time"
 )
 
 // Config holds the application configuration
@@ -16,6 +17,9 @@ type Config struct {
 
 	// Knowledge tree path
 	KnowledgePath string
+
+	// Scheduler configuration
+	Scheduler SchedulerConfig
 }
 
 // HTTPConfig holds HTTP server configuration
@@ -31,6 +35,16 @@ type FeatureFlags struct {
 	GraphVisualizationEnabled bool
 }
 
+// SchedulerConfig holds scheduler configuration
+type SchedulerConfig struct {
+	Enabled               bool
+	CheckInterval         time.Duration
+	SummarizedAtThreshold time.Duration
+	LastActivityThreshold time.Duration
+	MessageThreshold      int
+	SummaryModel          string
+}
+
 // Load loads configuration from environment variables
 func Load() (*Config, error) {
 	cfg := &Config{
@@ -44,12 +58,30 @@ func Load() (*Config, error) {
 			GraphVisualizationEnabled: getEnvBool("AGENTIZE_FEATURE_GRAPH", true),
 		},
 		KnowledgePath: getEnvString("AGENTIZE_KNOWLEDGE_PATH", "./knowledge"),
+		Scheduler:     loadSchedulerConfig(),
 	}
 
 	// HTTP is enabled if both HTTP config and feature flag are enabled
 	cfg.HTTP.Enabled = cfg.HTTP.Enabled && cfg.Features.HTTPServerEnabled
 
 	return cfg, nil
+}
+
+// loadSchedulerConfig loads scheduler configuration from environment variables
+func loadSchedulerConfig() SchedulerConfig {
+	// Parse durations from environment (in minutes, convert to time.Duration)
+	checkIntervalMinutes := getEnvInt("AGENTIZE_SCHEDULER_CHECK_INTERVAL_MINUTES", 5)
+	summarizedAtThresholdMinutes := getEnvInt("AGENTIZE_SCHEDULER_SUMMARIZED_AT_THRESHOLD_MINUTES", 60)
+	lastActivityThresholdMinutes := getEnvInt("AGENTIZE_SCHEDULER_LAST_ACTIVITY_THRESHOLD_MINUTES", 60)
+
+	return SchedulerConfig{
+		Enabled:               getEnvBool("AGENTIZE_SCHEDULER_ENABLED", true),
+		CheckInterval:         time.Duration(checkIntervalMinutes) * time.Minute,
+		SummarizedAtThreshold: time.Duration(summarizedAtThresholdMinutes) * time.Minute,
+		LastActivityThreshold: time.Duration(lastActivityThresholdMinutes) * time.Minute,
+		MessageThreshold:      getEnvInt("AGENTIZE_SCHEDULER_MESSAGE_THRESHOLD", 20),
+		SummaryModel:          getEnvString("AGENTIZE_SCHEDULER_SUMMARY_MODEL", "gpt-4o-mini"),
+	}
 }
 
 // GetAddress returns the HTTP server address

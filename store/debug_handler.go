@@ -1264,6 +1264,66 @@ func (h *DebugHandler) GenerateSessionDetailHTML(sessionID string) (string, erro
 	html += `</div>
         </div>`
 
+	// ExMsgs card (Exported Messages - only for debug)
+	exMsgsCount := len(session.ExMsgs)
+	html += fmt.Sprintf(`
+        <div class="card mb-4">
+            <div class="card-header">
+                <h5 class="mb-0"><i class="bi bi-archive-fill me-2"></i>Exported Messages (%d) <small class="text-muted">(Debug Only)</small></h5>
+            </div>
+            <div class="card-body">`, exMsgsCount)
+
+	if exMsgsCount == 0 {
+		html += `<div class="alert alert-info text-center">
+                <i class="bi bi-info-circle me-2"></i>No exported messages found for this session.
+            </div>`
+	} else {
+		html += `<div class="alert alert-warning mb-3">
+                <i class="bi bi-exclamation-triangle me-2"></i><strong>Note:</strong> ExMsgs are exported messages moved from Msgs after summarization. They are only displayed here for debugging purposes and are not used in normal operations.
+            </div>`
+		html += `<div class="list-group">`
+		for _, msg := range session.ExMsgs {
+			content := msg.Content
+			if len(content) > 500 {
+				content = content[:500] + "..."
+			}
+			badgeClass := "bg-secondary"
+			switch msg.Role {
+			case openai.ChatMessageRoleUser:
+				badgeClass = "bg-primary"
+			case openai.ChatMessageRoleAssistant:
+				badgeClass = "bg-success"
+			case openai.ChatMessageRoleTool:
+				badgeClass = "bg-warning text-dark"
+			case openai.ChatMessageRoleSystem:
+				badgeClass = "bg-info"
+			}
+
+			toolCallBadge := ""
+			if len(msg.ToolCalls) > 0 {
+				toolCallBadge = ` <span class="badge bg-danger">Has Tool Calls</span>`
+			}
+
+			html += fmt.Sprintf(`
+                <div class="list-group-item">
+                    <div class="d-flex w-100 justify-content-between align-items-start mb-2">
+                        <div>
+                            <span class="badge %s me-2">%s</span>%s
+                        </div>
+                    </div>
+                    <p class="mb-2 text-justify">%s</p>
+                </div>`,
+				badgeClass,
+				template.HTMLEscapeString(msg.Role),
+				toolCallBadge,
+				template.HTMLEscapeString(content))
+		}
+		html += `</div>`
+	}
+
+	html += `</div>
+        </div>`
+
 	// Tool Calls card
 	html += fmt.Sprintf(`
         <div class="card mb-4">

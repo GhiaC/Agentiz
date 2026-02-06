@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ghiac/agentize/llmutils"
 	"github.com/ghiac/agentize/log"
 	"github.com/ghiac/agentize/model"
 	"github.com/sashabaranov/go-openai"
@@ -108,7 +109,7 @@ func (ch *CoreHandler) UseLLMConfig(config LLMConfig) error {
 	ch.userModeration = NewUserModeration(
 		IsNonsenseMessageFast,
 		func(ctx context.Context, msg string) (bool, error) {
-			return IsNonsenseMessageLLM(ctx, ch.llmClient, ch.llmConfig.Model, msg)
+			return llmutils.IsNonsenseMessageLLM(ctx, ch.llmClient, ch.llmConfig.Model, msg)
 		},
 		ch.getOrCreateUser,
 		ch.saveUser,
@@ -155,6 +156,9 @@ func (ch *CoreHandler) ProcessMessage(
 		if isBanned, banMessage := ch.userModeration.CheckBanStatus(userID); isBanned {
 			return banMessage, nil
 		}
+
+		// Add user_id to context for LLM calls
+		ctx = model.WithUserID(ctx, userID)
 
 		// Check if message is nonsense and handle auto-ban
 		shouldBan, banMessage, err := ch.userModeration.ProcessNonsenseCheck(ctx, userID, userMessage)
@@ -207,6 +211,9 @@ func (ch *CoreHandler) ProcessMessage(
 
 	// Get Core's tools
 	tools := ch.getCoreToolsForLLM()
+
+	// Add user_id to context for LLM calls
+	ctx = model.WithUserID(ctx, userID)
 
 	// Make LLM call
 	response, err := ch.processWithTools(ctx, messages, tools, userID, coreSession)
@@ -350,6 +357,7 @@ func (ch *CoreHandler) buildSystemPrompts(userID string) ([]string, error) {
 }
 
 // buildMessages builds the message array for the LLM call
+// Note: Only uses Summary, Tags, and Msgs from sessions. ExMsgs is only for debug purposes and is not used here.
 func (ch *CoreHandler) buildMessages(systemPrompts []string, conversationMsgs []openai.ChatCompletionMessage) []openai.ChatCompletionMessage {
 	messages := []openai.ChatCompletionMessage{}
 
@@ -538,6 +546,11 @@ func (ch *CoreHandler) processWithTools(
 		if err := ch.saveCoreSession(coreSession); err != nil {
 			log.Log.Warnf("[CoreHandler] ⚠️  Failed to update Core session model | SessionID: %s | Error: %v", coreSession.SessionID, err)
 		}
+	}
+
+	// Ensure user_id is in context
+	if _, ok := model.GetUserIDFromContext(ctx); !ok && userID != "" {
+		ctx = model.WithUserID(ctx, userID)
 	}
 
 	for i := 0; i < maxIterations; i++ {

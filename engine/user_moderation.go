@@ -73,6 +73,8 @@ func (um *UserModeration) ProcessNonsenseCheck(ctx context.Context, userID strin
 
 	// Use LLM verification if user has previous warnings
 	if isNonsense && user.NonsenseCount > 0 {
+		// Ensure user_id is in context for LLM call
+		ctx = model.WithUserID(ctx, userID)
 		llmNonsense, err := um.isNonsenseLLM(ctx, userMessage)
 		if err != nil {
 			log.Log.Warnf("[UserModeration] ⚠️  Failed to verify with LLM, using fast check result | Error: %v", err)

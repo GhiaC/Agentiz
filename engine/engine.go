@@ -800,11 +800,22 @@ Be concise and direct in your response. Only return the extracted information, n
 Your response must not exceed %d characters.`, maxLen)
 
 	userPrompt := fmt.Sprintf(`Data:
-%s
+	%s
 
-Query: %s
+	Query: %s
 
-Extract the relevant information from the data that answers the query:`, fullResult, query)
+	Extract the relevant information from the data that answers the query:`, fullResult, query)
+
+	// Get userID from session and add to context for LLM call
+	session, err := e.Sessions.Get(sessionID)
+	if err != nil {
+		return "", fmt.Errorf("failed to get session: %w", err)
+	}
+	if session.UserID != "" {
+		ctx = model.WithUserID(ctx, session.UserID)
+	} else {
+		log.Log.Warnf("[Engine] ⚠️  Session has no UserID | SessionID: %s", sessionID)
+	}
 
 	// Make LLM call
 	resp, err := e.llmClient.CreateChatCompletion(
@@ -909,6 +920,11 @@ func (e *Engine) processChatRequest(
 
 	// Add memory messages
 	reqMessages = append(reqMessages, e.getMessages(sessionID)...)
+
+	// Ensure user_id is in context
+	if session.UserID != "" {
+		ctx = model.WithUserID(ctx, session.UserID)
+	}
 
 	log.Log.Infof("LLM request: system_prompts=%d, tools=%d, messages=%d",
 		len(systemPrompts), len(openaiTools), len(reqMessages))

@@ -81,6 +81,11 @@ func (sh *SessionHandler) SetLLMClient(client LLMClient) {
 	sh.llmClient = client
 }
 
+// GetLLMClient returns the current LLM client
+func (sh *SessionHandler) GetLLMClient() LLMClient {
+	return sh.llmClient
+}
+
 // CreateSession creates a new session for a user with the specified agent type
 func (sh *SessionHandler) CreateSession(userID string, agentType AgentType) (*Session, error) {
 	session := NewSessionWithType(userID, agentType)
@@ -279,6 +284,11 @@ func (sh *SessionHandler) SummarizeSession(ctx context.Context, sessionID string
 	// Format messages for summarization
 	conversationText := formatMessagesForSummary(session.ConversationState.Msgs)
 
+	// Add user_id to context for LLM calls
+	if session.UserID != "" {
+		ctx = WithUserID(ctx, session.UserID)
+	}
+
 	// Generate summary using LLM
 	summary, err := sh.generateConversationSummary(ctx, conversationText)
 	if err != nil {
@@ -305,6 +315,7 @@ func (sh *SessionHandler) SummarizeSession(ctx context.Context, sessionID string
 
 // GetSessionsPrompt generates a formatted prompt showing all user sessions
 // This is used by CoreHandler to understand the user's session history
+// Note: Only uses Summary, Tags, and Msgs from sessions. ExMsgs is only for debug purposes and is not used here.
 func (sh *SessionHandler) GetSessionsPrompt(userID string) (string, error) {
 	sessions, err := sh.store.List(userID)
 	if err != nil {
