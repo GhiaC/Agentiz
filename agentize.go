@@ -255,6 +255,32 @@ func (ag *Agentize) GetEngine() *engine.Engine {
 	return ag.engine
 }
 
+// GetSchedulerMessageThreshold returns the message threshold from the engine's scheduler if available
+func (ag *Agentize) GetSchedulerMessageThreshold() int {
+	// Try to get from scheduler first
+	ag.schedulerMu.RLock()
+	if ag.scheduler != nil {
+		threshold := ag.scheduler.GetMessageThreshold()
+		ag.schedulerMu.RUnlock()
+		return threshold
+	}
+	ag.schedulerMu.RUnlock()
+
+	// Try engine scheduler
+	if ag.engine != nil {
+		return ag.engine.GetSchedulerMessageThreshold()
+	}
+
+	// Fallback: try environment variable
+	if thresholdStr := os.Getenv("AGENTIZE_SCHEDULER_MESSAGE_THRESHOLD"); thresholdStr != "" {
+		if threshold, err := strconv.Atoi(thresholdStr); err == nil && threshold > 0 {
+			return threshold
+		}
+	}
+	// Final fallback to default
+	return 5
+}
+
 // UseLLMConfig configures the LLM client for the agentize instance
 // It also automatically starts the scheduler if enabled
 func (ag *Agentize) UseLLMConfig(config engine.LLMConfig) error {
@@ -974,7 +1000,10 @@ func (ag *Agentize) handleDebugSummarized(c *gin.Context) {
 		return
 	}
 
-	html, err := debugHandler.GenerateSummarizedMessagesHTML()
+	// Get message threshold from engine's scheduler (which is used by TradeAgent)
+	messageThreshold := ag.GetSchedulerMessageThreshold()
+
+	html, err := debugHandler.GenerateSummarizationLogsHTML(messageThreshold)
 	if err != nil {
 		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to generate summarization logs page: %v", err)})
 		return

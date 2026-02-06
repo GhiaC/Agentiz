@@ -1314,9 +1314,9 @@ func (s *SQLiteStore) PutSummarizationLog(log *model.SummarizationLog) error {
 		log.CreatedAt = time.Now()
 	}
 
-	// Log the attempt
-	fmt.Printf("[SQLiteStore] 🔍 Attempting to INSERT summarization log | LogID: %s | SessionID: %s | Status: %s | PromptSent length: %d\n",
-		log.LogID, log.SessionID, log.Status, len(log.PromptSent))
+	// Debug: Log the attempt (using fmt.Printf to ensure it's always shown)
+	fmt.Printf("[SQLiteStore] 🔍 PutSummarizationLog called | LogID: %s | SessionID: %s | UserID: %s | Status: %s | PromptSent length: %d | CreatedAt: %v\n",
+		log.LogID, log.SessionID, log.UserID, log.Status, len(log.PromptSent), log.CreatedAt)
 
 	result, err := s.db.Exec(
 		`INSERT OR REPLACE INTO summarization_logs (
@@ -1453,3 +1453,6 @@ func (s *SQLiteStore) GetAllSummarizationLogs() ([]*model.SummarizationLog, erro
 
 // Ensure SQLiteStore implements model.SessionStore
 var _ model.SessionStore = (*SQLiteStore)(nil)
+
+// Ensure SQLiteStore implements DebugStore
+var _ DebugStore = (*SQLiteStore)(nil)

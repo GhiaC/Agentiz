@@ -43,6 +43,7 @@ type SchedulerConfig struct {
 	LastActivityThreshold time.Duration
 	MessageThreshold      int
 	SummaryModel          string
+	CleanerInterval       time.Duration // Interval for cleaner goroutine to remove duplicate messages
 }
 
 // Load loads configuration from environment variables
@@ -74,13 +75,26 @@ func loadSchedulerConfig() SchedulerConfig {
 	summarizedAtThresholdMinutes := getEnvInt("AGENTIZE_SCHEDULER_SUMMARIZED_AT_THRESHOLD_MINUTES", 60)
 	lastActivityThresholdMinutes := getEnvInt("AGENTIZE_SCHEDULER_LAST_ACTIVITY_THRESHOLD_MINUTES", 60)
 
+	// Scheduler is enabled by default (true), only disable if explicitly set to false via env var
+	enabled := true
+	if envVal := os.Getenv("AGENTIZE_SCHEDULER_ENABLED"); envVal != "" {
+		if enabledVal, err := strconv.ParseBool(envVal); err == nil {
+			enabled = enabledVal
+		}
+	}
+
+	// Parse cleaner interval from environment (in minutes, convert to time.Duration)
+	// Default: 30 minutes (matching DefaultSessionSchedulerConfig)
+	cleanerIntervalMinutes := getEnvInt("AGENTIZE_SCHEDULER_CLEANER_INTERVAL_MINUTES", 30)
+
 	return SchedulerConfig{
-		Enabled:               getEnvBool("AGENTIZE_SCHEDULER_ENABLED", true),
+		Enabled:               enabled,
 		CheckInterval:         time.Duration(checkIntervalMinutes) * time.Minute,
 		SummarizedAtThreshold: time.Duration(summarizedAtThresholdMinutes) * time.Minute,
 		LastActivityThreshold: time.Duration(lastActivityThresholdMinutes) * time.Minute,
-		MessageThreshold:      getEnvInt("AGENTIZE_SCHEDULER_MESSAGE_THRESHOLD", 10), // Reduced from 20 to trigger summarization more frequently
+		MessageThreshold:      getEnvInt("AGENTIZE_SCHEDULER_MESSAGE_THRESHOLD", 5), // Default matches DefaultSessionSchedulerConfig
 		SummaryModel:          getEnvString("AGENTIZE_SCHEDULER_SUMMARY_MODEL", "gpt-4o-mini"),
+		CleanerInterval:       time.Duration(cleanerIntervalMinutes) * time.Minute,
 	}
 }
 

@@ -136,18 +136,19 @@ func (e *Engine) UseLLMConfig(config LLMConfig) error {
 		schedulerOnceMapMu.Unlock()
 
 		once.Do(func() {
-			// Start scheduler in background
-			ctx := context.Background()
-			e.schedulerMu.Lock()
-			if e.scheduler == nil {
-				if err := e.startScheduler(ctx, client); err != nil {
-					log.Log.Warnf("[Engine] ⚠️  Failed to start scheduler: %v", err)
+			// Start scheduler in background goroutine to avoid blocking initialization
+			go func() {
+				ctx := context.Background()
+				e.schedulerMu.Lock()
+				if e.scheduler == nil {
+					e.schedulerMu.Unlock()
+					if err := e.startScheduler(ctx, client); err != nil {
+						log.Log.Warnf("[Engine] ⚠️  Failed to start scheduler: %v", err)
+					}
 				} else {
 					e.schedulerMu.Unlock()
-					return
 				}
-			}
-			e.schedulerMu.Unlock()
+			}()
 		})
 	}
 
@@ -158,14 +159,26 @@ func (e *Engine) UseLLMConfig(config LLMConfig) error {
 func (e *Engine) startScheduler(ctx context.Context, llmClient *openai.Client) error {
 	// Load scheduler config from environment
 	cfg, err := config.Load()
+	var schedulerConfig config.SchedulerConfig
 	if err != nil {
 		log.Log.Warnf("[Engine] ⚠️  Failed to load config, using defaults: %v", err)
-		cfg = &config.Config{}
-	}
-	schedulerConfig := cfg.Scheduler
-	if !schedulerConfig.Enabled {
-		log.Log.Infof("[Engine] ⏸️  Scheduler is disabled via config")
-		return nil
+		// Use default config (enabled by default)
+		schedulerConfig = config.SchedulerConfig{
+			Enabled:               true, // Enabled by default
+			CheckInterval:         5 * time.Minute,
+			SummarizedAtThreshold: 1 * time.Hour,
+			LastActivityThreshold: 1 * time.Hour,
+			MessageThreshold:      5,
+			SummaryModel:          "gpt-4o-mini",
+			CleanerInterval:       30 * time.Minute, // Default cleaner interval
+		}
+	} else {
+		schedulerConfig = cfg.Scheduler
+		// Scheduler is enabled by default, only disable if explicitly set to false
+		if !schedulerConfig.Enabled {
+			log.Log.Infof("[Engine] ⏸️  Scheduler is disabled via config")
+			return nil
+		}
 	}
 
 	// Create session handler
@@ -195,16 +208,34 @@ func (e *Engine) startScheduler(ctx context.Context, llmClient *openai.Client) e
 	if schedulerConfig.SummaryModel != "" {
 		schedulerConfigStruct.SummaryModel = schedulerConfig.SummaryModel
 	}
+	// CleanerInterval defaults to 30 minutes, but can be overridden from config
+	if schedulerConfig.CleanerInterval > 0 {
+		schedulerConfigStruct.CleanerInterval = schedulerConfig.CleanerInterval
+	}
 
 	// Create and start scheduler
 	scheduler := NewSessionScheduler(sessionHandler, llmClient, schedulerConfigStruct)
+	e.schedulerMu.Lock()
 	e.scheduler = scheduler
-	scheduler.Start(ctx)
+	e.schedulerMu.Unlock()
+	// Start scheduler in background goroutine to avoid blocking initialization
+	go scheduler.Start(ctx)
 
-	log.Log.Infof("[Engine] ✅ Session scheduler started | CheckInterval: %v | SummarizedAtThreshold: %v | LastActivityThreshold: %v | MessageThreshold: %d | SummaryModel: %s",
-		schedulerConfigStruct.CheckInterval, schedulerConfigStruct.SummarizedAtThreshold, schedulerConfigStruct.LastActivityThreshold, schedulerConfigStruct.MessageThreshold, schedulerConfigStruct.SummaryModel)
+	log.Log.Infof("[Engine] ✅ Session scheduler started | CheckInterval: %v | SummarizedAtThreshold: %v | LastActivityThreshold: %v | MessageThreshold: %d | SummaryModel: %s | CleanerInterval: %v",
+		schedulerConfigStruct.CheckInterval, schedulerConfigStruct.SummarizedAtThreshold, schedulerConfigStruct.LastActivityThreshold, schedulerConfigStruct.MessageThreshold, schedulerConfigStruct.SummaryModel, schedulerConfigStruct.CleanerInterval)
 
 	return nil
+}
+
+// GetSchedulerMessageThreshold returns the message threshold from the scheduler if available
+func (e *Engine) GetSchedulerMessageThreshold() int {
+	e.schedulerMu.RLock()
+	defer e.schedulerMu.RUnlock()
+	if e.scheduler != nil {
+		return e.scheduler.GetMessageThreshold()
+	}
+	// Fallback to default (don't call config.Load() to avoid potential issues)
+	return 5
 }
 
 // openAIClientWrapperForSessionHandler wraps openai.Client to implement model.LLMClient interface

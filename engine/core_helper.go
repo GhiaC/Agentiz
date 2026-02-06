@@ -1,7 +1,13 @@
 package engine
 
 import (
+	"context"
+	"fmt"
 	"strings"
+
+	"github.com/ghiac/agentize/log"
+	"github.com/ghiac/agentize/model"
+	"github.com/sashabaranov/go-openai"
 )
 
 // IsNonsenseMessageFast uses fast heuristics to detect nonsense messages (no LLM cost)
@@ -97,4 +103,57 @@ func IsNonsenseMessageFast(message string) bool {
 	}
 
 	return false
+}
+
+// PerformWebSearch performs a web search using OpenAI's web search capability
+// It uses a search-enabled model to get up-to-date information from the internet
+func PerformWebSearch(
+	ctx context.Context,
+	llmClient *openai.Client,
+	llmConfig LLMConfig,
+	query string,
+	userID string,
+) (string, error) {
+	// Ensure userID is in context
+	if userID != "" {
+		ctx = model.WithUserID(ctx, userID)
+	}
+
+	// Use a search-enabled model
+	// According to OpenAI docs, these models support web search:
+	// - gpt-4o-search-preview
+	// - gpt-4o-mini-search-preview
+	// - gpt-5-search-api
+	searchModel := "gpt-4o-search-preview"
+
+	log.Log.Infof("[WebSearch] 🔍 Performing web search | UserID: %s | Query: %s", userID, query)
+
+	// Create request with search-enabled model
+	request := openai.ChatCompletionRequest{
+		Model: searchModel,
+		Messages: []openai.ChatCompletionMessage{
+			{
+				Role:    openai.ChatMessageRoleUser,
+				Content: query,
+			},
+		},
+	}
+
+	resp, err := llmClient.CreateChatCompletion(ctx, request)
+	if err != nil {
+		log.Log.Errorf("[WebSearch] ❌ Web search failed | UserID: %s | Error: %v", userID, err)
+		return "", fmt.Errorf("web search failed: %w", err)
+	}
+
+	if len(resp.Choices) == 0 {
+		return "", fmt.Errorf("no response from web search")
+	}
+
+	result := resp.Choices[0].Message.Content
+
+	// Note: Citations are typically included in the content by the search-enabled model
+	// The model response should already include inline citations in the content
+
+	log.Log.Infof("[WebSearch] ✅ Web search completed | UserID: %s | Result length: %d chars", userID, len(result))
+	return result, nil
 }

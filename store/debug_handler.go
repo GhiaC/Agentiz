@@ -293,6 +293,38 @@ func generateBootstrapHeader(title string) string {
             border-radius: 6px;
             border: 1px solid #e9ecef;
         }
+        .expandable-content {
+            cursor: pointer;
+            position: relative;
+        }
+        .expandable-content:hover {
+            background-color: #f8f9fa;
+            border-radius: 4px;
+            padding: 2px 4px;
+            margin: -2px -4px;
+        }
+        .expandable-content .expand-icon {
+            color: #667eea;
+            font-weight: bold;
+            margin-left: 4px;
+        }
+        .expandable-content.expanded .expand-icon::before {
+            content: "▼";
+        }
+        .expandable-content:not(.expanded) .expand-icon::before {
+            content: "▶";
+        }
+        .full-content {
+            display: none;
+            margin-top: 8px;
+            padding: 8px;
+            background-color: #f8f9fa;
+            border-radius: 4px;
+            border-left: 3px solid #667eea;
+        }
+        .expandable-content.expanded .full-content {
+            display: block;
+        }
     </style>
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js" integrity="sha384-BBtl+eGJRgqQAUMxJ7pMwbEyER4l1g+O15P+16Ep7Q9Q+zqX6gSbd85u4mG4QzX+" crossorigin="anonymous"></script>
 </head>
@@ -307,9 +339,38 @@ func generateBootstrapFooter() string {
         setTimeout(function() {
             location.reload();
         }, 30000);
+        
+        // Expandable content functionality
+        document.addEventListener('DOMContentLoaded', function() {
+            document.querySelectorAll('.expandable-content').forEach(function(element) {
+                element.addEventListener('click', function(e) {
+                    e.stopPropagation();
+                    this.classList.toggle('expanded');
+                });
+            });
+        });
     </script>
 </body>
 </html>`
+}
+
+// generateExpandableContent generates HTML for expandable content
+func generateExpandableContent(shortContent, fullContent string, maxLength int) template.HTML {
+	if len(fullContent) <= maxLength {
+		return template.HTML(template.HTMLEscapeString(fullContent))
+	}
+
+	shortEscaped := template.HTMLEscapeString(shortContent)
+	fullEscaped := template.HTMLEscapeString(fullContent)
+
+	// Generate unique ID for this expandable content
+	id := fmt.Sprintf("expand-%d", len(shortEscaped)+len(fullEscaped))
+
+	return template.HTML(fmt.Sprintf(`<span class="expandable-content" id="%s">
+        <span class="short-content">%s</span>
+        <span class="expand-icon"></span>
+        <div class="full-content">%s</div>
+    </span>`, id, shortEscaped, fullEscaped))
 }
 
 // extractToolCallsFromSession extracts tool calls from session messages
@@ -812,7 +873,6 @@ func (h *DebugHandler) GenerateUserDetailHTML(userID string) (string, error) {
                     <div class="d-flex w-100 justify-content-between align-items-start">
                         <div class="flex-grow-1">
                             <h6 class="mb-2">%s</h6>
-                            <p class="mb-1"><code class="text-break">%s</code></p>
                             <small class="text-muted">Created: %s | Updated: %s</small>
                             <small class="text-muted d-block">Model: <code>%s</code></small>
                             <small class="text-muted d-block">Summary: %s</small>
@@ -824,7 +884,6 @@ func (h *DebugHandler) GenerateUserDetailHTML(userID string) (string, error) {
                 </a>`,
 				template.URLQueryEscaper(session.SessionID),
 				template.HTMLEscapeString(title),
-				template.HTMLEscapeString(session.SessionID),
 				FormatTime(session.CreatedAt),
 				FormatTime(session.UpdatedAt),
 				getModelDisplay(session.Model),
@@ -874,10 +933,13 @@ func (h *DebugHandler) GenerateUserDetailHTML(userID string) (string, error) {
 		}
 		for i := len(messages) - displayCount; i < len(messages); i++ {
 			msg := messages[i]
-			content := msg.Content
-			if len(content) > 100 {
-				content = content[:100] + "..."
+			fullContent := msg.Content
+			shortContent := fullContent
+			if len(fullContent) > 100 {
+				shortContent = fullContent[:100] + "..."
 			}
+			contentDisplay := generateExpandableContent(shortContent, fullContent, 100)
+
 			badgeClass := "bg-secondary"
 			switch msg.Role {
 			case openai.ChatMessageRoleUser:
@@ -903,16 +965,15 @@ func (h *DebugHandler) GenerateUserDetailHTML(userID string) (string, error) {
                             <td class="text-center"><span class="badge %s">%s</span></td>
                             <td class="text-break">%s</td>
                             <td class="text-center"><code>%s</code></td>
-                            <td class="text-nowrap"><a href="/agentize/debug/sessions/%s" class="text-decoration-none">%s</a></td>
+                            <td class="text-nowrap"><a href="/agentize/debug/sessions/%s" class="btn btn-sm btn-outline-primary">Open</a></td>
                             <td class="text-center">%s</td>
                         </tr>`,
 				FormatTime(msg.CreatedAt),
 				badgeClass,
 				template.HTMLEscapeString(msg.Role),
-				template.HTMLEscapeString(content),
+				contentDisplay,
 				getModelDisplay(msg.Model),
 				template.URLQueryEscaper(msg.SessionID),
-				template.HTMLEscapeString(msg.SessionID[:8]+"..."),
 				nonsenseBadge)
 		}
 
@@ -1239,10 +1300,13 @@ func (h *DebugHandler) GenerateSessionDetailHTML(sessionID string) (string, erro
 	} else {
 		html += `<div class="list-group">`
 		for _, msg := range messages {
-			content := msg.Content
-			if len(content) > 200 {
-				content = content[:200] + "..."
+			fullContent := msg.Content
+			shortContent := fullContent
+			if len(fullContent) > 200 {
+				shortContent = fullContent[:200] + "..."
 			}
+			contentDisplay := generateExpandableContent(shortContent, fullContent, 200)
+
 			badgeClass := "bg-secondary"
 			switch msg.Role {
 			case openai.ChatMessageRoleUser:
@@ -1283,7 +1347,7 @@ func (h *DebugHandler) GenerateSessionDetailHTML(sessionID string) (string, erro
 				nonsenseBadge,
 				getModelDisplay(msg.Model),
 				FormatTime(msg.CreatedAt),
-				template.HTMLEscapeString(content),
+				contentDisplay,
 				template.HTMLEscapeString(msg.MessageID))
 		}
 		html += `</div>`
@@ -1311,10 +1375,13 @@ func (h *DebugHandler) GenerateSessionDetailHTML(sessionID string) (string, erro
             </div>`
 		html += `<div class="list-group">`
 		for _, msg := range session.ExMsgs {
-			content := msg.Content
-			if len(content) > 500 {
-				content = content[:500] + "..."
+			fullContent := msg.Content
+			shortContent := fullContent
+			if len(fullContent) > 500 {
+				shortContent = fullContent[:500] + "..."
 			}
+			contentDisplay := generateExpandableContent(shortContent, fullContent, 500)
+
 			badgeClass := "bg-secondary"
 			switch msg.Role {
 			case openai.ChatMessageRoleUser:
@@ -1344,7 +1411,7 @@ func (h *DebugHandler) GenerateSessionDetailHTML(sessionID string) (string, erro
 				badgeClass,
 				template.HTMLEscapeString(msg.Role),
 				toolCallBadge,
-				template.HTMLEscapeString(content))
+				contentDisplay)
 		}
 		html += `</div>`
 	}
@@ -1377,15 +1444,19 @@ func (h *DebugHandler) GenerateSessionDetailHTML(sessionID string) (string, erro
 				statusBadge = `<span class="badge bg-secondary">Pending</span>`
 			}
 
-			promptDisplay := log.PromptSent
-			if len(promptDisplay) > 500 {
-				promptDisplay = promptDisplay[:500] + "..."
+			fullPrompt := log.PromptSent
+			shortPrompt := fullPrompt
+			if len(fullPrompt) > 500 {
+				shortPrompt = fullPrompt[:500] + "..."
 			}
+			promptDisplay := generateExpandableContent(shortPrompt, fullPrompt, 500)
 
-			responseDisplay := log.ResponseReceived
-			if len(responseDisplay) > 500 {
-				responseDisplay = responseDisplay[:500] + "..."
+			fullResponse := log.ResponseReceived
+			shortResponse := fullResponse
+			if len(fullResponse) > 500 {
+				shortResponse = fullResponse[:500] + "..."
 			}
+			responseDisplay := generateExpandableContent(shortResponse, fullResponse, 500)
 
 			html += fmt.Sprintf(`
                 <div class="list-group-item">
@@ -1399,7 +1470,7 @@ func (h *DebugHandler) GenerateSessionDetailHTML(sessionID string) (string, erro
                     </div>
                     <div class="mb-2">
                         <strong>Prompt Sent:</strong>
-                        <pre class="p-2 bg-light rounded mt-1" style="max-height: 200px; overflow-y: auto; white-space: pre-wrap; word-wrap: break-word; font-size: 0.9em;">%s</pre>
+                        <div class="p-2 bg-light rounded mt-1" style="white-space: pre-wrap; word-wrap: break-word; font-size: 0.9em;">%s</div>
                     </div>`,
 				statusBadge,
 				template.HTMLEscapeString(log.ModelUsed),
@@ -1407,15 +1478,15 @@ func (h *DebugHandler) GenerateSessionDetailHTML(sessionID string) (string, erro
 				log.PromptTokens,
 				log.CompletionTokens,
 				FormatTime(log.CreatedAt),
-				template.HTMLEscapeString(promptDisplay))
+				promptDisplay)
 
 			if log.Status == "success" && log.ResponseReceived != "" {
 				html += fmt.Sprintf(`
                     <div class="mb-2">
                         <strong>Response Received:</strong>
-                        <pre class="p-2 bg-success bg-opacity-10 rounded mt-1" style="max-height: 200px; overflow-y: auto; white-space: pre-wrap; word-wrap: break-word; font-size: 0.9em;">%s</pre>
+                        <div class="p-2 bg-success bg-opacity-10 rounded mt-1" style="white-space: pre-wrap; word-wrap: break-word; font-size: 0.9em;">%s</div>
                     </div>`,
-					template.HTMLEscapeString(responseDisplay))
+					responseDisplay)
 			}
 
 			if log.Status == "failed" && log.ErrorMessage != "" {
@@ -1465,24 +1536,30 @@ func (h *DebugHandler) GenerateSessionDetailHTML(sessionID string) (string, erro
                     <tbody>`
 
 		for _, tc := range toolCalls {
-			args := tc.Arguments
-			if len(args) > 150 {
-				args = args[:150] + "..."
+			fullArgs := tc.Arguments
+			shortArgs := fullArgs
+			if len(fullArgs) > 150 {
+				shortArgs = fullArgs[:150] + "..."
 			}
-			result := tc.Result
-			if len(result) > 150 {
-				result = result[:150] + "..."
+			argsDisplay := generateExpandableContent(shortArgs, fullArgs, 150)
+
+			fullResult := tc.Result
+			shortResult := fullResult
+			if len(fullResult) > 150 {
+				shortResult = fullResult[:150] + "..."
 			}
+			resultDisplay := generateExpandableContent(shortResult, fullResult, 150)
+
 			html += fmt.Sprintf(`
                         <tr>
                             <td class="text-nowrap"><code>%s</code></td>
-                            <td><pre class="mb-0" style="max-width: 300px; overflow: auto; white-space: pre-wrap; word-wrap: break-word;">%s</pre></td>
-                            <td><pre class="mb-0" style="max-width: 300px; overflow: auto; white-space: pre-wrap; word-wrap: break-word;">%s</pre></td>
+                            <td><div class="mb-0" style="max-width: 300px; white-space: pre-wrap; word-wrap: break-word;">%s</div></td>
+                            <td><div class="mb-0" style="max-width: 300px; white-space: pre-wrap; word-wrap: break-word;">%s</div></td>
                             <td class="text-nowrap">%s</td>
                         </tr>`,
 				template.HTMLEscapeString(tc.FunctionName),
-				template.HTMLEscapeString(args),
-				template.HTMLEscapeString(result),
+				argsDisplay,
+				resultDisplay,
 				FormatTime(tc.CreatedAt))
 		}
 
@@ -1597,7 +1674,7 @@ func (h *DebugHandler) GenerateSessionsHTML() (string, error) {
                 <table class="table table-striped table-hover align-middle">
                     <thead>
                         <tr>
-                            <th class="text-nowrap">Session ID</th>
+                            <th class="text-center text-nowrap">Actions</th>
                             <th class="text-nowrap">Title</th>
                             <th class="text-center text-nowrap">Agent Type</th>
                             <th class="text-center text-nowrap">Model</th>
@@ -1606,10 +1683,7 @@ func (h *DebugHandler) GenerateSessionsHTML() (string, error) {
                             <th class="text-center text-nowrap">Files</th>
                             <th class="text-nowrap">Summary</th>
                             <th class="text-nowrap">Tags</th>
-                            <th class="text-nowrap">Created At</th>
-                            <th class="text-nowrap">Updated At</th>
-                            <th class="text-nowrap">Summarized At</th>
-                            <th class="text-center text-nowrap">Actions</th>
+                            <th class="text-center text-nowrap">Summarized</th>
                         </tr>
                     </thead>
                     <tbody>`
@@ -1667,14 +1741,11 @@ func (h *DebugHandler) GenerateSessionsHTML() (string, error) {
 				}
 			}
 
-			summarizedAtDisplay := "-"
-			if !session.SummarizedAt.IsZero() {
-				summarizedAtDisplay = FormatTime(session.SummarizedAt)
-			}
+			summarizedDisplay := FormatDuration(session.SummarizedAt)
 
 			html += fmt.Sprintf(`
                         <tr class="%s">
-                            <td><code class="text-break">%s</code></td>
+                            <td class="text-center"><a href="/agentize/debug/sessions/%s" class="btn btn-sm btn-outline-primary">Open</a></td>
                             <td>%s</td>
                             <td class="text-center">%s</td>
                             <td class="text-center"><code>%s</code></td>
@@ -1683,13 +1754,10 @@ func (h *DebugHandler) GenerateSessionsHTML() (string, error) {
                             <td class="text-center"><span class="badge bg-info">%d</span></td>
                             <td class="text-break" style="max-width: 200px;">%s</td>
                             <td class="text-break" style="max-width: 150px;">%s</td>
-                            <td class="text-nowrap">%s</td>
-                            <td class="text-nowrap">%s</td>
-                            <td class="text-nowrap">%s</td>
-                            <td class="text-center"><a href="/agentize/debug/sessions/%s" class="btn btn-sm btn-outline-primary">View Details</a></td>
+                            <td class="text-center">%s</td>
                         </tr>`,
 				rowClass,
-				template.HTMLEscapeString(session.SessionID),
+				template.URLQueryEscaper(session.SessionID),
 				template.HTMLEscapeString(title),
 				agentTypeBadge,
 				getModelDisplay(session.Model),
@@ -1699,10 +1767,7 @@ func (h *DebugHandler) GenerateSessionsHTML() (string, error) {
 				filesCount,
 				summaryDisplay,
 				tagsDisplay,
-				FormatTime(session.CreatedAt),
-				FormatTime(session.UpdatedAt),
-				summarizedAtDisplay,
-				template.URLQueryEscaper(session.SessionID))
+				summarizedDisplay)
 		}
 
 		html += `</tbody>
@@ -1752,7 +1817,7 @@ func (h *DebugHandler) GenerateMessagesHTML() (string, error) {
                             <th>Content</th>
                             <th class="text-center text-nowrap">Model</th>
                             <th class="text-nowrap">User</th>
-                            <th class="text-nowrap">Session</th>
+                            <th class="text-center text-nowrap">Session</th>
                             <th class="text-center text-nowrap">Tool Calls</th>
                             <th class="text-center text-nowrap">Nonsense</th>
                         </tr>
@@ -1760,10 +1825,13 @@ func (h *DebugHandler) GenerateMessagesHTML() (string, error) {
                     <tbody>`
 
 		for _, msg := range messages {
-			content := msg.Content
-			if len(content) > 150 {
-				content = content[:150] + "..."
+			fullContent := msg.Content
+			shortContent := fullContent
+			if len(fullContent) > 150 {
+				shortContent = fullContent[:150] + "..."
 			}
+			contentDisplay := generateExpandableContent(shortContent, fullContent, 150)
+
 			badgeClass := "bg-secondary"
 			switch msg.Role {
 			case openai.ChatMessageRoleUser:
@@ -1797,19 +1865,18 @@ func (h *DebugHandler) GenerateMessagesHTML() (string, error) {
                             <td class="text-break">%s</td>
                             <td class="text-center"><code>%s</code></td>
                             <td class="text-nowrap"><a href="/agentize/debug/users/%s" class="text-decoration-none">%s</a></td>
-                            <td class="text-nowrap"><a href="/agentize/debug/sessions/%s" class="text-decoration-none">%s</a></td>
+                            <td class="text-center"><a href="/agentize/debug/sessions/%s" class="btn btn-sm btn-outline-primary">Open</a></td>
                             <td class="text-center">%s</td>
                             <td class="text-center">%s</td>
                         </tr>`,
 				FormatTime(msg.CreatedAt),
 				badgeClass,
 				template.HTMLEscapeString(msg.Role),
-				template.HTMLEscapeString(content),
+				contentDisplay,
 				getModelDisplay(msg.Model),
 				template.URLQueryEscaper(msg.UserID),
 				template.HTMLEscapeString(msg.UserID[:min(20, len(msg.UserID))]+"..."),
 				template.URLQueryEscaper(msg.SessionID),
-				template.HTMLEscapeString(msg.SessionID[:min(20, len(msg.SessionID))]+"..."),
 				toolCallBadge,
 				nonsenseBadge)
 		}
@@ -1959,37 +2026,42 @@ func (h *DebugHandler) GenerateToolCallsHTML() (string, error) {
                             <th>Arguments</th>
                             <th>Result</th>
                             <th class="text-nowrap">User</th>
-                            <th class="text-nowrap">Session</th>
+                            <th class="text-center text-nowrap">Session</th>
                             <th class="text-nowrap">Time</th>
                         </tr>
                     </thead>
                     <tbody>`
 
 		for _, tc := range allToolCalls {
-			args := tc.Arguments
-			if len(args) > 100 {
-				args = args[:100] + "..."
+			fullArgs := tc.Arguments
+			shortArgs := fullArgs
+			if len(fullArgs) > 100 {
+				shortArgs = fullArgs[:100] + "..."
 			}
-			result := tc.Result
-			if len(result) > 100 {
-				result = result[:100] + "..."
+			argsDisplay := generateExpandableContent(shortArgs, fullArgs, 100)
+
+			fullResult := tc.Result
+			shortResult := fullResult
+			if len(fullResult) > 100 {
+				shortResult = fullResult[:100] + "..."
 			}
+			resultDisplay := generateExpandableContent(shortResult, fullResult, 100)
+
 			html += fmt.Sprintf(`
                         <tr>
                             <td class="text-nowrap"><code>%s</code></td>
-                            <td><pre class="mb-0" style="max-width: 200px; overflow: auto; font-size: 0.8em; white-space: pre-wrap; word-wrap: break-word;">%s</pre></td>
-                            <td><pre class="mb-0" style="max-width: 200px; overflow: auto; font-size: 0.8em; white-space: pre-wrap; word-wrap: break-word;">%s</pre></td>
+                            <td><div class="mb-0" style="max-width: 200px; font-size: 0.8em; white-space: pre-wrap; word-wrap: break-word;">%s</div></td>
+                            <td><div class="mb-0" style="max-width: 200px; font-size: 0.8em; white-space: pre-wrap; word-wrap: break-word;">%s</div></td>
                             <td class="text-nowrap"><a href="/agentize/debug/users/%s" class="text-decoration-none">%s</a></td>
-                            <td class="text-nowrap"><a href="/agentize/debug/sessions/%s" class="text-decoration-none">%s</a></td>
+                            <td class="text-center"><a href="/agentize/debug/sessions/%s" class="btn btn-sm btn-outline-primary">Open</a></td>
                             <td class="text-nowrap">%s</td>
                         </tr>`,
 				template.HTMLEscapeString(tc.FunctionName),
-				template.HTMLEscapeString(args),
-				template.HTMLEscapeString(result),
+				argsDisplay,
+				resultDisplay,
 				template.URLQueryEscaper(tc.UserID),
 				template.HTMLEscapeString(tc.UserID[:min(20, len(tc.UserID))]+"..."),
 				template.URLQueryEscaper(tc.SessionID),
-				template.HTMLEscapeString(tc.SessionID[:min(20, len(tc.SessionID))]+"..."),
 				FormatTime(tc.CreatedAt))
 		}
 
@@ -2008,12 +2080,19 @@ func (h *DebugHandler) GenerateToolCallsHTML() (string, error) {
 }
 
 // GenerateSummarizationLogsHTML generates the summarization logs list HTML page
-func (h *DebugHandler) GenerateSummarizationLogsHTML() (string, error) {
+// messageThreshold is optional - if 0, defaults to 5 (matching DefaultSessionSchedulerConfig)
+func (h *DebugHandler) GenerateSummarizationLogsHTML(messageThreshold int) (string, error) {
 	debugStore := h.store.(DebugStore)
 
 	summarizationLogs, err := debugStore.GetAllSummarizationLogs()
 	if err != nil {
 		return "", fmt.Errorf("failed to get summarization logs: %w", err)
+	}
+
+	// Debug: Check if there are any logs
+	if len(summarizationLogs) == 0 {
+		// Try to query directly to see if table exists and has data
+		// This is a debug check - we'll add a note in the HTML
 	}
 
 	// Get all sessions to calculate statistics
@@ -2053,11 +2132,53 @@ func (h *DebugHandler) GenerateSummarizationLogsHTML() (string, error) {
 	}
 
 	// Count eligible sessions (have enough messages but not yet summarized)
-	// Get threshold from SessionHandlerConfig
-	config := model.DefaultSessionHandlerConfig()
-	summarizeThreshold := config.AutoSummarizeThreshold
+	// Use threshold from scheduler (passed as parameter), only extract from logs if not provided
+	summarizeThreshold := messageThreshold
 	if summarizeThreshold <= 0 {
-		summarizeThreshold = 5 // fallback to default (matches DefaultSessionHandlerConfig)
+		// Only extract from logs if threshold was not provided (0 or negative)
+		// Try to infer threshold from summarized sessions
+		// Look at ExMsgs count in sessions that have been summarized
+		minExMsgs := -1
+		for _, session := range allSessions {
+			if !session.SummarizedAt.IsZero() && len(session.ExMsgs) > 0 {
+				exMsgsCount := len(session.ExMsgs)
+				if minExMsgs == -1 || exMsgsCount < minExMsgs {
+					minExMsgs = exMsgsCount
+				}
+			}
+		}
+		// If we found summarized sessions, use the minimum ExMsgs as threshold
+		// Otherwise fall back to default
+		if minExMsgs > 0 {
+			summarizeThreshold = minExMsgs
+		} else {
+			// Fallback: try to infer from summarization logs by checking session message counts
+			// Get sessions that were summarized (have logs)
+			sessionIDsWithLogs := make(map[string]bool)
+			for _, log := range summarizationLogs {
+				if log.Status == "success" {
+					sessionIDsWithLogs[log.SessionID] = true
+				}
+			}
+			// Find minimum message count from sessions that have been summarized
+			for _, session := range allSessions {
+				if sessionIDsWithLogs[session.SessionID] {
+					// Count total messages (ExMsgs + current Msgs)
+					totalMsgs := len(session.ExMsgs)
+					if session.ConversationState != nil {
+						totalMsgs += len(session.ConversationState.Msgs)
+					}
+					if totalMsgs > 0 && (minExMsgs == -1 || totalMsgs < minExMsgs) {
+						minExMsgs = totalMsgs
+					}
+				}
+			}
+			if minExMsgs > 0 {
+				summarizeThreshold = minExMsgs
+			} else {
+				summarizeThreshold = 5 // Final fallback to default
+			}
+		}
 	}
 	eligibleSessions := 0
 	for _, session := range allSessions {
@@ -2163,7 +2284,7 @@ func (h *DebugHandler) GenerateSummarizationLogsHTML() (string, error) {
                             <th class="text-center text-nowrap">Model</th>
                             <th class="text-center text-nowrap">Tokens</th>
                             <th class="text-nowrap">User</th>
-                            <th class="text-nowrap">Session</th>
+                            <th class="text-center text-nowrap">Session</th>
                             <th class="text-nowrap">Created At</th>
                             <th class="text-center text-nowrap">Actions</th>
                         </tr>
@@ -2190,7 +2311,7 @@ func (h *DebugHandler) GenerateSummarizationLogsHTML() (string, error) {
                             <td class="text-center"><code>%s</code></td>
                             <td class="text-center">%s</td>
                             <td class="text-nowrap"><a href="/agentize/debug/users/%s" class="text-decoration-none">%s</a></td>
-                            <td class="text-nowrap"><a href="/agentize/debug/sessions/%s" class="text-decoration-none">%s</a></td>
+                            <td class="text-center"><a href="/agentize/debug/sessions/%s" class="btn btn-sm btn-outline-primary">Open</a></td>
                             <td class="text-nowrap">%s</td>
                             <td class="text-center"><a href="/agentize/debug/sessions/%s#summarization-logs" class="btn btn-sm btn-outline-primary">View Details</a></td>
                         </tr>`,
@@ -2201,7 +2322,6 @@ func (h *DebugHandler) GenerateSummarizationLogsHTML() (string, error) {
 				template.URLQueryEscaper(log.UserID),
 				template.HTMLEscapeString(log.UserID[:min(20, len(log.UserID))]+"..."),
 				template.URLQueryEscaper(log.SessionID),
-				template.HTMLEscapeString(log.SessionID[:min(20, len(log.SessionID))]+"..."),
 				FormatTime(log.CreatedAt),
 				template.URLQueryEscaper(log.SessionID))
 		}
@@ -2344,10 +2464,12 @@ func (h *DebugHandler) GenerateSummarizedMessagesHTML() (string, error) {
 		html += `<div class="list-group">`
 
 		for _, msgInfo := range allSummarizedMessages {
-			content := msgInfo.Content
-			if len(content) > 500 {
-				content = content[:500] + "..."
+			fullContent := msgInfo.Content
+			shortContent := fullContent
+			if len(fullContent) > 500 {
+				shortContent = fullContent[:500] + "..."
 			}
+			contentDisplay := generateExpandableContent(shortContent, fullContent, 500)
 
 			badgeClass := "bg-secondary"
 			switch msgInfo.Role {
@@ -2376,7 +2498,7 @@ func (h *DebugHandler) GenerateSummarizedMessagesHTML() (string, error) {
                     <div class="d-flex w-100 justify-content-between align-items-start mb-2">
                         <div>
                             <span class="badge %s me-2">%s</span>%s
-                            <span class="badge bg-secondary ms-2">Session: <a href="/agentize/debug/sessions/%s" class="text-white text-decoration-none">%s</a></span>
+                            <a href="/agentize/debug/sessions/%s" class="btn btn-sm btn-outline-primary ms-2">Open Session</a>
                             <span class="badge bg-info ms-2">User: <a href="/agentize/debug/users/%s" class="text-white text-decoration-none">%s</a></span>
                         </div>
                         <small class="text-muted">Summarized: %s</small>
@@ -2386,11 +2508,10 @@ func (h *DebugHandler) GenerateSummarizedMessagesHTML() (string, error) {
 				template.HTMLEscapeString(msgInfo.Role),
 				toolCallBadge,
 				template.URLQueryEscaper(msgInfo.SessionID),
-				template.HTMLEscapeString(sessionTitle),
 				template.URLQueryEscaper(msgInfo.UserID),
 				template.HTMLEscapeString(msgInfo.UserID[:min(20, len(msgInfo.UserID))]+"..."),
 				FormatTime(msgInfo.SummarizedAt),
-				template.HTMLEscapeString(content))
+				contentDisplay)
 
 			// Show tool calls if present
 			if msgInfo.HasToolCalls && len(msgInfo.ToolCalls) > 0 {
@@ -2411,10 +2532,9 @@ func (h *DebugHandler) GenerateSummarizedMessagesHTML() (string, error) {
 			}
 
 			html += fmt.Sprintf(`
-                    <small class="text-muted d-block mt-2">Session Created: %s | Session ID: <code>%s</code></small>
+                    <small class="text-muted d-block mt-2">Session Created: %s</small>
                 </div>`,
-				FormatTime(msgInfo.SessionCreatedAt),
-				template.HTMLEscapeString(msgInfo.SessionID))
+				FormatTime(msgInfo.SessionCreatedAt))
 		}
 
 		html += `</div>`
