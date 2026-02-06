@@ -974,7 +974,7 @@ func (ag *Agentize) handleDebugSummarized(c *gin.Context) {
 		return
 	}
 
-	html, err := debugHandler.GenerateSummarizationLogsHTML()
+	html, err := debugHandler.GenerateSummarizedMessagesHTML()
 	if err != nil {
 		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to generate summarization logs page: %v", err)})
 		return

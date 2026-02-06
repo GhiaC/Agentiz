@@ -2053,8 +2053,12 @@ func (h *DebugHandler) GenerateSummarizationLogsHTML() (string, error) {
 	}
 
 	// Count eligible sessions (have enough messages but not yet summarized)
-	// Using threshold of 40 messages (default AutoSummarizeThreshold from SessionHandlerConfig)
-	const summarizeThreshold = 40
+	// Get threshold from SessionHandlerConfig
+	config := model.DefaultSessionHandlerConfig()
+	summarizeThreshold := config.AutoSummarizeThreshold
+	if summarizeThreshold <= 0 {
+		summarizeThreshold = 20 // fallback to default
+	}
 	eligibleSessions := 0
 	for _, session := range allSessions {
 		if session.SummarizedAt.IsZero() {
@@ -2205,6 +2209,215 @@ func (h *DebugHandler) GenerateSummarizationLogsHTML() (string, error) {
 		html += `</tbody>
                 </table>
             </div>`
+	}
+
+	html += `</div>
+        </div>
+    </div>
+    </div>`
+	html += generateBootstrapFooter()
+
+	return html, nil
+}
+
+// SummarizedMessageInfo represents information about a summarized message
+type SummarizedMessageInfo struct {
+	SessionID        string
+	UserID           string
+	SessionTitle     string
+	Role             string
+	Content          string
+	HasToolCalls     bool
+	ToolCalls        []openai.ToolCall
+	SummarizedAt     time.Time
+	SessionCreatedAt time.Time
+}
+
+// GenerateSummarizedMessagesHTML generates a page showing all summarized messages from all sessions
+func (h *DebugHandler) GenerateSummarizedMessagesHTML() (string, error) {
+	sessionsByUser, err := h.GetAllSessions()
+	if err != nil {
+		return "", fmt.Errorf("failed to get sessions: %w", err)
+	}
+
+	// Collect all summarized messages
+	var allSummarizedMessages []SummarizedMessageInfo
+	totalCount := 0
+
+	for _, sessions := range sessionsByUser {
+		for _, session := range sessions {
+			if len(session.SummarizedMessages) > 0 {
+				for _, msg := range session.SummarizedMessages {
+					allSummarizedMessages = append(allSummarizedMessages, SummarizedMessageInfo{
+						SessionID:        session.SessionID,
+						UserID:           session.UserID,
+						SessionTitle:     session.Title,
+						Role:             msg.Role,
+						Content:          msg.Content,
+						HasToolCalls:     len(msg.ToolCalls) > 0,
+						ToolCalls:        msg.ToolCalls,
+						SummarizedAt:     session.SummarizedAt,
+						SessionCreatedAt: session.CreatedAt,
+					})
+					totalCount++
+				}
+			}
+		}
+	}
+
+	// Sort by SummarizedAt (newest first)
+	sort.Slice(allSummarizedMessages, func(i, j int) bool {
+		return allSummarizedMessages[i].SummarizedAt.After(allSummarizedMessages[j].SummarizedAt)
+	})
+
+	// Count by role
+	userCount := 0
+	assistantCount := 0
+	toolCount := 0
+	systemCount := 0
+	for _, msg := range allSummarizedMessages {
+		switch msg.Role {
+		case openai.ChatMessageRoleUser:
+			userCount++
+		case openai.ChatMessageRoleAssistant:
+			assistantCount++
+		case openai.ChatMessageRoleTool:
+			toolCount++
+		case openai.ChatMessageRoleSystem:
+			systemCount++
+		}
+	}
+
+	html := generateBootstrapHeader("Agentize Debug - Summarized Messages")
+	html += generateNavigationBar("/agentize/debug/summarized")
+	html += `<div class="container">
+    <div class="main-container">
+        <!-- Statistics Cards -->
+        <div class="row g-4 mb-4">
+            <div class="col-md-6 col-lg-3">
+                <div class="card text-center h-100 border-primary">
+                    <div class="card-body d-flex flex-column justify-content-center">
+                        <h2 class="card-title text-primary mb-3" style="font-size: 2.5rem; font-weight: bold;">` + fmt.Sprintf("%d", totalCount) + `</h2>
+                        <p class="card-text mb-3" style="font-size: 1.1rem;">📝 Total Messages</p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-6 col-lg-3">
+                <div class="card text-center h-100 border-info">
+                    <div class="card-body d-flex flex-column justify-content-center">
+                        <h2 class="card-title text-info mb-3" style="font-size: 2.5rem; font-weight: bold;">` + fmt.Sprintf("%d", userCount) + `</h2>
+                        <p class="card-text mb-3" style="font-size: 1.1rem;">👤 User</p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-6 col-lg-3">
+                <div class="card text-center h-100 border-success">
+                    <div class="card-body d-flex flex-column justify-content-center">
+                        <h2 class="card-title text-success mb-3" style="font-size: 2.5rem; font-weight: bold;">` + fmt.Sprintf("%d", assistantCount) + `</h2>
+                        <p class="card-text mb-3" style="font-size: 1.1rem;">🤖 Assistant</p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-6 col-lg-3">
+                <div class="card text-center h-100 border-warning">
+                    <div class="card-body d-flex flex-column justify-content-center">
+                        <h2 class="card-title text-warning mb-3" style="font-size: 2.5rem; font-weight: bold;">` + fmt.Sprintf("%d", toolCount) + `</h2>
+                        <p class="card-text mb-3" style="font-size: 1.1rem;">🔧 Tool</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="card">
+            <div class="card-header">
+                <h4 class="mb-0"><i class="bi bi-archive-fill me-2"></i>All Summarized Messages (` + fmt.Sprintf("%d", len(allSummarizedMessages)) + `)</h4>
+            </div>
+            <div class="card-body">`
+
+	if len(allSummarizedMessages) == 0 {
+		html += `<div class="alert alert-info text-center">
+                <i class="bi bi-info-circle me-2"></i>No summarized messages found. Messages are archived here after session summarization.
+            </div>`
+	} else {
+		html += `<div class="alert alert-warning mb-3">
+                <i class="bi bi-exclamation-triangle me-2"></i><strong>Note:</strong> These are archived messages that have been summarized and moved from active conversation state. They are kept for reference but are not used in normal operations.
+            </div>`
+		html += `<div class="list-group">`
+
+		for _, msgInfo := range allSummarizedMessages {
+			content := msgInfo.Content
+			if len(content) > 500 {
+				content = content[:500] + "..."
+			}
+
+			badgeClass := "bg-secondary"
+			switch msgInfo.Role {
+			case openai.ChatMessageRoleUser:
+				badgeClass = "bg-primary"
+			case openai.ChatMessageRoleAssistant:
+				badgeClass = "bg-success"
+			case openai.ChatMessageRoleTool:
+				badgeClass = "bg-warning text-dark"
+			case openai.ChatMessageRoleSystem:
+				badgeClass = "bg-info"
+			}
+
+			toolCallBadge := ""
+			if msgInfo.HasToolCalls {
+				toolCallBadge = ` <span class="badge bg-danger">Has Tool Calls (` + fmt.Sprintf("%d", len(msgInfo.ToolCalls)) + `)</span>`
+			}
+
+			sessionTitle := msgInfo.SessionTitle
+			if sessionTitle == "" {
+				sessionTitle = "Untitled Session"
+			}
+
+			html += fmt.Sprintf(`
+                <div class="list-group-item">
+                    <div class="d-flex w-100 justify-content-between align-items-start mb-2">
+                        <div>
+                            <span class="badge %s me-2">%s</span>%s
+                            <span class="badge bg-secondary ms-2">Session: <a href="/agentize/debug/sessions/%s" class="text-white text-decoration-none">%s</a></span>
+                            <span class="badge bg-info ms-2">User: <a href="/agentize/debug/users/%s" class="text-white text-decoration-none">%s</a></span>
+                        </div>
+                        <small class="text-muted">Summarized: %s</small>
+                    </div>
+                    <p class="mb-2 text-justify">%s</p>`,
+				badgeClass,
+				template.HTMLEscapeString(msgInfo.Role),
+				toolCallBadge,
+				template.URLQueryEscaper(msgInfo.SessionID),
+				template.HTMLEscapeString(sessionTitle),
+				template.URLQueryEscaper(msgInfo.UserID),
+				template.HTMLEscapeString(msgInfo.UserID[:min(20, len(msgInfo.UserID))]+"..."),
+				FormatTime(msgInfo.SummarizedAt),
+				template.HTMLEscapeString(content))
+
+			// Show tool calls if present
+			if msgInfo.HasToolCalls && len(msgInfo.ToolCalls) > 0 {
+				html += `<div class="mt-2">
+                        <strong>Tool Calls:</strong>`
+				for _, tc := range msgInfo.ToolCalls {
+					argsJSON, _ := json.MarshalIndent(tc.Function.Arguments, "", "  ")
+					html += fmt.Sprintf(`
+                            <div class="mt-1 p-2 bg-light rounded">
+                                <strong>Function:</strong> <code>%s</code><br>
+                                <strong>Arguments:</strong>
+                                <pre class="mb-0 mt-1" style="max-height: 150px; overflow-y: auto; font-size: 0.85em;">%s</pre>
+                            </div>`,
+						template.HTMLEscapeString(tc.Function.Name),
+						template.HTMLEscapeString(string(argsJSON)))
+				}
+				html += `</div>`
+			}
+
+			html += fmt.Sprintf(`
+                    <small class="text-muted d-block mt-2">Session Created: %s | Session ID: <code>%s</code></small>
+                </div>`,
+				FormatTime(msgInfo.SessionCreatedAt),
+				template.HTMLEscapeString(msgInfo.SessionID))
+		}
+
+		html += `</div>`
 	}
 
 	html += `</div>
