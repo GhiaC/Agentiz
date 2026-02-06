@@ -38,7 +38,7 @@ func DefaultCoreHandlerConfig() CoreHandlerConfig {
 		//UserAgentHighModel:     "gpt-4o", FOR TESTING
 		UserAgentHighModel:     "gpt-4o-mini",
 		UserAgentLowModel:      "gpt-4o-mini",
-		AutoSummarizeThreshold: 20,
+		AutoSummarizeThreshold: 5,
 	}
 }
 

@@ -35,7 +35,7 @@ type SessionHandlerConfig struct {
 // DefaultSessionHandlerConfig returns default configuration
 func DefaultSessionHandlerConfig() SessionHandlerConfig {
 	return SessionHandlerConfig{
-		AutoSummarizeThreshold: 40,
+		AutoSummarizeThreshold: 20,
 		SummaryModel:           "gpt-4o-mini",
 		SummaryMaxTokens:       200,
 	}
@@ -289,9 +289,36 @@ func (sh *SessionHandler) SummarizeSession(ctx context.Context, sessionID string
 		ctx = WithUserID(ctx, session.UserID)
 	}
 
+	// Create log entry before making the request
+	summLog := NewSummarizationLog(sessionID, session.UserID)
+	summLog.ModelUsed = sh.config.SummaryModel
+	summLog.Status = "pending"
+	// PromptSent will be set in generateConversationSummary with full prompt
+
+	// Try to save log if store supports it
+	if debugStore, ok := sh.store.(interface {
+		PutSummarizationLog(log *SummarizationLog) error
+	}); ok {
+		if err := debugStore.PutSummarizationLog(summLog); err != nil {
+			log.Log.Warnf("[SessionHandler] ⚠️  Failed to save summarization log: %v", err)
+		} else {
+			log.Log.Infof("[SessionHandler] ✅ Saved summarization log (pending) | LogID: %s | SessionID: %s", summLog.LogID, sessionID)
+		}
+	} else {
+		log.Log.Warnf("[SessionHandler] ⚠️  Store does not implement PutSummarizationLog, skipping log")
+	}
+
 	// Generate summary using LLM
-	summary, err := sh.generateConversationSummary(ctx, conversationText)
+	summary, err := sh.generateConversationSummary(ctx, conversationText, summLog)
 	if err != nil {
+		// Update log with error
+		summLog.Status = "failed"
+		summLog.ErrorMessage = err.Error()
+		if debugStore, ok := sh.store.(interface {
+			PutSummarizationLog(log *SummarizationLog) error
+		}); ok {
+			_ = debugStore.PutSummarizationLog(summLog)
+		}
 		return fmt.Errorf("failed to generate summary: %w", err)
 	}
 
@@ -403,7 +430,7 @@ func (sh *SessionHandler) formatSessionEntry(sb *strings.Builder, index int, s *
 }
 
 // generateConversationSummary uses LLM to generate a summary of the conversation
-func (sh *SessionHandler) generateConversationSummary(ctx context.Context, conversationText string) (string, error) {
+func (sh *SessionHandler) generateConversationSummary(ctx context.Context, conversationText string, summLog *SummarizationLog) (string, error) {
 	systemPrompt := `You are a conversation summarizer.
 Generate a concise summary (2-3 sentences) that captures the main topics and outcomes of this conversation.
 
@@ -415,6 +442,9 @@ Requirements:
 
 Example: "Debugged Kubernetes pod restart issue. Found memory limits too low. Applied fix and verified pod stability."
 `
+
+	fullPrompt := systemPrompt + "\n\nSummarize this conversation:\n\n" + conversationText
+	summLog.PromptSent = fullPrompt
 
 	resp, err := sh.llmClient.CreateChatCompletion(ctx, openai.ChatCompletionRequest{
 		Model: sh.config.SummaryModel,
@@ -433,7 +463,31 @@ Example: "Debugged Kubernetes pod restart issue. Found memory limits too low. Ap
 		return "", fmt.Errorf("no response from LLM")
 	}
 
-	return resp.Choices[0].Message.Content, nil
+	summary := resp.Choices[0].Message.Content
+
+	// Update log with success response
+	summLog.Status = "success"
+	summLog.ResponseReceived = summary
+	if resp.Usage.PromptTokens > 0 {
+		summLog.PromptTokens = resp.Usage.PromptTokens
+	}
+	if resp.Usage.CompletionTokens > 0 {
+		summLog.CompletionTokens = resp.Usage.CompletionTokens
+	}
+	if resp.Usage.TotalTokens > 0 {
+		summLog.TotalTokens = resp.Usage.TotalTokens
+	}
+	if debugStore, ok := sh.store.(interface {
+		PutSummarizationLog(log *SummarizationLog) error
+	}); ok {
+		if err := debugStore.PutSummarizationLog(summLog); err != nil {
+			log.Log.Warnf("[SessionHandler] ⚠️  Failed to update summarization log: %v", err)
+		} else {
+			log.Log.Infof("[SessionHandler] ✅ Updated summarization log (success) | LogID: %s | SessionID: %s | Tokens: %d", summLog.LogID, summLog.SessionID, summLog.TotalTokens)
+		}
+	}
+
+	return summary, nil
 }
 
 // generateSessionTitle uses LLM to generate a title for the session

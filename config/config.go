@@ -79,7 +79,7 @@ func loadSchedulerConfig() SchedulerConfig {
 		CheckInterval:         time.Duration(checkIntervalMinutes) * time.Minute,
 		SummarizedAtThreshold: time.Duration(summarizedAtThresholdMinutes) * time.Minute,
 		LastActivityThreshold: time.Duration(lastActivityThresholdMinutes) * time.Minute,
-		MessageThreshold:      getEnvInt("AGENTIZE_SCHEDULER_MESSAGE_THRESHOLD", 20),
+		MessageThreshold:      getEnvInt("AGENTIZE_SCHEDULER_MESSAGE_THRESHOLD", 10), // Reduced from 20 to trigger summarization more frequently
 		SummaryModel:          getEnvString("AGENTIZE_SCHEDULER_SUMMARY_MODEL", "gpt-4o-mini"),
 	}
 }

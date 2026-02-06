@@ -2057,7 +2057,7 @@ func (h *DebugHandler) GenerateSummarizationLogsHTML() (string, error) {
 	config := model.DefaultSessionHandlerConfig()
 	summarizeThreshold := config.AutoSummarizeThreshold
 	if summarizeThreshold <= 0 {
-		summarizeThreshold = 20 // fallback to default
+		summarizeThreshold = 5 // fallback to default (matches DefaultSessionHandlerConfig)
 	}
 	eligibleSessions := 0
 	for _, session := range allSessions {

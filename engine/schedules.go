@@ -3,11 +3,13 @@ package engine
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/ghiac/agentize/log"
 	"github.com/ghiac/agentize/model"
+	"github.com/ghiac/agentize/store"
 	"github.com/sashabaranov/go-openai"
 )
 
@@ -35,7 +37,7 @@ func DefaultSessionSchedulerConfig() SessionSchedulerConfig {
 		CheckInterval:         5 * time.Minute,
 		SummarizedAtThreshold: 1 * time.Hour,
 		LastActivityThreshold: 1 * time.Hour,
-		MessageThreshold:      20,
+		MessageThreshold:      5, // Reduced from 20 to trigger summarization more frequently
 		SummaryModel:          "gpt-4o-mini",
 	}
 }
@@ -126,12 +128,10 @@ func (ss *SessionScheduler) checkAndSummarizeSessions(ctx context.Context) {
 	log.Log.Infof("[SessionScheduler] 🔍 Checking sessions for summarization...")
 
 	// Get all sessions from store
-	store := ss.sessionHandler.GetStore()
-	debugStore, ok := store.(interface {
-		GetAllSessions() (map[string][]*model.Session, error)
-	})
+	sessionStore := ss.sessionHandler.GetStore()
+	debugStore, ok := sessionStore.(store.DebugStore)
 	if !ok {
-		log.Log.Errorf("[SessionScheduler] ❌ Store does not implement GetAllSessions")
+		log.Log.Errorf("[SessionScheduler] ❌ Store does not implement DebugStore interface")
 		return
 	}
 
@@ -151,8 +151,39 @@ func (ss *SessionScheduler) checkAndSummarizeSessions(ctx context.Context) {
 	for userID, sessions := range sessionsByUser {
 		totalSessions += len(sessions)
 		for _, session := range sessions {
-			if ss.isEligibleForSummarization(session, now) {
+			msgCount := 0
+			if session.ConversationState != nil {
+				msgCount = len(session.ConversationState.Msgs)
+			}
+			isEligible := ss.isEligibleForSummarization(session, now)
+			if !isEligible && msgCount > 0 {
+				// Log why session is not eligible (only for sessions with messages)
+				reasons := []string{}
+				if session.ConversationState == nil || msgCount == 0 {
+					reasons = append(reasons, "no messages")
+				}
+				if msgCount < ss.config.MessageThreshold {
+					reasons = append(reasons, fmt.Sprintf("only %d messages (need %d)", msgCount, ss.config.MessageThreshold))
+				}
+				if !session.SummarizedAt.IsZero() {
+					summarizedAge := now.Sub(session.SummarizedAt)
+					if summarizedAge < ss.config.SummarizedAtThreshold {
+						reasons = append(reasons, fmt.Sprintf("summarized %v ago (need %v)", summarizedAge, ss.config.SummarizedAtThreshold))
+					}
+					if session.ConversationState != nil && !session.ConversationState.LastActivity.IsZero() {
+						lastActivityAge := now.Sub(session.ConversationState.LastActivity)
+						if lastActivityAge > ss.config.LastActivityThreshold {
+							reasons = append(reasons, fmt.Sprintf("last activity %v ago (need within %v)", lastActivityAge, ss.config.LastActivityThreshold))
+						}
+					}
+				}
+				if len(reasons) > 0 {
+					log.Log.Debugf("[SessionScheduler] ⏭️  Session %s not eligible: %s | Messages: %d", session.SessionID, strings.Join(reasons, ", "), msgCount)
+				}
+			}
+			if isEligible {
 				eligibleSessions++
+				log.Log.Infof("[SessionScheduler] 🎯 Session eligible for summarization | SessionID: %s | UserID: %s | Messages: %d", session.SessionID, userID, msgCount)
 				if err := ss.summarizeSession(ctx, session); err != nil {
 					log.Log.Errorf("[SessionScheduler] ❌ Failed to summarize session %s: %v", session.SessionID, err)
 				} else {
@@ -293,16 +324,35 @@ Example: "Debugged Kubernetes pod restart issue. Found memory limits too low. Ap
 	summLog.ModelUsed = ss.config.SummaryModel
 	summLog.Status = "pending"
 
+	// Validate required fields
+	if summLog.PromptSent == "" {
+		log.Log.Warnf("[SessionScheduler] ⚠️  PromptSent is empty for log | LogID: %s", summLog.LogID)
+	}
+	if summLog.ModelUsed == "" {
+		log.Log.Warnf("[SessionScheduler] ⚠️  ModelUsed is empty for log | LogID: %s", summLog.LogID)
+	}
+	if summLog.LogID == "" {
+		log.Log.Errorf("[SessionScheduler] ❌ LogID is empty!")
+	}
+	if summLog.SessionID == "" {
+		log.Log.Errorf("[SessionScheduler] ❌ SessionID is empty!")
+	}
+	if summLog.UserID == "" {
+		log.Log.Errorf("[SessionScheduler] ❌ UserID is empty!")
+	}
+
 	// Get store to save log
-	store := ss.sessionHandler.GetStore()
-	debugStore, ok := store.(interface {
-		PutSummarizationLog(log *model.SummarizationLog) error
-	})
+	sessionStore := ss.sessionHandler.GetStore()
+	log.Log.Infof("[SessionScheduler] 🔍 Store type: %T | LogID: %s", sessionStore, summLog.LogID)
+	debugStore, ok := sessionStore.(store.DebugStore)
 	if !ok {
-		log.Log.Warnf("[SessionScheduler] ⚠️  Store does not implement PutSummarizationLog, skipping log")
+		log.Log.Warnf("[SessionScheduler] ⚠️  Store does not implement DebugStore interface, skipping summarization log | Store type: %T | LogID: %s", sessionStore, summLog.LogID)
 	} else {
+		log.Log.Infof("[SessionScheduler] 🔍 Store implements DebugStore, attempting to save summarization log | LogID: %s | SessionID: %s | Status: %s | PromptSent length: %d", summLog.LogID, sessionID, summLog.Status, len(summLog.PromptSent))
 		if err := debugStore.PutSummarizationLog(summLog); err != nil {
-			log.Log.Warnf("[SessionScheduler] ⚠️  Failed to save summarization log: %v", err)
+			log.Log.Errorf("[SessionScheduler] ❌ Failed to save summarization log: %v | LogID: %s | SessionID: %s | Error details: %+v", err, summLog.LogID, sessionID, err)
+		} else {
+			log.Log.Infof("[SessionScheduler] ✅ Saved summarization log (pending) | LogID: %s | SessionID: %s", summLog.LogID, sessionID)
 		}
 	}
 
@@ -312,7 +362,11 @@ Example: "Debugged Kubernetes pod restart issue. Found memory limits too low. Ap
 		summLog.Status = "failed"
 		summLog.ErrorMessage = err.Error()
 		if ok {
-			_ = debugStore.PutSummarizationLog(summLog)
+			if updateErr := debugStore.PutSummarizationLog(summLog); updateErr != nil {
+				log.Log.Errorf("[SessionScheduler] ❌ Failed to update summarization log (failed status): %v | LogID: %s | SessionID: %s", updateErr, summLog.LogID, sessionID)
+			} else {
+				log.Log.Infof("[SessionScheduler] ✅ Updated summarization log (failed) | LogID: %s | SessionID: %s", summLog.LogID, sessionID)
+			}
 		}
 		return "", err
 	}
@@ -322,7 +376,11 @@ Example: "Debugged Kubernetes pod restart issue. Found memory limits too low. Ap
 		summLog.Status = "failed"
 		summLog.ErrorMessage = err.Error()
 		if ok {
-			_ = debugStore.PutSummarizationLog(summLog)
+			if updateErr := debugStore.PutSummarizationLog(summLog); updateErr != nil {
+				log.Log.Errorf("[SessionScheduler] ❌ Failed to update summarization log (no response): %v | LogID: %s | SessionID: %s", updateErr, summLog.LogID, sessionID)
+			} else {
+				log.Log.Infof("[SessionScheduler] ✅ Updated summarization log (no response) | LogID: %s | SessionID: %s", summLog.LogID, sessionID)
+			}
 		}
 		return "", err
 	}
@@ -342,9 +400,14 @@ Example: "Debugged Kubernetes pod restart issue. Found memory limits too low. Ap
 		summLog.TotalTokens = resp.Usage.TotalTokens
 	}
 	if ok {
+		log.Log.Infof("[SessionScheduler] 🔍 Attempting to update summarization log (success) | LogID: %s | SessionID: %s | Tokens: %d", summLog.LogID, sessionID, summLog.TotalTokens)
 		if err := debugStore.PutSummarizationLog(summLog); err != nil {
-			log.Log.Warnf("[SessionScheduler] ⚠️  Failed to update summarization log: %v", err)
+			log.Log.Errorf("[SessionScheduler] ❌ Failed to update summarization log: %v | LogID: %s | SessionID: %s", err, summLog.LogID, sessionID)
+		} else {
+			log.Log.Infof("[SessionScheduler] ✅ Updated summarization log (success) | LogID: %s | SessionID: %s | Tokens: %d", summLog.LogID, sessionID, summLog.TotalTokens)
 		}
+	} else {
+		log.Log.Warnf("[SessionScheduler] ⚠️  Store does not implement DebugStore interface, cannot update log | LogID: %s", summLog.LogID)
 	}
 
 	return summary, nil

@@ -1308,8 +1308,17 @@ func (s *SQLiteStore) PutSummarizationLog(log *model.SummarizationLog) error {
 	defer s.mu.Unlock()
 
 	createdAt := log.CreatedAt.Unix()
+	if createdAt <= 0 {
+		// If CreatedAt is zero or invalid, use current time
+		createdAt = time.Now().Unix()
+		log.CreatedAt = time.Now()
+	}
 
-	_, err := s.db.Exec(
+	// Log the attempt
+	fmt.Printf("[SQLiteStore] 🔍 Attempting to INSERT summarization log | LogID: %s | SessionID: %s | Status: %s | PromptSent length: %d\n",
+		log.LogID, log.SessionID, log.Status, len(log.PromptSent))
+
+	result, err := s.db.Exec(
 		`INSERT OR REPLACE INTO summarization_logs (
 			log_id, session_id, user_id, prompt_sent, response_received, model_used,
 			prompt_tokens, completion_tokens, total_tokens, status, error_message, created_at
@@ -1329,7 +1338,15 @@ func (s *SQLiteStore) PutSummarizationLog(log *model.SummarizationLog) error {
 	)
 
 	if err != nil {
+		fmt.Printf("[SQLiteStore] ❌ Failed to INSERT summarization log: %v | LogID: %s\n", err, log.LogID)
 		return fmt.Errorf("failed to store summarization log: %w", err)
+	}
+
+	rowsAffected, _ := result.RowsAffected()
+	if rowsAffected > 0 {
+		fmt.Printf("[SQLiteStore] ✅ Successfully INSERTED summarization log | LogID: %s | RowsAffected: %d\n", log.LogID, rowsAffected)
+	} else {
+		fmt.Printf("[SQLiteStore] ⚠️  INSERT completed but RowsAffected is 0 | LogID: %s\n", log.LogID)
 	}
 
 	return nil
