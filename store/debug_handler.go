@@ -37,6 +37,9 @@ type DebugStore interface {
 	GetSession(sessionID string) (*model.Session, error)
 	GetAllToolCalls() ([]*model.ToolCall, error)
 	GetToolCallsBySession(sessionID string) ([]*model.ToolCall, error)
+	PutSummarizationLog(log *model.SummarizationLog) error
+	GetSummarizationLogsBySession(sessionID string) ([]*model.SummarizationLog, error)
+	GetAllSummarizationLogs() ([]*model.SummarizationLog, error)
 }
 
 // DebugHandler provides HTML debugging interface for SessionStore
@@ -858,6 +861,7 @@ func (h *DebugHandler) GenerateUserDetailHTML(userID string) (string, error) {
                             <th>Content</th>
                             <th class="text-center text-nowrap">Model</th>
                             <th class="text-nowrap">Session</th>
+                            <th class="text-center text-nowrap">Nonsense</th>
                         </tr>
                     </thead>
                     <tbody>`
@@ -884,6 +888,14 @@ func (h *DebugHandler) GenerateUserDetailHTML(userID string) (string, error) {
 			case openai.ChatMessageRoleSystem:
 				badgeClass = "bg-info"
 			}
+
+			nonsenseBadge := ""
+			if msg.IsNonsense {
+				nonsenseBadge = `<span class="badge bg-warning text-dark">⚠️ Nonsense</span>`
+			} else {
+				nonsenseBadge = `<span class="badge bg-secondary">-</span>`
+			}
+
 			html += fmt.Sprintf(`
                         <tr>
                             <td class="text-nowrap">%s</td>
@@ -891,6 +903,7 @@ func (h *DebugHandler) GenerateUserDetailHTML(userID string) (string, error) {
                             <td class="text-break">%s</td>
                             <td class="text-center"><code>%s</code></td>
                             <td class="text-nowrap"><a href="/agentize/debug/sessions/%s" class="text-decoration-none">%s</a></td>
+                            <td class="text-center">%s</td>
                         </tr>`,
 				FormatTime(msg.CreatedAt),
 				badgeClass,
@@ -898,7 +911,8 @@ func (h *DebugHandler) GenerateUserDetailHTML(userID string) (string, error) {
 				template.HTMLEscapeString(content),
 				getModelDisplay(msg.Model),
 				template.URLQueryEscaper(msg.SessionID),
-				template.HTMLEscapeString(msg.SessionID[:8]+"..."))
+				template.HTMLEscapeString(msg.SessionID[:8]+"..."),
+				nonsenseBadge)
 		}
 
 		html += `</tbody>
@@ -987,6 +1001,13 @@ func (h *DebugHandler) GenerateSessionDetailHTML(sessionID string) (string, erro
 	files, err := debugStore.GetOpenedFilesBySession(sessionID)
 	if err != nil {
 		return "", fmt.Errorf("failed to get files: %w", err)
+	}
+
+	// Get summarization logs
+	summarizationLogs, err := debugStore.GetSummarizationLogsBySession(sessionID)
+	if err != nil {
+		// If error, use empty slice
+		summarizationLogs = []*model.SummarizationLog{}
 	}
 
 	// Get tool calls from database instead of session
@@ -1238,11 +1259,16 @@ func (h *DebugHandler) GenerateSessionDetailHTML(sessionID string) (string, erro
 				toolCallBadge = ` <span class="badge bg-danger">Has Tool Calls</span>`
 			}
 
+			nonsenseBadge := ""
+			if msg.IsNonsense {
+				nonsenseBadge = ` <span class="badge bg-warning text-dark">⚠️ Nonsense</span>`
+			}
+
 			html += fmt.Sprintf(`
                 <div class="list-group-item">
                     <div class="d-flex w-100 justify-content-between align-items-start mb-2">
                         <div>
-                            <span class="badge %s me-2">%s</span>%s
+                            <span class="badge %s me-2">%s</span>%s%s
                             <span class="badge bg-secondary ms-2">Model: <code>%s</code></span>
                         </div>
                         <small class="text-muted">%s</small>
@@ -1253,6 +1279,7 @@ func (h *DebugHandler) GenerateSessionDetailHTML(sessionID string) (string, erro
 				badgeClass,
 				template.HTMLEscapeString(msg.Role),
 				toolCallBadge,
+				nonsenseBadge,
 				getModelDisplay(msg.Model),
 				FormatTime(msg.CreatedAt),
 				template.HTMLEscapeString(content),
@@ -1317,6 +1344,92 @@ func (h *DebugHandler) GenerateSessionDetailHTML(sessionID string) (string, erro
 				template.HTMLEscapeString(msg.Role),
 				toolCallBadge,
 				template.HTMLEscapeString(content))
+		}
+		html += `</div>`
+	}
+
+	html += `</div>
+        </div>`
+
+	// Summarization Logs card
+	summarizationLogsCount := len(summarizationLogs)
+	html += fmt.Sprintf(`
+        <div class="card mb-4">
+            <div class="card-header">
+                <h5 class="mb-0"><i class="bi bi-file-text-fill me-2"></i>Summarization Logs (%d)</h5>
+            </div>
+            <div class="card-body">`, summarizationLogsCount)
+
+	if summarizationLogsCount == 0 {
+		html += `<div class="alert alert-info text-center">
+                <i class="bi bi-info-circle me-2"></i>No summarization logs found for this session.
+            </div>`
+	} else {
+		html += `<div class="list-group">`
+		for _, log := range summarizationLogs {
+			statusBadge := ""
+			if log.Status == "success" {
+				statusBadge = `<span class="badge bg-success">Success</span>`
+			} else if log.Status == "failed" {
+				statusBadge = `<span class="badge bg-danger">Failed</span>`
+			} else {
+				statusBadge = `<span class="badge bg-secondary">Pending</span>`
+			}
+
+			promptDisplay := log.PromptSent
+			if len(promptDisplay) > 500 {
+				promptDisplay = promptDisplay[:500] + "..."
+			}
+
+			responseDisplay := log.ResponseReceived
+			if len(responseDisplay) > 500 {
+				responseDisplay = responseDisplay[:500] + "..."
+			}
+
+			html += fmt.Sprintf(`
+                <div class="list-group-item">
+                    <div class="d-flex w-100 justify-content-between align-items-start mb-2">
+                        <div>
+                            %s
+                            <span class="badge bg-info ms-2">Model: <code>%s</code></span>
+                            <span class="badge bg-secondary ms-2">Tokens: %d (Prompt: %d, Completion: %d)</span>
+                        </div>
+                        <small class="text-muted">%s</small>
+                    </div>
+                    <div class="mb-2">
+                        <strong>Prompt Sent:</strong>
+                        <pre class="p-2 bg-light rounded mt-1" style="max-height: 200px; overflow-y: auto; white-space: pre-wrap; word-wrap: break-word; font-size: 0.9em;">%s</pre>
+                    </div>`,
+				statusBadge,
+				template.HTMLEscapeString(log.ModelUsed),
+				log.TotalTokens,
+				log.PromptTokens,
+				log.CompletionTokens,
+				FormatTime(log.CreatedAt),
+				template.HTMLEscapeString(promptDisplay))
+
+			if log.Status == "success" && log.ResponseReceived != "" {
+				html += fmt.Sprintf(`
+                    <div class="mb-2">
+                        <strong>Response Received:</strong>
+                        <pre class="p-2 bg-success bg-opacity-10 rounded mt-1" style="max-height: 200px; overflow-y: auto; white-space: pre-wrap; word-wrap: break-word; font-size: 0.9em;">%s</pre>
+                    </div>`,
+					template.HTMLEscapeString(responseDisplay))
+			}
+
+			if log.Status == "failed" && log.ErrorMessage != "" {
+				html += fmt.Sprintf(`
+                    <div class="mb-2">
+                        <strong>Error:</strong>
+                        <pre class="p-2 bg-danger bg-opacity-10 rounded mt-1" style="max-height: 200px; overflow-y: auto; white-space: pre-wrap; word-wrap: break-word; font-size: 0.9em;">%s</pre>
+                    </div>`,
+					template.HTMLEscapeString(log.ErrorMessage))
+			}
+
+			html += fmt.Sprintf(`
+                    <small class="text-muted">Log ID: <code>%s</code></small>
+                </div>`,
+				template.HTMLEscapeString(log.LogID))
 		}
 		html += `</div>`
 	}
@@ -1640,6 +1753,7 @@ func (h *DebugHandler) GenerateMessagesHTML() (string, error) {
                             <th class="text-nowrap">User</th>
                             <th class="text-nowrap">Session</th>
                             <th class="text-center text-nowrap">Tool Calls</th>
+                            <th class="text-center text-nowrap">Nonsense</th>
                         </tr>
                     </thead>
                     <tbody>`
@@ -1668,6 +1782,13 @@ func (h *DebugHandler) GenerateMessagesHTML() (string, error) {
 				toolCallBadge = `<span class="badge bg-secondary">No</span>`
 			}
 
+			nonsenseBadge := ""
+			if msg.IsNonsense {
+				nonsenseBadge = `<span class="badge bg-warning text-dark">⚠️ Nonsense</span>`
+			} else {
+				nonsenseBadge = `<span class="badge bg-secondary">-</span>`
+			}
+
 			html += fmt.Sprintf(`
                         <tr>
                             <td class="text-nowrap">%s</td>
@@ -1676,6 +1797,7 @@ func (h *DebugHandler) GenerateMessagesHTML() (string, error) {
                             <td class="text-center"><code>%s</code></td>
                             <td class="text-nowrap"><a href="/agentize/debug/users/%s" class="text-decoration-none">%s</a></td>
                             <td class="text-nowrap"><a href="/agentize/debug/sessions/%s" class="text-decoration-none">%s</a></td>
+                            <td class="text-center">%s</td>
                             <td class="text-center">%s</td>
                         </tr>`,
 				FormatTime(msg.CreatedAt),
@@ -1687,7 +1809,8 @@ func (h *DebugHandler) GenerateMessagesHTML() (string, error) {
 				template.HTMLEscapeString(msg.UserID[:min(20, len(msg.UserID))]+"..."),
 				template.URLQueryEscaper(msg.SessionID),
 				template.HTMLEscapeString(msg.SessionID[:min(20, len(msg.SessionID))]+"..."),
-				toolCallBadge)
+				toolCallBadge,
+				nonsenseBadge)
 		}
 
 		html += `</tbody>

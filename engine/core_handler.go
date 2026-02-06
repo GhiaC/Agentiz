@@ -151,6 +151,7 @@ func (ch *CoreHandler) ProcessMessage(
 	}
 
 	// Check user ban status and nonsense messages
+	var isNonsense bool
 	if ch.userModeration != nil {
 		// Check if user is banned
 		if isBanned, banMessage := ch.userModeration.CheckBanStatus(userID); isBanned {
@@ -164,11 +165,15 @@ func (ch *CoreHandler) ProcessMessage(
 		shouldBan, banMessage, err := ch.userModeration.ProcessNonsenseCheck(ctx, userID, userMessage)
 		if err != nil {
 			log.Log.Warnf("[CoreHandler] ⚠️  Failed to process nonsense check, proceeding anyway | UserID: %s | Error: %v", userID, err)
-		} else if shouldBan {
-			return banMessage, nil
-		} else if banMessage != "" {
-			// Warning message (no ban yet)
-			return banMessage, nil
+		} else {
+			// Determine if message is nonsense (if banMessage is not empty, it's nonsense)
+			isNonsense = banMessage != "" || shouldBan
+			if shouldBan {
+				return banMessage, nil
+			} else if banMessage != "" {
+				// Warning message (no ban yet)
+				return banMessage, nil
+			}
 		}
 	}
 
@@ -199,6 +204,8 @@ func (ch *CoreHandler) ProcessMessage(
 	if coreSession.Model != "" {
 		userMsg.Model = coreSession.Model
 	}
+	// Set nonsense flag if detected
+	userMsg.IsNonsense = isNonsense
 	ch.saveMessage(userMsg)
 
 	// Save Core session after adding user message

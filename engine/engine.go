@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ghiac/agentize/config"
 	"github.com/ghiac/agentize/fsrepo"
 	"github.com/ghiac/agentize/log"
 	"github.com/ghiac/agentize/model"
@@ -21,6 +22,11 @@ import (
 
 //go:embed engine.md
 var basePrompt string
+
+// Global scheduler once to ensure scheduler starts only once per session store
+var schedulerOnce sync.Once
+var schedulerOnceMap = make(map[store.SessionStore]*sync.Once)
+var schedulerOnceMapMu sync.Mutex
 
 // LLMConfig holds configuration for LLM client
 type LLMConfig struct {
@@ -51,6 +57,9 @@ type Engine struct {
 	// Database readiness flag
 	dbReady   bool
 	dbReadyMu sync.RWMutex
+	// Scheduler for session summarization
+	scheduler   *SessionScheduler
+	schedulerMu sync.RWMutex
 }
 
 // Init initializes the engine by loading the root node and verifying Sessions store is ready.
@@ -100,6 +109,7 @@ func (e *Engine) UseFunctionRegistry(registry *model.FunctionRegistry) {
 }
 
 // UseLLMConfig configures the LLM client for the engine
+// It also automatically starts the scheduler if enabled
 func (e *Engine) UseLLMConfig(config LLMConfig) error {
 	openaiConfig := openai.DefaultConfig(config.APIKey)
 	if config.BaseURL != "" {
@@ -113,7 +123,98 @@ func (e *Engine) UseLLMConfig(config LLMConfig) error {
 	client := openai.NewClientWithConfig(openaiConfig)
 	e.llmClient = client
 	e.llmConfig = config
+
+	// Automatically start scheduler if LLM is configured and scheduler is not already running
+	// Use sync.Once per session store to ensure scheduler starts only once
+	if config.APIKey != "" && e.Sessions != nil {
+		schedulerOnceMapMu.Lock()
+		once, exists := schedulerOnceMap[e.Sessions]
+		if !exists {
+			once = &sync.Once{}
+			schedulerOnceMap[e.Sessions] = once
+		}
+		schedulerOnceMapMu.Unlock()
+
+		once.Do(func() {
+			// Start scheduler in background
+			ctx := context.Background()
+			e.schedulerMu.Lock()
+			if e.scheduler == nil {
+				if err := e.startScheduler(ctx, client); err != nil {
+					log.Log.Warnf("[Engine] ⚠️  Failed to start scheduler: %v", err)
+				} else {
+					e.schedulerMu.Unlock()
+					return
+				}
+			}
+			e.schedulerMu.Unlock()
+		})
+	}
+
 	return nil
+}
+
+// startScheduler starts the session scheduler
+func (e *Engine) startScheduler(ctx context.Context, llmClient *openai.Client) error {
+	// Load scheduler config from environment
+	cfg, err := config.Load()
+	if err != nil {
+		log.Log.Warnf("[Engine] ⚠️  Failed to load config, using defaults: %v", err)
+		cfg = &config.Config{}
+	}
+	schedulerConfig := cfg.Scheduler
+	if !schedulerConfig.Enabled {
+		log.Log.Infof("[Engine] ⏸️  Scheduler is disabled via config")
+		return nil
+	}
+
+	// Create session handler
+	sessionHandlerConfig := model.DefaultSessionHandlerConfig()
+	sessionHandler := model.NewSessionHandler(e.Sessions, sessionHandlerConfig)
+
+	// Create LLM client wrapper for session handler
+	llmClientWrapper := &openAIClientWrapperForSessionHandler{
+		Client: llmClient,
+	}
+	sessionHandler.SetLLMClient(llmClientWrapper)
+
+	// Create scheduler config
+	schedulerConfigStruct := DefaultSessionSchedulerConfig()
+	if schedulerConfig.CheckInterval > 0 {
+		schedulerConfigStruct.CheckInterval = schedulerConfig.CheckInterval
+	}
+	if schedulerConfig.SummarizedAtThreshold > 0 {
+		schedulerConfigStruct.SummarizedAtThreshold = schedulerConfig.SummarizedAtThreshold
+	}
+	if schedulerConfig.LastActivityThreshold > 0 {
+		schedulerConfigStruct.LastActivityThreshold = schedulerConfig.LastActivityThreshold
+	}
+	if schedulerConfig.MessageThreshold > 0 {
+		schedulerConfigStruct.MessageThreshold = schedulerConfig.MessageThreshold
+	}
+	if schedulerConfig.SummaryModel != "" {
+		schedulerConfigStruct.SummaryModel = schedulerConfig.SummaryModel
+	}
+
+	// Create and start scheduler
+	scheduler := NewSessionScheduler(sessionHandler, llmClient, schedulerConfigStruct)
+	e.scheduler = scheduler
+	scheduler.Start(ctx)
+
+	log.Log.Infof("[Engine] ✅ Session scheduler started | CheckInterval: %v | SummarizedAtThreshold: %v | LastActivityThreshold: %v | MessageThreshold: %d | SummaryModel: %s",
+		schedulerConfigStruct.CheckInterval, schedulerConfigStruct.SummarizedAtThreshold, schedulerConfigStruct.LastActivityThreshold, schedulerConfigStruct.MessageThreshold, schedulerConfigStruct.SummaryModel)
+
+	return nil
+}
+
+// openAIClientWrapperForSessionHandler wraps openai.Client to implement model.LLMClient interface
+type openAIClientWrapperForSessionHandler struct {
+	Client *openai.Client
+}
+
+// CreateChatCompletion implements model.LLMClient interface
+func (w *openAIClientWrapperForSessionHandler) CreateChatCompletion(ctx context.Context, request openai.ChatCompletionRequest) (openai.ChatCompletionResponse, error) {
+	return w.Client.CreateChatCompletion(ctx, request)
 }
 
 // CreateSession initializes a fresh session anchored at the root node.

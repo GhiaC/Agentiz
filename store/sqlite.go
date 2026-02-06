@@ -103,6 +103,7 @@ func (s *SQLiteStore) initSchema() error {
 		temperature REAL,
 		has_tool_calls INTEGER DEFAULT 0,
 		finish_reason TEXT,
+		is_nonsense INTEGER DEFAULT 0,
 		created_at INTEGER NOT NULL
 	);
 	
@@ -142,10 +143,44 @@ func (s *SQLiteStore) initSchema() error {
 	CREATE INDEX IF NOT EXISTS idx_tool_calls_session_id ON tool_calls(session_id);
 	CREATE INDEX IF NOT EXISTS idx_tool_calls_user_id ON tool_calls(user_id);
 	CREATE INDEX IF NOT EXISTS idx_tool_calls_created_at ON tool_calls(created_at);
+	
+	CREATE TABLE IF NOT EXISTS summarization_logs (
+		log_id TEXT PRIMARY KEY,
+		session_id TEXT NOT NULL,
+		user_id TEXT NOT NULL,
+		prompt_sent TEXT NOT NULL,
+		response_received TEXT,
+		model_used TEXT NOT NULL,
+		prompt_tokens INTEGER DEFAULT 0,
+		completion_tokens INTEGER DEFAULT 0,
+		total_tokens INTEGER DEFAULT 0,
+		status TEXT NOT NULL,
+		error_message TEXT,
+		created_at INTEGER NOT NULL
+	);
+	
+	CREATE INDEX IF NOT EXISTS idx_summarization_logs_session_id ON summarization_logs(session_id);
+	CREATE INDEX IF NOT EXISTS idx_summarization_logs_user_id ON summarization_logs(user_id);
+	CREATE INDEX IF NOT EXISTS idx_summarization_logs_created_at ON summarization_logs(created_at);
 	`
 
 	_, err := s.db.Exec(schema)
-	return err
+	if err != nil {
+		return err
+	}
+
+	// Migration: Add is_nonsense column if it doesn't exist (for existing databases)
+	// SQLite doesn't support IF NOT EXISTS for ALTER TABLE ADD COLUMN, so we ignore errors
+	_ = s.migrateAddIsNonsenseColumn()
+
+	return nil
+}
+
+// migrateAddIsNonsenseColumn adds is_nonsense column to messages table if it doesn't exist
+func (s *SQLiteStore) migrateAddIsNonsenseColumn() error {
+	_, _ = s.db.Exec(`ALTER TABLE messages ADD COLUMN is_nonsense INTEGER DEFAULT 0`)
+	// Ignore error if column already exists
+	return nil
 }
 
 // Close closes the database connection
@@ -640,14 +675,18 @@ func (s *SQLiteStore) PutMessage(message *model.Message) error {
 	if message.HasToolCalls {
 		hasToolCalls = 1
 	}
+	isNonsense := 0
+	if message.IsNonsense {
+		isNonsense = 1
+	}
 
 	// Use INSERT OR REPLACE for upsert behavior
 	_, err := s.db.Exec(
 		`INSERT OR REPLACE INTO messages (
 			message_id, user_id, session_id, role, content, model,
 			prompt_tokens, completion_tokens, total_tokens,
-			request_model, max_tokens, temperature, has_tool_calls, finish_reason, created_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			request_model, max_tokens, temperature, has_tool_calls, finish_reason, is_nonsense, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		message.MessageID,
 		message.UserID,
 		message.SessionID,
@@ -662,6 +701,7 @@ func (s *SQLiteStore) PutMessage(message *model.Message) error {
 		message.Temperature,
 		hasToolCalls,
 		message.FinishReason,
+		isNonsense,
 		createdAt,
 	)
 
@@ -680,7 +720,7 @@ func (s *SQLiteStore) GetMessagesBySession(sessionID string) ([]*model.Message, 
 	rows, err := s.db.Query(
 		`SELECT message_id, user_id, session_id, role, content, model,
 			prompt_tokens, completion_tokens, total_tokens,
-			request_model, max_tokens, temperature, has_tool_calls, finish_reason, created_at
+			request_model, max_tokens, temperature, has_tool_calls, finish_reason, is_nonsense, created_at
 		FROM messages WHERE session_id = ? ORDER BY created_at ASC`,
 		sessionID,
 	)
@@ -694,6 +734,7 @@ func (s *SQLiteStore) GetMessagesBySession(sessionID string) ([]*model.Message, 
 		msg := &model.Message{}
 		var createdAt int64
 		var hasToolCallsInt int
+		var isNonsenseInt int
 
 		err := rows.Scan(
 			&msg.MessageID,
@@ -710,6 +751,7 @@ func (s *SQLiteStore) GetMessagesBySession(sessionID string) ([]*model.Message, 
 			&msg.Temperature,
 			&hasToolCallsInt,
 			&msg.FinishReason,
+			&isNonsenseInt,
 			&createdAt,
 		)
 		if err != nil {
@@ -717,6 +759,7 @@ func (s *SQLiteStore) GetMessagesBySession(sessionID string) ([]*model.Message, 
 		}
 
 		msg.HasToolCalls = hasToolCallsInt != 0
+		msg.IsNonsense = isNonsenseInt != 0
 		msg.CreatedAt = time.Unix(createdAt, 0)
 		messages = append(messages, msg)
 	}
@@ -736,7 +779,7 @@ func (s *SQLiteStore) GetMessagesByUser(userID string) ([]*model.Message, error)
 	rows, err := s.db.Query(
 		`SELECT message_id, user_id, session_id, role, content, model,
 			prompt_tokens, completion_tokens, total_tokens,
-			request_model, max_tokens, temperature, has_tool_calls, finish_reason, created_at
+			request_model, max_tokens, temperature, has_tool_calls, finish_reason, is_nonsense, created_at
 		FROM messages WHERE user_id = ? ORDER BY created_at ASC`,
 		userID,
 	)
@@ -750,6 +793,7 @@ func (s *SQLiteStore) GetMessagesByUser(userID string) ([]*model.Message, error)
 		msg := &model.Message{}
 		var createdAt int64
 		var hasToolCallsInt int
+		var isNonsenseInt int
 
 		err := rows.Scan(
 			&msg.MessageID,
@@ -766,6 +810,7 @@ func (s *SQLiteStore) GetMessagesByUser(userID string) ([]*model.Message, error)
 			&msg.Temperature,
 			&hasToolCallsInt,
 			&msg.FinishReason,
+			&isNonsenseInt,
 			&createdAt,
 		)
 		if err != nil {
@@ -773,6 +818,7 @@ func (s *SQLiteStore) GetMessagesByUser(userID string) ([]*model.Message, error)
 		}
 
 		msg.HasToolCalls = hasToolCallsInt != 0
+		msg.IsNonsense = isNonsenseInt != 0
 		msg.CreatedAt = time.Unix(createdAt, 0)
 		messages = append(messages, msg)
 	}
@@ -997,7 +1043,7 @@ func (s *SQLiteStore) GetAllMessages() ([]*model.Message, error) {
 	rows, err := s.db.Query(
 		`SELECT message_id, user_id, session_id, role, content, model,
 			prompt_tokens, completion_tokens, total_tokens,
-			request_model, max_tokens, temperature, has_tool_calls, finish_reason, created_at
+			request_model, max_tokens, temperature, has_tool_calls, finish_reason, is_nonsense, created_at
 		FROM messages ORDER BY created_at DESC`,
 	)
 	if err != nil {
@@ -1010,6 +1056,7 @@ func (s *SQLiteStore) GetAllMessages() ([]*model.Message, error) {
 		msg := &model.Message{}
 		var createdAt int64
 		var hasToolCallsInt int
+		var isNonsenseInt int
 
 		err := rows.Scan(
 			&msg.MessageID,
@@ -1026,6 +1073,7 @@ func (s *SQLiteStore) GetAllMessages() ([]*model.Message, error) {
 			&msg.Temperature,
 			&hasToolCallsInt,
 			&msg.FinishReason,
+			&isNonsenseInt,
 			&createdAt,
 		)
 		if err != nil {
@@ -1033,6 +1081,7 @@ func (s *SQLiteStore) GetAllMessages() ([]*model.Message, error) {
 		}
 
 		msg.HasToolCalls = hasToolCallsInt != 0
+		msg.IsNonsense = isNonsenseInt != 0
 		msg.CreatedAt = time.Unix(createdAt, 0)
 		messages = append(messages, msg)
 	}
@@ -1247,6 +1296,142 @@ func (s *SQLiteStore) GetAllToolCalls() ([]*model.ToolCall, error) {
 	}
 
 	return toolCalls, nil
+}
+
+// PutSummarizationLog stores a summarization log entry in the database
+func (s *SQLiteStore) PutSummarizationLog(log *model.SummarizationLog) error {
+	if log == nil {
+		return fmt.Errorf("summarization log cannot be nil")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	createdAt := log.CreatedAt.Unix()
+
+	_, err := s.db.Exec(
+		`INSERT OR REPLACE INTO summarization_logs (
+			log_id, session_id, user_id, prompt_sent, response_received, model_used,
+			prompt_tokens, completion_tokens, total_tokens, status, error_message, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		log.LogID,
+		log.SessionID,
+		log.UserID,
+		log.PromptSent,
+		log.ResponseReceived,
+		log.ModelUsed,
+		log.PromptTokens,
+		log.CompletionTokens,
+		log.TotalTokens,
+		log.Status,
+		log.ErrorMessage,
+		createdAt,
+	)
+
+	if err != nil {
+		return fmt.Errorf("failed to store summarization log: %w", err)
+	}
+
+	return nil
+}
+
+// GetSummarizationLogsBySession returns all summarization logs for a session
+func (s *SQLiteStore) GetSummarizationLogsBySession(sessionID string) ([]*model.SummarizationLog, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.Query(
+		`SELECT log_id, session_id, user_id, prompt_sent, response_received, model_used,
+			prompt_tokens, completion_tokens, total_tokens, status, error_message, created_at
+		FROM summarization_logs WHERE session_id = ? ORDER BY created_at DESC`,
+		sessionID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query summarization logs: %w", err)
+	}
+	defer rows.Close()
+
+	var logs []*model.SummarizationLog
+	for rows.Next() {
+		log := &model.SummarizationLog{}
+		var createdAt int64
+
+		err := rows.Scan(
+			&log.LogID,
+			&log.SessionID,
+			&log.UserID,
+			&log.PromptSent,
+			&log.ResponseReceived,
+			&log.ModelUsed,
+			&log.PromptTokens,
+			&log.CompletionTokens,
+			&log.TotalTokens,
+			&log.Status,
+			&log.ErrorMessage,
+			&createdAt,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan summarization log: %w", err)
+		}
+
+		log.CreatedAt = time.Unix(createdAt, 0)
+		logs = append(logs, log)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating summarization logs: %w", err)
+	}
+
+	return logs, nil
+}
+
+// GetAllSummarizationLogs returns all summarization logs
+func (s *SQLiteStore) GetAllSummarizationLogs() ([]*model.SummarizationLog, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.Query(
+		`SELECT log_id, session_id, user_id, prompt_sent, response_received, model_used,
+			prompt_tokens, completion_tokens, total_tokens, status, error_message, created_at
+		FROM summarization_logs ORDER BY created_at DESC`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query summarization logs: %w", err)
+	}
+	defer rows.Close()
+
+	var logs []*model.SummarizationLog
+	for rows.Next() {
+		log := &model.SummarizationLog{}
+		var createdAt int64
+
+		err := rows.Scan(
+			&log.LogID,
+			&log.SessionID,
+			&log.UserID,
+			&log.PromptSent,
+			&log.ResponseReceived,
+			&log.ModelUsed,
+			&log.PromptTokens,
+			&log.CompletionTokens,
+			&log.TotalTokens,
+			&log.Status,
+			&log.ErrorMessage,
+			&createdAt,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan summarization log: %w", err)
+		}
+
+		log.CreatedAt = time.Unix(createdAt, 0)
+		logs = append(logs, log)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating summarization logs: %w", err)
+	}
+
+	return logs, nil
 }
 
 // Ensure SQLiteStore implements model.SessionStore

@@ -99,11 +99,13 @@ func (ss *SessionScheduler) Stop() {
 
 // run runs the scheduler loop
 func (ss *SessionScheduler) run(ctx context.Context) {
+	// Run immediately on start - check all sessions right away
+	log.Log.Infof("[SessionScheduler] 🔍 Starting initial session check (checking all sessions immediately)...")
+	ss.checkAndSummarizeSessions(ctx)
+	log.Log.Infof("[SessionScheduler] ✅ Initial session check completed, starting periodic checks...")
+
 	ticker := time.NewTicker(ss.config.CheckInterval)
 	defer ticker.Stop()
-
-	// Run immediately on start
-	ss.checkAndSummarizeSessions(ctx)
 
 	for {
 		select {
@@ -177,8 +179,13 @@ func (ss *SessionScheduler) isEligibleForSummarization(session *model.Session, n
 		return false
 	}
 
-	// Check if SummarizedAt is old (or never set)
-	summarizedAtOld := session.SummarizedAt.IsZero() || now.Sub(session.SummarizedAt) >= ss.config.SummarizedAtThreshold
+	// If SummarizedAt is empty (never summarized), summarize it regardless of LastActivity
+	if session.SummarizedAt.IsZero() {
+		return true
+	}
+
+	// For sessions that have been summarized before, check if SummarizedAt is old
+	summarizedAtOld := now.Sub(session.SummarizedAt) >= ss.config.SummarizedAtThreshold
 	if !summarizedAtOld {
 		return false
 	}
@@ -223,7 +230,7 @@ func (ss *SessionScheduler) summarizeSession(ctx context.Context, session *model
 	// Generate summary if not already set
 	if session.Summary == "" {
 		conversationText := formatMessagesForSummary(session.ConversationState.Msgs)
-		summary, err := ss.generateSummary(ctx, conversationText)
+		summary, err := ss.generateSummary(ctx, session.SessionID, session.UserID, conversationText)
 		if err != nil {
 			log.Log.Warnf("[SessionScheduler] ⚠️  Failed to generate summary for session %s: %v", session.SessionID, err)
 		} else {
@@ -254,7 +261,7 @@ func (ss *SessionScheduler) summarizeSession(ctx context.Context, session *model
 }
 
 // generateSummary generates a summary for the conversation
-func (ss *SessionScheduler) generateSummary(ctx context.Context, conversationText string) (string, error) {
+func (ss *SessionScheduler) generateSummary(ctx context.Context, sessionID string, userID string, conversationText string) (string, error) {
 	systemPrompt := `You are a conversation summarizer.
 Generate a concise summary (2-3 sentences) that captures the main topics and outcomes of this conversation.
 
@@ -268,25 +275,79 @@ Requirements:
 Example: "Debugged Kubernetes pod restart issue. Found memory limits too low. Applied fix and verified pod stability."
 `
 
+	userPrompt := "Summarize this conversation:\n\n" + conversationText
+	fullPrompt := systemPrompt + "\n\n" + userPrompt
+
 	request := openai.ChatCompletionRequest{
 		Model: ss.config.SummaryModel,
 		Messages: []openai.ChatCompletionMessage{
 			{Role: openai.ChatMessageRoleSystem, Content: systemPrompt},
-			{Role: openai.ChatMessageRoleUser, Content: "Summarize this conversation:\n\n" + conversationText},
+			{Role: openai.ChatMessageRoleUser, Content: userPrompt},
 		},
 		MaxTokens: 200,
 	}
 
+	// Create log entry before making the request
+	summLog := model.NewSummarizationLog(sessionID, userID)
+	summLog.PromptSent = fullPrompt
+	summLog.ModelUsed = ss.config.SummaryModel
+	summLog.Status = "pending"
+
+	// Get store to save log
+	store := ss.sessionHandler.GetStore()
+	debugStore, ok := store.(interface {
+		PutSummarizationLog(log *model.SummarizationLog) error
+	})
+	if !ok {
+		log.Log.Warnf("[SessionScheduler] ⚠️  Store does not implement PutSummarizationLog, skipping log")
+	} else {
+		if err := debugStore.PutSummarizationLog(summLog); err != nil {
+			log.Log.Warnf("[SessionScheduler] ⚠️  Failed to save summarization log: %v", err)
+		}
+	}
+
 	resp, err := ss.llmClient.CreateChatCompletion(ctx, request)
 	if err != nil {
+		// Update log with error
+		summLog.Status = "failed"
+		summLog.ErrorMessage = err.Error()
+		if ok {
+			_ = debugStore.PutSummarizationLog(summLog)
+		}
 		return "", err
 	}
 
 	if len(resp.Choices) == 0 {
-		return "", fmt.Errorf("no response from LLM")
+		err := fmt.Errorf("no response from LLM")
+		summLog.Status = "failed"
+		summLog.ErrorMessage = err.Error()
+		if ok {
+			_ = debugStore.PutSummarizationLog(summLog)
+		}
+		return "", err
 	}
 
-	return resp.Choices[0].Message.Content, nil
+	summary := resp.Choices[0].Message.Content
+
+	// Update log with success response
+	summLog.Status = "success"
+	summLog.ResponseReceived = summary
+	if resp.Usage.PromptTokens > 0 {
+		summLog.PromptTokens = resp.Usage.PromptTokens
+	}
+	if resp.Usage.CompletionTokens > 0 {
+		summLog.CompletionTokens = resp.Usage.CompletionTokens
+	}
+	if resp.Usage.TotalTokens > 0 {
+		summLog.TotalTokens = resp.Usage.TotalTokens
+	}
+	if ok {
+		if err := debugStore.PutSummarizationLog(summLog); err != nil {
+			log.Log.Warnf("[SessionScheduler] ⚠️  Failed to update summarization log: %v", err)
+		}
+	}
+
+	return summary, nil
 }
 
 // formatMessagesForSummary converts messages to a readable format for summarization

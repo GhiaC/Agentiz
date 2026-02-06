@@ -41,6 +41,9 @@ type Message struct {
 	// Response information
 	FinishReason string // Finish reason from LLM (stop, tool_calls, length, etc.)
 
+	// Nonsense detection
+	IsNonsense bool // Whether this message was detected as nonsense
+
 	// Metadata
 	CreatedAt time.Time
 }

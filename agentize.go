@@ -256,8 +256,21 @@ func (ag *Agentize) GetEngine() *engine.Engine {
 }
 
 // UseLLMConfig configures the LLM client for the agentize instance
+// It also automatically starts the scheduler if enabled
 func (ag *Agentize) UseLLMConfig(config engine.LLMConfig) error {
-	return ag.engine.UseLLMConfig(config)
+	if err := ag.engine.UseLLMConfig(config); err != nil {
+		return err
+	}
+
+	// Automatically start scheduler if LLM is configured
+	// Use background context - scheduler will handle its own lifecycle
+	ctx := context.Background()
+	if err := ag.StartScheduler(ctx); err != nil {
+		// Log warning but don't fail - scheduler is optional
+		log.Log.Warnf("[Agentize] ⚠️  Failed to start scheduler: %v", err)
+	}
+
+	return nil
 }
 
 // StartScheduler starts the session scheduler if enabled
