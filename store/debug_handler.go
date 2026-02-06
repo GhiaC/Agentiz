@@ -84,11 +84,12 @@ func (h *DebugHandler) GetSessionCount() (int, error) {
 
 // GetUserCount returns number of unique users
 func (h *DebugHandler) GetUserCount() (int, error) {
-	sessionsByUser, err := h.GetAllSessions()
+	debugStore := h.store.(DebugStore)
+	users, err := debugStore.GetAllUsers()
 	if err != nil {
 		return 0, err
 	}
-	return len(sessionsByUser), nil
+	return len(users), nil
 }
 
 // FormatMessage formats a ChatCompletionMessage for display
@@ -174,19 +175,21 @@ func generateNavigationBar(currentPage string) string {
 		{"/agentize/debug/tool-calls", "🔧", "Tool Calls"},
 	}
 
-	navHTML := `<nav class="navbar navbar-expand-lg navbar-dark bg-primary mb-4">
+	navHTML := `<nav class="navbar navbar-expand-lg navbar-dark" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); box-shadow: 0 2px 10px rgba(0,0,0,0.1);">
     <div class="container-fluid">
-        <a class="navbar-brand" href="/agentize/debug">🔍 Agentize Debug</a>
-        <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
+        <a class="navbar-brand fw-bold" href="/agentize/debug">
+            <i class="bi bi-bug-fill me-2"></i>Agentize Debug
+        </a>
+        <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav" aria-controls="navbarNav" aria-expanded="false" aria-label="Toggle navigation">
             <span class="navbar-toggler-icon"></span>
         </button>
         <div class="collapse navbar-collapse" id="navbarNav">
-            <ul class="navbar-nav">`
+            <ul class="navbar-nav ms-auto">`
 
 	for _, item := range navItems {
 		active := ""
 		if item.URL == currentPage {
-			active = "active"
+			active = "active fw-bold"
 		}
 		navHTML += fmt.Sprintf(`
                 <li class="nav-item">
@@ -211,10 +214,74 @@ func generateBootstrapHeader(title string) string {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>%s</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-T3c6CoIi6uLrA9TneNEoa7RxnatzjcDSCmG1MXxSR1GAsXEV/Dwwykc2MPK8M2HN" crossorigin="anonymous">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.1/font/bootstrap-icons.css">
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%%, #764ba2 100%%);
+            min-height: 100vh;
+        }
+        .main-container {
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.1);
+            padding: 2rem;
+            margin: 2rem 0;
+        }
+        .card {
+            border: none;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.08);
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        .card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 20px rgba(0,0,0,0.12);
+        }
+        .card-header {
+            background: linear-gradient(135deg, #667eea 0%%, #764ba2 100%%);
+            color: white;
+            border-radius: 10px 10px 0 0 !important;
+            font-weight: 600;
+        }
+        .table {
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        .table thead {
+            background: linear-gradient(135deg, #667eea 0%%, #764ba2 100%%);
+            color: white;
+        }
+        .table tbody tr {
+            transition: background-color 0.2s;
+        }
+        .table tbody tr:hover {
+            background-color: #f8f9fa;
+        }
+        .badge {
+            padding: 0.4em 0.8em;
+            font-weight: 500;
+        }
+        .text-justify {
+            text-align: justify;
+        }
+        code {
+            background-color: #f4f4f4;
+            padding: 0.2em 0.4em;
+            border-radius: 4px;
+            font-size: 0.9em;
+        }
+        pre {
+            background-color: #f8f9fa;
+            padding: 1rem;
+            border-radius: 6px;
+            border: 1px solid #e9ecef;
+        }
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js" integrity="sha384-BBtl+eGJRgqQAUMxJ7pMwbEyER4l1g+O15P+16Ep7Q9Q+zqX6gSbd85u4mG4QzX+" crossorigin="anonymous"></script>
 </head>
-<body class="bg-light">`, template.HTMLEscapeString(title))
+<body>`, template.HTMLEscapeString(title))
 }
 
 // generateBootstrapFooter generates HTML footer
@@ -346,51 +413,52 @@ func (h *DebugHandler) GenerateDashboardHTML() (string, error) {
 
 	html := generateBootstrapHeader("Agentize Debug - Dashboard")
 	html += generateNavigationBar("/agentize/debug")
-	html += `<div class="container mt-4">`
+	html += `<div class="container">
+    <div class="main-container">`
 
 	// Stats cards
-	html += `<div class="row mb-4">
-        <div class="col-md-2">
-            <div class="card text-center">
-                <div class="card-body">
-                    <h2 class="card-title text-primary">` + fmt.Sprintf("%d", totalUsers) + `</h2>
-                    <p class="card-text">👤 Users</p>
-                    <a href="/agentize/debug/users" class="btn btn-sm btn-outline-primary">View</a>
+	html += `<div class="row g-4 mb-4">
+        <div class="col-md-6 col-lg-4 col-xl-2">
+            <div class="card text-center h-100 border-primary">
+                <div class="card-body d-flex flex-column justify-content-center">
+                    <h2 class="card-title text-primary mb-3" style="font-size: 2.5rem; font-weight: bold;">` + fmt.Sprintf("%d", totalUsers) + `</h2>
+                    <p class="card-text mb-3" style="font-size: 1.1rem;">👤 Users</p>
+                    <a href="/agentize/debug/users" class="btn btn-sm btn-outline-primary mt-auto">View Details</a>
                 </div>
             </div>
         </div>
-        <div class="col-md-2">
-            <div class="card text-center">
-                <div class="card-body">
-                    <h2 class="card-title text-success">` + fmt.Sprintf("%d", totalSessions) + `</h2>
-                    <p class="card-text">📊 Sessions</p>
+        <div class="col-md-6 col-lg-4 col-xl-2">
+            <div class="card text-center h-100 border-success">
+                <div class="card-body d-flex flex-column justify-content-center">
+                    <h2 class="card-title text-success mb-3" style="font-size: 2.5rem; font-weight: bold;">` + fmt.Sprintf("%d", totalSessions) + `</h2>
+                    <p class="card-text mb-3" style="font-size: 1.1rem;">📊 Sessions</p>
                 </div>
             </div>
         </div>
-        <div class="col-md-2">
-            <div class="card text-center">
-                <div class="card-body">
-                    <h2 class="card-title text-info">` + fmt.Sprintf("%d", totalMessages) + `</h2>
-                    <p class="card-text">💬 Messages</p>
-                    <a href="/agentize/debug/messages" class="btn btn-sm btn-outline-info">View</a>
+        <div class="col-md-6 col-lg-4 col-xl-2">
+            <div class="card text-center h-100 border-info">
+                <div class="card-body d-flex flex-column justify-content-center">
+                    <h2 class="card-title text-info mb-3" style="font-size: 2.5rem; font-weight: bold;">` + fmt.Sprintf("%d", totalMessages) + `</h2>
+                    <p class="card-text mb-3" style="font-size: 1.1rem;">💬 Messages</p>
+                    <a href="/agentize/debug/messages" class="btn btn-sm btn-outline-info mt-auto">View Details</a>
                 </div>
             </div>
         </div>
-        <div class="col-md-2">
-            <div class="card text-center">
-                <div class="card-body">
-                    <h2 class="card-title text-warning">` + fmt.Sprintf("%d", totalFiles) + `</h2>
-                    <p class="card-text">📁 Files</p>
-                    <a href="/agentize/debug/files" class="btn btn-sm btn-outline-warning">View</a>
+        <div class="col-md-6 col-lg-4 col-xl-2">
+            <div class="card text-center h-100 border-warning">
+                <div class="card-body d-flex flex-column justify-content-center">
+                    <h2 class="card-title text-warning mb-3" style="font-size: 2.5rem; font-weight: bold;">` + fmt.Sprintf("%d", totalFiles) + `</h2>
+                    <p class="card-text mb-3" style="font-size: 1.1rem;">📁 Files</p>
+                    <a href="/agentize/debug/files" class="btn btn-sm btn-outline-warning mt-auto">View Details</a>
                 </div>
             </div>
         </div>
-        <div class="col-md-2">
-            <div class="card text-center">
-                <div class="card-body">
-                    <h2 class="card-title text-danger">` + fmt.Sprintf("%d", totalToolCalls) + `</h2>
-                    <p class="card-text">🔧 Tool Calls</p>
-                    <a href="/agentize/debug/tool-calls" class="btn btn-sm btn-outline-danger">View</a>
+        <div class="col-md-6 col-lg-4 col-xl-2">
+            <div class="card text-center h-100 border-danger">
+                <div class="card-body d-flex flex-column justify-content-center">
+                    <h2 class="card-title text-danger mb-3" style="font-size: 2.5rem; font-weight: bold;">` + fmt.Sprintf("%d", totalToolCalls) + `</h2>
+                    <p class="card-text mb-3" style="font-size: 1.1rem;">🔧 Tool Calls</p>
+                    <a href="/agentize/debug/tool-calls" class="btn btn-sm btn-outline-danger mt-auto">View Details</a>
                 </div>
             </div>
         </div>
@@ -401,41 +469,54 @@ func (h *DebugHandler) GenerateDashboardHTML() (string, error) {
         <div class="col-12">
             <div class="card">
                 <div class="card-header">
-                    <h5>Quick Links</h5>
+                    <h5 class="mb-0"><i class="bi bi-link-45deg me-2"></i>Quick Links</h5>
                 </div>
                 <div class="card-body">
-                    <div class="list-group">
-                        <a href="/agentize/debug/users" class="list-group-item list-group-item-action">
-                            <div class="d-flex w-100 justify-content-between">
-                                <h6 class="mb-1">👤 View All Users</h6>
-                            </div>
-                            <p class="mb-1">Browse all users and their sessions</p>
-                        </a>
-                        <a href="/agentize/debug/messages" class="list-group-item list-group-item-action">
-                            <div class="d-flex w-100 justify-content-between">
-                                <h6 class="mb-1">💬 View All Messages</h6>
-                            </div>
-                            <p class="mb-1">See all messages across all sessions</p>
-                        </a>
-                        <a href="/agentize/debug/files" class="list-group-item list-group-item-action">
-                            <div class="d-flex w-100 justify-content-between">
-                                <h6 class="mb-1">📁 View All Opened Files</h6>
-                            </div>
-                            <p class="mb-1">Browse all files that were opened</p>
-                        </a>
-                        <a href="/agentize/debug/tool-calls" class="list-group-item list-group-item-action">
-                            <div class="d-flex w-100 justify-content-between">
-                                <h6 class="mb-1">🔧 View All Tool Calls</h6>
-                            </div>
-                            <p class="mb-1">See all tool calls and their results</p>
-                        </a>
+                    <div class="row g-3">
+                        <div class="col-md-6 col-lg-3">
+                            <a href="/agentize/debug/users" class="card text-decoration-none text-dark h-100">
+                                <div class="card-body text-center">
+                                    <div class="mb-3" style="font-size: 3rem;">👤</div>
+                                    <h6 class="card-title">View All Users</h6>
+                                    <p class="card-text text-muted small text-justify">Browse all users and their sessions with detailed information</p>
+                                </div>
+                            </a>
+                        </div>
+                        <div class="col-md-6 col-lg-3">
+                            <a href="/agentize/debug/messages" class="card text-decoration-none text-dark h-100">
+                                <div class="card-body text-center">
+                                    <div class="mb-3" style="font-size: 3rem;">💬</div>
+                                    <h6 class="card-title">View All Messages</h6>
+                                    <p class="card-text text-muted small text-justify">See all messages across all sessions with full context</p>
+                                </div>
+                            </a>
+                        </div>
+                        <div class="col-md-6 col-lg-3">
+                            <a href="/agentize/debug/files" class="card text-decoration-none text-dark h-100">
+                                <div class="card-body text-center">
+                                    <div class="mb-3" style="font-size: 3rem;">📁</div>
+                                    <h6 class="card-title">View All Opened Files</h6>
+                                    <p class="card-text text-muted small text-justify">Browse all files that were opened during sessions</p>
+                                </div>
+                            </a>
+                        </div>
+                        <div class="col-md-6 col-lg-3">
+                            <a href="/agentize/debug/tool-calls" class="card text-decoration-none text-dark h-100">
+                                <div class="card-body text-center">
+                                    <div class="mb-3" style="font-size: 3rem;">🔧</div>
+                                    <h6 class="card-title">View All Tool Calls</h6>
+                                    <p class="card-text text-muted small text-justify">See all tool calls and their results in detail</p>
+                                </div>
+                            </a>
+                        </div>
                     </div>
                 </div>
             </div>
         </div>
     </div>`
 
-	html += `</div>`
+	html += `</div>
+    </div>`
 	html += generateBootstrapFooter()
 
 	return html, nil
@@ -462,50 +543,54 @@ func (h *DebugHandler) GenerateUsersHTML() (string, error) {
 
 	html := generateBootstrapHeader("Agentize Debug - Users")
 	html += generateNavigationBar("/agentize/debug/users")
-	html += `<div class="container mt-4">
+	html += `<div class="container">
+    <div class="main-container">
         <div class="card">
             <div class="card-header">
-                <h4>👤 All Users (` + fmt.Sprintf("%d", len(users)) + `)</h4>
+                <h4 class="mb-0"><i class="bi bi-people-fill me-2"></i>All Users (` + fmt.Sprintf("%d", len(users)) + `)</h4>
             </div>
             <div class="card-body">`
 
 	if len(users) == 0 {
-		html += `<div class="alert alert-info">No users found.</div>`
+		html += `<div class="alert alert-info text-center">
+                <i class="bi bi-info-circle me-2"></i>No users found.
+            </div>`
 	} else {
 		html += `<div class="table-responsive">
-                <table class="table table-striped table-hover">
+                <table class="table table-striped table-hover align-middle">
                     <thead>
                         <tr>
-                            <th>User ID</th>
-                            <th>Sessions</th>
-                            <th>Ban Status</th>
-                            <th>Nonsense Count</th>
-                            <th>Created At</th>
-                            <th>Actions</th>
+                            <th class="text-nowrap">User ID</th>
+                            <th class="text-center text-nowrap">Sessions</th>
+                            <th class="text-center text-nowrap">Ban Status</th>
+                            <th class="text-center text-nowrap">Nonsense Count</th>
+                            <th class="text-nowrap">Created At</th>
+                            <th class="text-center text-nowrap">Actions</th>
                         </tr>
                     </thead>
                     <tbody>`
 
 		for _, user := range users {
 			sessionCount := len(sessionsByUser[user.UserID])
-			banStatus := "✅ Active"
+			banStatus := `<span class="badge bg-success">✅ Active</span>`
 			if user.IsCurrentlyBanned() {
-				banStatus = "🚫 Banned"
+				banText := "🚫 Banned"
 				if !user.BanUntil.IsZero() {
-					banStatus += fmt.Sprintf(" (until %s)", FormatTime(user.BanUntil))
+					banText += fmt.Sprintf(" (until %s)", FormatTime(user.BanUntil))
 				} else {
-					banStatus += " (permanent)"
+					banText += " (permanent)"
 				}
+				banStatus = fmt.Sprintf(`<span class="badge bg-danger">%s</span>`, banText)
 			}
 
 			html += fmt.Sprintf(`
                         <tr>
-                            <td><code>%s</code></td>
-                            <td><span class="badge bg-primary">%d</span></td>
-                            <td>%s</td>
-                            <td><span class="badge bg-warning">%d</span></td>
-                            <td>%s</td>
-                            <td><a href="/agentize/debug/users/%s" class="btn btn-sm btn-outline-primary">View Details</a></td>
+                            <td><code class="text-break">%s</code></td>
+                            <td class="text-center"><span class="badge bg-primary">%d</span></td>
+                            <td class="text-center">%s</td>
+                            <td class="text-center"><span class="badge bg-warning text-dark">%d</span></td>
+                            <td class="text-nowrap">%s</td>
+                            <td class="text-center"><a href="/agentize/debug/users/%s" class="btn btn-sm btn-outline-primary">View Details</a></td>
                         </tr>`,
 				template.HTMLEscapeString(user.UserID),
 				sessionCount,
@@ -522,6 +607,7 @@ func (h *DebugHandler) GenerateUsersHTML() (string, error) {
 
 	html += `</div>
         </div>
+    </div>
     </div>`
 	html += generateBootstrapFooter()
 
@@ -565,8 +651,9 @@ func (h *DebugHandler) GenerateUserDetailHTML(userID string) (string, error) {
 
 	html := generateBootstrapHeader("Agentize Debug - User: " + userID)
 	html += generateNavigationBar("/agentize/debug/users")
-	html += `<div class="container mt-4">
-        <nav aria-label="breadcrumb">
+	html += `<div class="container">
+    <div class="main-container">
+        <nav aria-label="breadcrumb" class="mb-4">
             <ol class="breadcrumb">
                 <li class="breadcrumb-item"><a href="/agentize/debug">Dashboard</a></li>
                 <li class="breadcrumb-item"><a href="/agentize/debug/users">Users</a></li>
@@ -591,19 +678,37 @@ func (h *DebugHandler) GenerateUserDetailHTML(userID string) (string, error) {
 	html += fmt.Sprintf(`
         <div class="card mb-4">
             <div class="card-header">
-                <h4>👤 User Information</h4>
+                <h4 class="mb-0"><i class="bi bi-person-fill me-2"></i>User Information</h4>
             </div>
             <div class="card-body">
-                <div class="row">
+                <div class="row g-4">
                     <div class="col-md-6">
-                        <p><strong>User ID:</strong> <code>%s</code></p>
-                        <p><strong>Status:</strong> %s</p>
-                        <p><strong>Nonsense Count:</strong> <span class="badge bg-warning">%d</span></p>
+                        <div class="mb-3">
+                            <strong class="d-block mb-2">User ID:</strong>
+                            <code class="d-block p-2 bg-light rounded text-break">%s</code>
+                        </div>
+                        <div class="mb-3">
+                            <strong class="d-block mb-2">Status:</strong>
+                            <div>%s</div>
+                        </div>
+                        <div class="mb-3">
+                            <strong class="d-block mb-2">Nonsense Count:</strong>
+                            <span class="badge bg-warning text-dark fs-6">%d</span>
+                        </div>
                     </div>
                     <div class="col-md-6">
-                        <p><strong>Created At:</strong> %s</p>
-                        <p><strong>Updated At:</strong> %s</p>
-                        <p><strong>Last Nonsense:</strong> %s</p>
+                        <div class="mb-3">
+                            <strong class="d-block mb-2">Created At:</strong>
+                            <div class="text-muted">%s</div>
+                        </div>
+                        <div class="mb-3">
+                            <strong class="d-block mb-2">Updated At:</strong>
+                            <div class="text-muted">%s</div>
+                        </div>
+                        <div class="mb-3">
+                            <strong class="d-block mb-2">Last Nonsense:</strong>
+                            <div class="text-muted">%s</div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -619,12 +724,14 @@ func (h *DebugHandler) GenerateUserDetailHTML(userID string) (string, error) {
 	html += fmt.Sprintf(`
         <div class="card mb-4">
             <div class="card-header">
-                <h5>📊 Sessions (%d)</h5>
+                <h5 class="mb-0"><i class="bi bi-diagram-3-fill me-2"></i>Sessions (%d)</h5>
             </div>
             <div class="card-body">`, len(userSessions))
 
 	if len(userSessions) == 0 {
-		html += `<div class="alert alert-info">No sessions found for this user.</div>`
+		html += `<div class="alert alert-info text-center">
+                <i class="bi bi-info-circle me-2"></i>No sessions found for this user.
+            </div>`
 	} else {
 		html += `<div class="list-group">`
 		for _, session := range userSessions {
@@ -634,18 +741,20 @@ func (h *DebugHandler) GenerateUserDetailHTML(userID string) (string, error) {
 			}
 			html += fmt.Sprintf(`
                 <a href="/agentize/debug/sessions/%s" class="list-group-item list-group-item-action">
-                    <div class="d-flex w-100 justify-content-between">
-                        <h6 class="mb-1">%s</h6>
-                        <small>%s</small>
+                    <div class="d-flex w-100 justify-content-between align-items-start">
+                        <div class="flex-grow-1">
+                            <h6 class="mb-2">%s</h6>
+                            <p class="mb-1"><code class="text-break">%s</code></p>
+                            <small class="text-muted">Updated: %s</small>
+                        </div>
+                        <span class="badge bg-secondary ms-2">%s</span>
                     </div>
-                    <p class="mb-1"><code>%s</code></p>
-                    <small>Updated: %s</small>
                 </a>`,
 				template.URLQueryEscaper(session.SessionID),
 				template.HTMLEscapeString(title),
-				string(session.AgentType),
 				template.HTMLEscapeString(session.SessionID),
-				FormatTime(session.UpdatedAt))
+				FormatTime(session.UpdatedAt),
+				template.HTMLEscapeString(string(session.AgentType)))
 		}
 		html += `</div>`
 	}
@@ -656,22 +765,25 @@ func (h *DebugHandler) GenerateUserDetailHTML(userID string) (string, error) {
 	// Messages card
 	html += fmt.Sprintf(`
         <div class="card mb-4">
-            <div class="card-header">
-                <h5>💬 Messages (%d) <a href="/agentize/debug/messages?user=%s" class="btn btn-sm btn-outline-primary float-end">View All</a></h5>
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h5 class="mb-0"><i class="bi bi-chat-dots-fill me-2"></i>Messages (%d)</h5>
+                <a href="/agentize/debug/messages?user=%s" class="btn btn-sm btn-light">View All</a>
             </div>
             <div class="card-body">`, len(messages), template.URLQueryEscaper(userID))
 
 	if len(messages) == 0 {
-		html += `<div class="alert alert-info">No messages found for this user.</div>`
+		html += `<div class="alert alert-info text-center">
+                <i class="bi bi-info-circle me-2"></i>No messages found for this user.
+            </div>`
 	} else {
 		html += `<div class="table-responsive">
-                <table class="table table-sm">
+                <table class="table table-sm align-middle">
                     <thead>
                         <tr>
-                            <th>Time</th>
-                            <th>Role</th>
+                            <th class="text-nowrap">Time</th>
+                            <th class="text-center text-nowrap">Role</th>
                             <th>Content</th>
-                            <th>Session</th>
+                            <th class="text-nowrap">Session</th>
                         </tr>
                     </thead>
                     <tbody>`
@@ -687,14 +799,26 @@ func (h *DebugHandler) GenerateUserDetailHTML(userID string) (string, error) {
 			if len(content) > 100 {
 				content = content[:100] + "..."
 			}
+			badgeClass := "bg-secondary"
+			switch msg.Role {
+			case openai.ChatMessageRoleUser:
+				badgeClass = "bg-primary"
+			case openai.ChatMessageRoleAssistant:
+				badgeClass = "bg-success"
+			case openai.ChatMessageRoleTool:
+				badgeClass = "bg-warning text-dark"
+			case openai.ChatMessageRoleSystem:
+				badgeClass = "bg-info"
+			}
 			html += fmt.Sprintf(`
                         <tr>
-                            <td>%s</td>
-                            <td><span class="badge bg-secondary">%s</span></td>
-                            <td>%s</td>
-                            <td><a href="/agentize/debug/sessions/%s">%s</a></td>
+                            <td class="text-nowrap">%s</td>
+                            <td class="text-center"><span class="badge %s">%s</span></td>
+                            <td class="text-break">%s</td>
+                            <td class="text-nowrap"><a href="/agentize/debug/sessions/%s" class="text-decoration-none">%s</a></td>
                         </tr>`,
 				FormatTime(msg.CreatedAt),
+				badgeClass,
 				template.HTMLEscapeString(msg.Role),
 				template.HTMLEscapeString(content),
 				template.URLQueryEscaper(msg.SessionID),
@@ -713,36 +837,38 @@ func (h *DebugHandler) GenerateUserDetailHTML(userID string) (string, error) {
 	html += fmt.Sprintf(`
         <div class="card mb-4">
             <div class="card-header">
-                <h5>📁 Opened Files (%d)</h5>
+                <h5 class="mb-0"><i class="bi bi-folder-fill me-2"></i>Opened Files (%d)</h5>
             </div>
             <div class="card-body">`, len(userFiles))
 
 	if len(userFiles) == 0 {
-		html += `<div class="alert alert-info">No opened files found for this user.</div>`
+		html += `<div class="alert alert-info text-center">
+                <i class="bi bi-info-circle me-2"></i>No opened files found for this user.
+            </div>`
 	} else {
 		html += `<div class="table-responsive">
-                <table class="table table-sm">
+                <table class="table table-sm align-middle">
                     <thead>
                         <tr>
                             <th>File Path</th>
-                            <th>Status</th>
-                            <th>Opened At</th>
-                            <th>Session</th>
+                            <th class="text-center text-nowrap">Status</th>
+                            <th class="text-nowrap">Opened At</th>
+                            <th class="text-nowrap">Session</th>
                         </tr>
                     </thead>
                     <tbody>`
 
 		for _, f := range userFiles {
-			status := "✅ Open"
+			status := `<span class="badge bg-success">✅ Open</span>`
 			if !f.IsOpen {
-				status = "❌ Closed"
+				status = `<span class="badge bg-secondary">❌ Closed</span>`
 			}
 			html += fmt.Sprintf(`
                         <tr>
-                            <td><code>%s</code></td>
-                            <td>%s</td>
-                            <td>%s</td>
-                            <td><a href="/agentize/debug/sessions/%s">%s</a></td>
+                            <td><code class="text-break">%s</code></td>
+                            <td class="text-center">%s</td>
+                            <td class="text-nowrap">%s</td>
+                            <td class="text-nowrap"><a href="/agentize/debug/sessions/%s" class="text-decoration-none">%s</a></td>
                         </tr>`,
 				template.HTMLEscapeString(f.FilePath),
 				status,
@@ -758,6 +884,7 @@ func (h *DebugHandler) GenerateUserDetailHTML(userID string) (string, error) {
 
 	html += `</div>
         </div>
+    </div>
     </div>`
 	html += generateBootstrapFooter()
 
@@ -790,8 +917,9 @@ func (h *DebugHandler) GenerateSessionDetailHTML(sessionID string) (string, erro
 
 	html := generateBootstrapHeader("Agentize Debug - Session: " + sessionID)
 	html += generateNavigationBar("/agentize/debug")
-	html += `<div class="container mt-4">
-        <nav aria-label="breadcrumb">
+	html += `<div class="container">
+    <div class="main-container">
+        <nav aria-label="breadcrumb" class="mb-4">
             <ol class="breadcrumb">
                 <li class="breadcrumb-item"><a href="/agentize/debug">Dashboard</a></li>
                 <li class="breadcrumb-item"><a href="/agentize/debug/users">Users</a></li>
@@ -827,21 +955,45 @@ func (h *DebugHandler) GenerateSessionDetailHTML(sessionID string) (string, erro
 	html += fmt.Sprintf(`
         <div class="card mb-4">
             <div class="card-header">
-                <h4>📊 Session Information</h4>
+                <h4 class="mb-0"><i class="bi bi-diagram-3-fill me-2"></i>Session Information</h4>
             </div>
             <div class="card-body">
-                <div class="row">
+                <div class="row g-4">
                     <div class="col-md-6">
-                        <p><strong>Session ID:</strong> <code>%s</code></p>
-                        <p><strong>Title:</strong> %s</p>
-                        <p><strong>Agent Type:</strong> %s %s</p>
-                        <p><strong>User:</strong> <a href="/agentize/debug/users/%s">%s</a></p>
+                        <div class="mb-3">
+                            <strong class="d-block mb-2">Session ID:</strong>
+                            <code class="d-block p-2 bg-light rounded text-break">%s</code>
+                        </div>
+                        <div class="mb-3">
+                            <strong class="d-block mb-2">Title:</strong>
+                            <div>%s</div>
+                        </div>
+                        <div class="mb-3">
+                            <strong class="d-block mb-2">Agent Type:</strong>
+                            <div>%s %s</div>
+                        </div>
+                        <div class="mb-3">
+                            <strong class="d-block mb-2">User:</strong>
+                            <a href="/agentize/debug/users/%s" class="text-decoration-none">%s</a>
+                        </div>
                     </div>
                     <div class="col-md-6">
-                        <p><strong>Created At:</strong> %s</p>
-                        <p><strong>Updated At:</strong> %s (%s)</p>
-                        <p><strong>Messages:</strong> %d active + %d archived</p>
-                        <p><strong>Opened Files:</strong> %d</p>
+                        <div class="mb-3">
+                            <strong class="d-block mb-2">Created At:</strong>
+                            <div class="text-muted">%s</div>
+                        </div>
+                        <div class="mb-3">
+                            <strong class="d-block mb-2">Updated At:</strong>
+                            <div class="text-muted">%s <small>(%s)</small></div>
+                        </div>
+                        <div class="mb-3">
+                            <strong class="d-block mb-2">Messages:</strong>
+                            <div><span class="badge bg-primary">%d active</span> + <span class="badge bg-secondary">%d archived</span></div>
+                        </div>
+                        <div class="mb-3">
+                            <strong class="d-block mb-2">Opened Files:</strong>
+                            <div><span class="badge bg-info">%d</span></div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -863,12 +1015,14 @@ func (h *DebugHandler) GenerateSessionDetailHTML(sessionID string) (string, erro
 	html += fmt.Sprintf(`
         <div class="card mb-4">
             <div class="card-header">
-                <h5>💬 Messages (%d)</h5>
+                <h5 class="mb-0"><i class="bi bi-chat-dots-fill me-2"></i>Messages (%d)</h5>
             </div>
             <div class="card-body">`, len(messages))
 
 	if len(messages) == 0 {
-		html += `<div class="alert alert-info">No messages found for this session.</div>`
+		html += `<div class="alert alert-info text-center">
+                <i class="bi bi-info-circle me-2"></i>No messages found for this session.
+            </div>`
 	} else {
 		html += `<div class="list-group">`
 		for _, msg := range messages {
@@ -883,7 +1037,7 @@ func (h *DebugHandler) GenerateSessionDetailHTML(sessionID string) (string, erro
 			case openai.ChatMessageRoleAssistant:
 				badgeClass = "bg-success"
 			case openai.ChatMessageRoleTool:
-				badgeClass = "bg-warning"
+				badgeClass = "bg-warning text-dark"
 			case openai.ChatMessageRoleSystem:
 				badgeClass = "bg-info"
 			}
@@ -895,12 +1049,14 @@ func (h *DebugHandler) GenerateSessionDetailHTML(sessionID string) (string, erro
 
 			html += fmt.Sprintf(`
                 <div class="list-group-item">
-                    <div class="d-flex w-100 justify-content-between">
-                        <h6 class="mb-1"><span class="badge %s">%s</span>%s</h6>
-                        <small>%s</small>
+                    <div class="d-flex w-100 justify-content-between align-items-start mb-2">
+                        <div>
+                            <span class="badge %s me-2">%s</span>%s
+                        </div>
+                        <small class="text-muted">%s</small>
                     </div>
-                    <p class="mb-1">%s</p>
-                    <small>Message ID: <code>%s</code></small>
+                    <p class="mb-2 text-justify">%s</p>
+                    <small class="text-muted">Message ID: <code>%s</code></small>
                 </div>`,
 				badgeClass,
 				template.HTMLEscapeString(msg.Role),
@@ -918,22 +1074,25 @@ func (h *DebugHandler) GenerateSessionDetailHTML(sessionID string) (string, erro
 	// Tool Calls card
 	html += fmt.Sprintf(`
         <div class="card mb-4">
-            <div class="card-header">
-                <h5>🔧 Tool Calls (%d) <a href="/agentize/debug/tool-calls?session=%s" class="btn btn-sm btn-outline-danger float-end">View All</a></h5>
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h5 class="mb-0"><i class="bi bi-tools me-2"></i>Tool Calls (%d)</h5>
+                <a href="/agentize/debug/tool-calls?session=%s" class="btn btn-sm btn-light">View All</a>
             </div>
             <div class="card-body">`, len(toolCalls), template.URLQueryEscaper(sessionID))
 
 	if len(toolCalls) == 0 {
-		html += `<div class="alert alert-info">No tool calls found for this session.</div>`
+		html += `<div class="alert alert-info text-center">
+                <i class="bi bi-info-circle me-2"></i>No tool calls found for this session.
+            </div>`
 	} else {
 		html += `<div class="table-responsive">
-                <table class="table table-sm">
+                <table class="table table-sm align-middle">
                     <thead>
                         <tr>
-                            <th>Function</th>
+                            <th class="text-nowrap">Function</th>
                             <th>Arguments</th>
                             <th>Result</th>
-                            <th>Time</th>
+                            <th class="text-nowrap">Time</th>
                         </tr>
                     </thead>
                     <tbody>`
@@ -949,10 +1108,10 @@ func (h *DebugHandler) GenerateSessionDetailHTML(sessionID string) (string, erro
 			}
 			html += fmt.Sprintf(`
                         <tr>
-                            <td><code>%s</code></td>
-                            <td><pre class="mb-0" style="max-width: 300px; overflow: auto;">%s</pre></td>
-                            <td><pre class="mb-0" style="max-width: 300px; overflow: auto;">%s</pre></td>
-                            <td>%s</td>
+                            <td class="text-nowrap"><code>%s</code></td>
+                            <td><pre class="mb-0" style="max-width: 300px; overflow: auto; white-space: pre-wrap; word-wrap: break-word;">%s</pre></td>
+                            <td><pre class="mb-0" style="max-width: 300px; overflow: auto; white-space: pre-wrap; word-wrap: break-word;">%s</pre></td>
+                            <td class="text-nowrap">%s</td>
                         </tr>`,
 				template.HTMLEscapeString(tc.FunctionName),
 				template.HTMLEscapeString(args),
@@ -972,30 +1131,32 @@ func (h *DebugHandler) GenerateSessionDetailHTML(sessionID string) (string, erro
 	html += fmt.Sprintf(`
         <div class="card mb-4">
             <div class="card-header">
-                <h5>📁 Opened Files (%d)</h5>
+                <h5 class="mb-0"><i class="bi bi-folder-fill me-2"></i>Opened Files (%d)</h5>
             </div>
             <div class="card-body">`, len(files))
 
 	if len(files) == 0 {
-		html += `<div class="alert alert-info">No opened files found for this session.</div>`
+		html += `<div class="alert alert-info text-center">
+                <i class="bi bi-info-circle me-2"></i>No opened files found for this session.
+            </div>`
 	} else {
 		html += `<div class="table-responsive">
-                <table class="table table-sm">
+                <table class="table table-sm align-middle">
                     <thead>
                         <tr>
                             <th>File Path</th>
                             <th>File Name</th>
-                            <th>Status</th>
-                            <th>Opened At</th>
-                            <th>Closed At</th>
+                            <th class="text-center text-nowrap">Status</th>
+                            <th class="text-nowrap">Opened At</th>
+                            <th class="text-nowrap">Closed At</th>
                         </tr>
                     </thead>
                     <tbody>`
 
 		for _, f := range files {
-			status := "✅ Open"
+			status := `<span class="badge bg-success">✅ Open</span>`
 			if !f.IsOpen {
-				status = "❌ Closed"
+				status = `<span class="badge bg-secondary">❌ Closed</span>`
 			}
 			closedAt := "N/A"
 			if !f.ClosedAt.IsZero() {
@@ -1003,11 +1164,11 @@ func (h *DebugHandler) GenerateSessionDetailHTML(sessionID string) (string, erro
 			}
 			html += fmt.Sprintf(`
                         <tr>
-                            <td><code>%s</code></td>
+                            <td><code class="text-break">%s</code></td>
                             <td>%s</td>
-                            <td>%s</td>
-                            <td>%s</td>
-                            <td>%s</td>
+                            <td class="text-center">%s</td>
+                            <td class="text-nowrap">%s</td>
+                            <td class="text-nowrap">%s</td>
                         </tr>`,
 				template.HTMLEscapeString(f.FilePath),
 				template.HTMLEscapeString(f.FileName),
@@ -1023,6 +1184,7 @@ func (h *DebugHandler) GenerateSessionDetailHTML(sessionID string) (string, erro
 
 	html += `</div>
         </div>
+    </div>
     </div>`
 	html += generateBootstrapFooter()
 
@@ -1040,26 +1202,29 @@ func (h *DebugHandler) GenerateMessagesHTML() (string, error) {
 
 	html := generateBootstrapHeader("Agentize Debug - Messages")
 	html += generateNavigationBar("/agentize/debug/messages")
-	html += `<div class="container mt-4">
+	html += `<div class="container">
+    <div class="main-container">
         <div class="card">
             <div class="card-header">
-                <h4>💬 All Messages (` + fmt.Sprintf("%d", len(messages)) + `)</h4>
+                <h4 class="mb-0"><i class="bi bi-chat-dots-fill me-2"></i>All Messages (` + fmt.Sprintf("%d", len(messages)) + `)</h4>
             </div>
             <div class="card-body">`
 
 	if len(messages) == 0 {
-		html += `<div class="alert alert-info">No messages found.</div>`
+		html += `<div class="alert alert-info text-center">
+                <i class="bi bi-info-circle me-2"></i>No messages found.
+            </div>`
 	} else {
 		html += `<div class="table-responsive">
-                <table class="table table-striped table-hover">
+                <table class="table table-striped table-hover align-middle">
                     <thead>
                         <tr>
-                            <th>Time</th>
-                            <th>Role</th>
+                            <th class="text-nowrap">Time</th>
+                            <th class="text-center text-nowrap">Role</th>
                             <th>Content</th>
-                            <th>User</th>
-                            <th>Session</th>
-                            <th>Tool Calls</th>
+                            <th class="text-nowrap">User</th>
+                            <th class="text-nowrap">Session</th>
+                            <th class="text-center text-nowrap">Tool Calls</th>
                         </tr>
                     </thead>
                     <tbody>`
@@ -1076,7 +1241,7 @@ func (h *DebugHandler) GenerateMessagesHTML() (string, error) {
 			case openai.ChatMessageRoleAssistant:
 				badgeClass = "bg-success"
 			case openai.ChatMessageRoleTool:
-				badgeClass = "bg-warning"
+				badgeClass = "bg-warning text-dark"
 			case openai.ChatMessageRoleSystem:
 				badgeClass = "bg-info"
 			}
@@ -1090,12 +1255,12 @@ func (h *DebugHandler) GenerateMessagesHTML() (string, error) {
 
 			html += fmt.Sprintf(`
                         <tr>
-                            <td>%s</td>
-                            <td><span class="badge %s">%s</span></td>
-                            <td>%s</td>
-                            <td><a href="/agentize/debug/users/%s">%s</a></td>
-                            <td><a href="/agentize/debug/sessions/%s">%s</a></td>
-                            <td>%s</td>
+                            <td class="text-nowrap">%s</td>
+                            <td class="text-center"><span class="badge %s">%s</span></td>
+                            <td class="text-break">%s</td>
+                            <td class="text-nowrap"><a href="/agentize/debug/users/%s" class="text-decoration-none">%s</a></td>
+                            <td class="text-nowrap"><a href="/agentize/debug/sessions/%s" class="text-decoration-none">%s</a></td>
+                            <td class="text-center">%s</td>
                         </tr>`,
 				FormatTime(msg.CreatedAt),
 				badgeClass,
@@ -1115,6 +1280,7 @@ func (h *DebugHandler) GenerateMessagesHTML() (string, error) {
 
 	html += `</div>
         </div>
+    </div>
     </div>`
 	html += generateBootstrapFooter()
 
@@ -1132,35 +1298,38 @@ func (h *DebugHandler) GenerateFilesHTML() (string, error) {
 
 	html := generateBootstrapHeader("Agentize Debug - Opened Files")
 	html += generateNavigationBar("/agentize/debug/files")
-	html += `<div class="container mt-4">
+	html += `<div class="container">
+    <div class="main-container">
         <div class="card">
             <div class="card-header">
-                <h4>📁 All Opened Files (` + fmt.Sprintf("%d", len(files)) + `)</h4>
+                <h4 class="mb-0"><i class="bi bi-folder-fill me-2"></i>All Opened Files (` + fmt.Sprintf("%d", len(files)) + `)</h4>
             </div>
             <div class="card-body">`
 
 	if len(files) == 0 {
-		html += `<div class="alert alert-info">No opened files found.</div>`
+		html += `<div class="alert alert-info text-center">
+                <i class="bi bi-info-circle me-2"></i>No opened files found.
+            </div>`
 	} else {
 		html += `<div class="table-responsive">
-                <table class="table table-striped table-hover">
+                <table class="table table-striped table-hover align-middle">
                     <thead>
                         <tr>
                             <th>File Path</th>
                             <th>File Name</th>
-                            <th>Status</th>
-                            <th>Opened At</th>
-                            <th>Closed At</th>
-                            <th>User</th>
-                            <th>Session</th>
+                            <th class="text-center text-nowrap">Status</th>
+                            <th class="text-nowrap">Opened At</th>
+                            <th class="text-nowrap">Closed At</th>
+                            <th class="text-nowrap">User</th>
+                            <th class="text-nowrap">Session</th>
                         </tr>
                     </thead>
                     <tbody>`
 
 		for _, f := range files {
-			status := "✅ Open"
+			status := `<span class="badge bg-success">✅ Open</span>`
 			if !f.IsOpen {
-				status = "❌ Closed"
+				status = `<span class="badge bg-secondary">❌ Closed</span>`
 			}
 			closedAt := "N/A"
 			if !f.ClosedAt.IsZero() {
@@ -1168,13 +1337,13 @@ func (h *DebugHandler) GenerateFilesHTML() (string, error) {
 			}
 			html += fmt.Sprintf(`
                         <tr>
-                            <td><code>%s</code></td>
+                            <td><code class="text-break">%s</code></td>
                             <td>%s</td>
-                            <td>%s</td>
-                            <td>%s</td>
-                            <td>%s</td>
-                            <td><a href="/agentize/debug/users/%s">%s</a></td>
-                            <td><a href="/agentize/debug/sessions/%s">%s</a></td>
+                            <td class="text-center">%s</td>
+                            <td class="text-nowrap">%s</td>
+                            <td class="text-nowrap">%s</td>
+                            <td class="text-nowrap"><a href="/agentize/debug/users/%s" class="text-decoration-none">%s</a></td>
+                            <td class="text-nowrap"><a href="/agentize/debug/sessions/%s" class="text-decoration-none">%s</a></td>
                         </tr>`,
 				template.HTMLEscapeString(f.FilePath),
 				template.HTMLEscapeString(f.FileName),
@@ -1194,6 +1363,7 @@ func (h *DebugHandler) GenerateFilesHTML() (string, error) {
 
 	html += `</div>
         </div>
+    </div>
     </div>`
 	html += generateBootstrapFooter()
 
@@ -1218,26 +1388,29 @@ func (h *DebugHandler) GenerateToolCallsHTML() (string, error) {
 
 	html := generateBootstrapHeader("Agentize Debug - Tool Calls")
 	html += generateNavigationBar("/agentize/debug/tool-calls")
-	html += `<div class="container mt-4">
+	html += `<div class="container">
+    <div class="main-container">
         <div class="card">
             <div class="card-header">
-                <h4>🔧 All Tool Calls (` + fmt.Sprintf("%d", len(allToolCalls)) + `)</h4>
+                <h4 class="mb-0"><i class="bi bi-tools me-2"></i>All Tool Calls (` + fmt.Sprintf("%d", len(allToolCalls)) + `)</h4>
             </div>
             <div class="card-body">`
 
 	if len(allToolCalls) == 0 {
-		html += `<div class="alert alert-info">No tool calls found.</div>`
+		html += `<div class="alert alert-info text-center">
+                <i class="bi bi-info-circle me-2"></i>No tool calls found.
+            </div>`
 	} else {
 		html += `<div class="table-responsive">
-                <table class="table table-striped table-hover">
+                <table class="table table-striped table-hover align-middle">
                     <thead>
                         <tr>
-                            <th>Function</th>
+                            <th class="text-nowrap">Function</th>
                             <th>Arguments</th>
                             <th>Result</th>
-                            <th>User</th>
-                            <th>Session</th>
-                            <th>Time</th>
+                            <th class="text-nowrap">User</th>
+                            <th class="text-nowrap">Session</th>
+                            <th class="text-nowrap">Time</th>
                         </tr>
                     </thead>
                     <tbody>`
@@ -1253,12 +1426,12 @@ func (h *DebugHandler) GenerateToolCallsHTML() (string, error) {
 			}
 			html += fmt.Sprintf(`
                         <tr>
-                            <td><code>%s</code></td>
-                            <td><pre class="mb-0" style="max-width: 200px; overflow: auto; font-size: 0.8em;">%s</pre></td>
-                            <td><pre class="mb-0" style="max-width: 200px; overflow: auto; font-size: 0.8em;">%s</pre></td>
-                            <td><a href="/agentize/debug/users/%s">%s</a></td>
-                            <td><a href="/agentize/debug/sessions/%s">%s</a></td>
-                            <td>%s</td>
+                            <td class="text-nowrap"><code>%s</code></td>
+                            <td><pre class="mb-0" style="max-width: 200px; overflow: auto; font-size: 0.8em; white-space: pre-wrap; word-wrap: break-word;">%s</pre></td>
+                            <td><pre class="mb-0" style="max-width: 200px; overflow: auto; font-size: 0.8em; white-space: pre-wrap; word-wrap: break-word;">%s</pre></td>
+                            <td class="text-nowrap"><a href="/agentize/debug/users/%s" class="text-decoration-none">%s</a></td>
+                            <td class="text-nowrap"><a href="/agentize/debug/sessions/%s" class="text-decoration-none">%s</a></td>
+                            <td class="text-nowrap">%s</td>
                         </tr>`,
 				template.HTMLEscapeString(tc.FunctionName),
 				template.HTMLEscapeString(args),
@@ -1277,6 +1450,7 @@ func (h *DebugHandler) GenerateToolCallsHTML() (string, error) {
 
 	html += `</div>
         </div>
+    </div>
     </div>`
 	html += generateBootstrapFooter()
 
