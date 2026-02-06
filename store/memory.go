@@ -335,6 +335,26 @@ func (s *DBStore) GetCurrentlyOpenedFilesBySession(sessionID string) ([]*model.O
 	return s.sqliteStore.GetCurrentlyOpenedFilesBySession(sessionID)
 }
 
+// GetAllUsers returns all users (delegates to SQLiteStore)
+func (s *DBStore) GetAllUsers() ([]*model.User, error) {
+	return s.sqliteStore.GetAllUsers()
+}
+
+// GetAllMessages returns all messages (delegates to SQLiteStore)
+func (s *DBStore) GetAllMessages() ([]*model.Message, error) {
+	return s.sqliteStore.GetAllMessages()
+}
+
+// GetAllOpenedFiles returns all opened files (delegates to SQLiteStore)
+func (s *DBStore) GetAllOpenedFiles() ([]*model.OpenedFile, error) {
+	return s.sqliteStore.GetAllOpenedFiles()
+}
+
+// GetSession is an alias for Get to match DebugStore interface
+func (s *DBStore) GetSession(sessionID string) (*model.Session, error) {
+	return s.Get(sessionID)
+}
+
 // SessionStore is an alias for model.SessionStore for backward compatibility
 type SessionStore = model.SessionStore
 

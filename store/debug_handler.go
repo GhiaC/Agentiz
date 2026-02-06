@@ -12,9 +12,29 @@ import (
 	"github.com/sashabaranov/go-openai"
 )
 
+// ToolCallInfo represents information about a tool call
+type ToolCallInfo struct {
+	SessionID    string
+	UserID       string
+	MessageID    string
+	ToolCallID   string
+	FunctionName string
+	Arguments    string
+	Result       string
+	CreatedAt    time.Time
+}
+
 // DebugStore is an interface for stores that support debugging
 type DebugStore interface {
 	GetAllSessions() (map[string][]*model.Session, error)
+	GetAllUsers() ([]*model.User, error)
+	GetAllMessages() ([]*model.Message, error)
+	GetAllOpenedFiles() ([]*model.OpenedFile, error)
+	GetMessagesBySession(sessionID string) ([]*model.Message, error)
+	GetMessagesByUser(userID string) ([]*model.Message, error)
+	GetOpenedFilesBySession(sessionID string) ([]*model.OpenedFile, error)
+	GetUser(userID string) (*model.User, error)
+	GetSession(sessionID string) (*model.Session, error)
 }
 
 // DebugHandler provides HTML debugging interface for SessionStore
@@ -132,585 +152,74 @@ func FormatDuration(t time.Time) string {
 	}
 }
 
-// GenerateHTML generates the debug HTML page
-func (h *DebugHandler) GenerateHTML() (string, error) {
-	sessionsByUser, err := h.GetAllSessions()
-	if err != nil {
-		return "", fmt.Errorf("failed to get sessions: %w", err)
+// min returns the minimum of two integers
+func min(a, b int) int {
+	if a < b {
+		return a
 	}
-	totalSessions, err := h.GetSessionCount()
-	if err != nil {
-		return "", fmt.Errorf("failed to get session count: %w", err)
-	}
-	totalUsers, err := h.GetUserCount()
-	if err != nil {
-		return "", fmt.Errorf("failed to get user count: %w", err)
+	return b
+}
+
+// generateNavigationBar generates Bootstrap navigation bar
+func generateNavigationBar(currentPage string) string {
+	navItems := []struct {
+		URL  string
+		Icon string
+		Text string
+	}{
+		{"/agentize/debug", "📊", "Dashboard"},
+		{"/agentize/debug/users", "👤", "Users"},
+		{"/agentize/debug/messages", "💬", "Messages"},
+		{"/agentize/debug/files", "📁", "Files"},
+		{"/agentize/debug/tool-calls", "🔧", "Tool Calls"},
 	}
 
-	html := `<!DOCTYPE html>
+	navHTML := `<nav class="navbar navbar-expand-lg navbar-dark bg-primary mb-4">
+    <div class="container-fluid">
+        <a class="navbar-brand" href="/agentize/debug">🔍 Agentize Debug</a>
+        <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
+            <span class="navbar-toggler-icon"></span>
+        </button>
+        <div class="collapse navbar-collapse" id="navbarNav">
+            <ul class="navbar-nav">`
+
+	for _, item := range navItems {
+		active := ""
+		if item.URL == currentPage {
+			active = "active"
+		}
+		navHTML += fmt.Sprintf(`
+                <li class="nav-item">
+                    <a class="nav-link %s" href="%s">%s %s</a>
+                </li>`, active, item.URL, item.Icon, item.Text)
+	}
+
+	navHTML += `
+            </ul>
+        </div>
+    </div>
+</nav>`
+
+	return navHTML
+}
+
+// generateBootstrapHeader generates HTML header with Bootstrap CDN
+func generateBootstrapHeader(title string) string {
+	return fmt.Sprintf(`<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Agentize Debug - Sessions</title>
-    <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-            background: #f5f7fa;
-            padding: 2rem;
-            line-height: 1.6;
-        }
-        .header {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 2rem;
-            border-radius: 12px;
-            margin-bottom: 2rem;
-            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-        }
-        .header h1 {
-            font-size: 2rem;
-            margin-bottom: 0.5rem;
-        }
-        .stats {
-            display: flex;
-            gap: 2rem;
-            margin-top: 1rem;
-        }
-        .stat {
-            background: rgba(255, 255, 255, 0.2);
-            padding: 0.75rem 1.5rem;
-            border-radius: 8px;
-        }
-        .stat-value {
-            font-size: 1.5rem;
-            font-weight: 700;
-        }
-        .stat-label {
-            font-size: 0.875rem;
-            opacity: 0.9;
-        }
-        .user-section {
-            background: white;
-            border-radius: 12px;
-            padding: 1.5rem;
-            margin-bottom: 2rem;
-            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
-        }
-        .user-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            padding-bottom: 1rem;
-            border-bottom: 2px solid #e2e8f0;
-            margin-bottom: 1rem;
-        }
-        .user-id {
-            font-size: 1.25rem;
-            font-weight: 600;
-            color: #2d3748;
-        }
-        .session-count {
-            background: #edf2f7;
-            padding: 0.25rem 0.75rem;
-            border-radius: 6px;
-            font-size: 0.875rem;
-            color: #4a5568;
-        }
-        .session-card {
-            background: #f7fafc;
-            border: 1px solid #e2e8f0;
-            border-radius: 8px;
-            padding: 1.5rem;
-            margin-bottom: 1rem;
-            transition: all 0.2s;
-        }
-        .session-card:hover {
-            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-            border-color: #cbd5e0;
-        }
-        .session-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: start;
-            margin-bottom: 1rem;
-            flex-wrap: wrap;
-            gap: 1rem;
-        }
-        .session-info {
-            flex: 1;
-        }
-        .session-id {
-            font-family: 'Monaco', 'Courier New', monospace;
-            font-size: 0.875rem;
-            color: #718096;
-            margin-bottom: 0.5rem;
-        }
-        .session-title {
-            font-size: 1.125rem;
-            font-weight: 600;
-            color: #2d3748;
-            margin-bottom: 0.5rem;
-        }
-        .session-meta {
-            display: flex;
-            gap: 1rem;
-            flex-wrap: wrap;
-            font-size: 0.875rem;
-            color: #718096;
-        }
-        .badge {
-            display: inline-block;
-            padding: 0.25rem 0.75rem;
-            border-radius: 6px;
-            font-size: 0.75rem;
-            font-weight: 600;
-            text-transform: uppercase;
-        }
-        .badge-core {
-            background: #fed7d7;
-            color: #c53030;
-        }
-        .badge-high {
-            background: #bee3f8;
-            color: #2c5282;
-        }
-        .badge-low {
-            background: #c6f6d5;
-            color: #22543d;
-        }
-        .badge-empty {
-            background: #e2e8f0;
-            color: #4a5568;
-        }
-        .messages-section {
-            margin-top: 1rem;
-        }
-        .messages-header {
-            font-weight: 600;
-            color: #4a5568;
-            margin-bottom: 0.75rem;
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
-        }
-        .message {
-            background: white;
-            border-left: 3px solid #cbd5e0;
-            padding: 1rem;
-            margin-bottom: 0.75rem;
-            border-radius: 4px;
-        }
-        .message-user {
-            border-left-color: #4299e1;
-        }
-        .message-assistant {
-            border-left-color: #48bb78;
-        }
-        .message-tool {
-            border-left-color: #ed8936;
-        }
-        .message-system {
-            border-left-color: #9f7aea;
-        }
-        .message-role {
-            font-weight: 600;
-            color: #2d3748;
-            margin-bottom: 0.5rem;
-            text-transform: capitalize;
-        }
-        .message-content {
-            color: #4a5568;
-            white-space: pre-wrap;
-            word-wrap: break-word;
-        }
-        .message-content pre {
-            background: #f7fafc;
-            padding: 0.75rem;
-            border-radius: 4px;
-            overflow-x: auto;
-            font-size: 0.875rem;
-        }
-        .summary {
-            background: #fffaf0;
-            border-left: 3px solid #f6ad55;
-            padding: 1rem;
-            margin-top: 1rem;
-            border-radius: 4px;
-        }
-        .summary-title {
-            font-weight: 600;
-            color: #744210;
-            margin-bottom: 0.5rem;
-        }
-        .summary-content {
-            color: #975a16;
-        }
-        .empty-state {
-            text-align: center;
-            padding: 3rem;
-            color: #718096;
-        }
-        .empty-state-icon {
-            font-size: 4rem;
-            margin-bottom: 1rem;
-        }
-        .toggle-btn {
-            background: #667eea;
-            color: white;
-            border: none;
-            padding: 0.5rem 1rem;
-            border-radius: 6px;
-            cursor: pointer;
-            font-size: 0.875rem;
-            transition: background 0.2s;
-        }
-        .toggle-btn:hover {
-            background: #5568d3;
-        }
-        .collapsed .messages-section {
-            display: none;
-        }
-        .user-section {
-            position: relative;
-        }
-        .user-sessions {
-            margin-top: 1rem;
-        }
-        .user-section.collapsed .user-sessions {
-            display: none;
-        }
-        .user-toggle-btn {
-            background: #4299e1;
-            color: white;
-            border: none;
-            padding: 0.5rem 1rem;
-            border-radius: 6px;
-            cursor: pointer;
-            font-size: 0.875rem;
-            transition: background 0.2s;
-            margin-left: 1rem;
-        }
-        .user-toggle-btn:hover {
-            background: #3182ce;
-        }
-    </style>
+    <title>%s</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 </head>
-<body>
-    <div class="header">
-        <h1>🔍 Agentize Debug - Sessions</h1>
-        <div class="stats">
-            <div class="stat">
-                <div class="stat-value">` + fmt.Sprintf("%d", totalUsers) + `</div>
-                <div class="stat-label">Users</div>
-            </div>
-            <div class="stat">
-                <div class="stat-value">` + fmt.Sprintf("%d", totalSessions) + `</div>
-                <div class="stat-label">Sessions</div>
-            </div>
-        </div>
-    </div>`
+<body class="bg-light">`, template.HTMLEscapeString(title))
+}
 
-	if totalSessions == 0 {
-		html += `
-    <div class="empty-state">
-        <div class="empty-state-icon">📭</div>
-        <h2>No sessions found</h2>
-        <p>Sessions will appear here once users start interacting with the system.</p>
-    </div>`
-	} else {
-		// Sort users by number of sessions (descending)
-		userIDs := make([]string, 0, len(sessionsByUser))
-		for userID := range sessionsByUser {
-			userIDs = append(userIDs, userID)
-		}
-		sort.Slice(userIDs, func(i, j int) bool {
-			return len(sessionsByUser[userIDs[i]]) > len(sessionsByUser[userIDs[j]])
-		})
-
-		for _, userID := range userIDs {
-			sessions := sessionsByUser[userID]
-			html += fmt.Sprintf(`
-    <div class="user-section collapsed">
-        <div class="user-header">
-            <div style="display: flex; align-items: center; flex: 1;">
-                <div class="user-id">👤 User: %s</div>
-                <div class="session-count">%d session(s)</div>
-            </div>
-            <button class="user-toggle-btn" onclick="this.closest('.user-section').classList.toggle('collapsed')">Show Sessions</button>
-        </div>
-        <div class="user-sessions">`, template.HTMLEscapeString(userID), len(sessions))
-
-			for _, session := range sessions {
-				agentTypeBadge := ""
-				if session.AgentType != "" {
-					badgeClass := "badge-empty"
-					switch session.AgentType {
-					case model.AgentTypeCore:
-						badgeClass = "badge-core"
-					case model.AgentTypeHigh:
-						badgeClass = "badge-high"
-					case model.AgentTypeLow:
-						badgeClass = "badge-low"
-					}
-					agentTypeBadge = fmt.Sprintf(`<span class="badge %s">%s</span>`, badgeClass, string(session.AgentType))
-				}
-
-				title := session.Title
-				if title == "" {
-					title = "Untitled Session"
-				}
-
-				// Calculate message stats
-				activeMsgs := len(session.ConversationState.Msgs)
-				archivedMsgs := len(session.SummarizedMessages)
-				totalMsgs := activeMsgs + archivedMsgs
-				queueMsgs := len(session.ConversationState.Queue)
-				inProgress := session.ConversationState.InProgress
-
-				// Count messages by role
-				userMsgs := 0
-				assistantMsgs := 0
-				toolMsgs := 0
-				systemMsgs := 0
-				for _, msg := range session.ConversationState.Msgs {
-					switch msg.Role {
-					case openai.ChatMessageRoleUser:
-						userMsgs++
-					case openai.ChatMessageRoleAssistant:
-						assistantMsgs++
-					case openai.ChatMessageRoleTool:
-						toolMsgs++
-					case openai.ChatMessageRoleSystem:
-						systemMsgs++
-					}
-				}
-
-				inProgressBadge := ""
-				if inProgress {
-					inProgressBadge = `<span class="badge" style="background: #f6ad55; color: #744210;">In Progress</span> `
-				}
-
-				html += fmt.Sprintf(`
-        <div class="session-card collapsed">
-            <div class="session-header">
-                <div class="session-info">
-                    <div class="session-id">%s</div>
-                    <div class="session-title">%s %s</div>
-                    <div class="session-meta">
-                        %s
-                        <span>Created: %s</span>
-                        <span>Updated: %s (%s)</span>
-                        <span>Messages: %d active + %d archived = %d total</span>
-                        <span>Queue: %d</span>
-                        <span>Nodes: %d</span>
-                        <span>Tool Results: %d</span>
-                    </div>
-                    <div class="session-meta" style="margin-top: 0.5rem; font-size: 0.8rem;">
-                        <span>📨 User: %d</span>
-                        <span>🤖 Assistant: %d</span>
-                        <span>🔧 Tool: %d</span>
-                        <span>⚙️ System: %d</span>
-                    </div>
-                </div>
-                <button class="toggle-btn" onclick="this.closest('.session-card').classList.toggle('collapsed')">Show Messages</button>
-            </div>`,
-					template.HTMLEscapeString(session.SessionID),
-					template.HTMLEscapeString(title),
-					inProgressBadge,
-					agentTypeBadge,
-					FormatTime(session.CreatedAt),
-					FormatTime(session.UpdatedAt),
-					FormatDuration(session.UpdatedAt),
-					activeMsgs,
-					archivedMsgs,
-					totalMsgs,
-					queueMsgs,
-					len(session.NodeDigests),
-					len(session.ToolResults),
-					userMsgs,
-					assistantMsgs,
-					toolMsgs,
-					systemMsgs)
-
-				// Summary section
-				if session.Summary != "" {
-					summarizedAt := ""
-					if !session.SummarizedAt.IsZero() {
-						summarizedAt = fmt.Sprintf(" (Summarized: %s)", FormatTime(session.SummarizedAt))
-					}
-					html += fmt.Sprintf(`
-            <div class="summary">
-                <div class="summary-title">📝 Summary%s</div>
-                <div class="summary-content">%s</div>
-            </div>`, summarizedAt, template.HTMLEscapeString(session.Summary))
-				}
-
-				// Tags
-				if len(session.Tags) > 0 {
-					tagsHTML := ""
-					for _, tag := range session.Tags {
-						tagsHTML += fmt.Sprintf(`<span class="badge badge-empty">%s</span> `, template.HTMLEscapeString(tag))
-					}
-					html += fmt.Sprintf(`
-            <div style="margin-top: 1rem; padding: 0.75rem; background: #f7fafc; border-radius: 6px;">
-                <strong>🏷️ Tags:</strong> %s
-            </div>`, tagsHTML)
-				}
-
-				// Visited Nodes with details
-				if len(session.NodeDigests) > 0 {
-					html += `
-            <div style="margin-top: 1rem; padding: 0.75rem; background: #f7fafc; border-radius: 6px;">
-                <strong>📍 Visited Nodes (%d):</strong>
-                <div style="margin-top: 0.5rem; display: grid; gap: 0.5rem;">`
-					for _, digest := range session.NodeDigests {
-						excerpt := digest.Excerpt
-						if len(excerpt) > 100 {
-							excerpt = excerpt[:100] + "..."
-						}
-						html += fmt.Sprintf(`
-                    <div style="padding: 0.5rem; background: white; border-radius: 4px; border-left: 3px solid #4299e1;">
-                        <div style="font-weight: 600; color: #2d3748;"><code>%s</code></div>
-                        <div style="font-size: 0.875rem; color: #4a5568; margin-top: 0.25rem;">%s</div>
-                        <div style="font-size: 0.75rem; color: #718096; margin-top: 0.25rem;">%s</div>
-                        <div style="font-size: 0.75rem; color: #718096; margin-top: 0.25rem;">Loaded: %s</div>
-                    </div>`,
-							template.HTMLEscapeString(digest.Path),
-							template.HTMLEscapeString(digest.Title),
-							template.HTMLEscapeString(excerpt),
-							FormatTime(digest.LoadedAt))
-					}
-					html += `
-                </div>
-            </div>`
-				}
-
-				// Tool Results with details
-				if len(session.ToolResults) > 0 {
-					html += `
-            <div style="margin-top: 1rem; padding: 0.75rem; background: #f7fafc; border-radius: 6px;">
-                <strong>🔧 Tool Results (%d):</strong>
-                <div style="margin-top: 0.5rem; display: grid; gap: 0.5rem;">`
-					for toolID, result := range session.ToolResults {
-						resultPreview := result
-						if len(resultPreview) > 200 {
-							resultPreview = resultPreview[:200] + "..."
-						}
-						html += fmt.Sprintf(`
-                    <div style="padding: 0.5rem; background: white; border-radius: 4px; border-left: 3px solid #ed8936;">
-                        <div style="font-weight: 600; color: #2d3748; font-family: monospace; font-size: 0.875rem;">%s</div>
-                        <div style="font-size: 0.875rem; color: #4a5568; margin-top: 0.25rem; white-space: pre-wrap; word-wrap: break-word;">%s</div>
-                    </div>`,
-							template.HTMLEscapeString(toolID),
-							template.HTMLEscapeString(resultPreview))
-					}
-					html += `
-                </div>
-            </div>`
-				}
-
-				// Queue messages
-				if queueMsgs > 0 {
-					html += `
-            <div style="margin-top: 1rem; padding: 0.75rem; background: #fffaf0; border-radius: 6px; border-left: 3px solid #f6ad55;">
-                <strong>📬 Queue Messages (%d):</strong>
-                <div style="margin-top: 0.5rem;">`
-					for _, msg := range session.ConversationState.Queue {
-						html += fmt.Sprintf(`
-                    <div style="padding: 0.5rem; background: white; border-radius: 4px; margin-bottom: 0.5rem;">
-                        <div style="font-weight: 600; color: #744210;">%s</div>
-                        <div style="color: #975a16; white-space: pre-wrap;">%s</div>
-                    </div>`,
-							template.HTMLEscapeString(msg.Role),
-							template.HTMLEscapeString(msg.Content))
-					}
-					html += `
-                </div>
-            </div>`
-				}
-
-				html += fmt.Sprintf(`
-            <div class="messages-section">
-                <div class="messages-header">
-                    💬 Active Messages (%d)
-                </div>`, activeMsgs)
-
-				if activeMsgs == 0 {
-					html += `
-                <div class="empty-state" style="padding: 1rem;">
-                    No active messages in this session
-                </div>`
-				} else {
-					for i, msg := range session.ConversationState.Msgs {
-						msgIndex := i + 1
-						messageClass := ""
-						switch msg.Role {
-						case openai.ChatMessageRoleUser:
-							messageClass = "message-user"
-						case openai.ChatMessageRoleAssistant:
-							messageClass = "message-assistant"
-						case openai.ChatMessageRoleTool:
-							messageClass = "message-tool"
-						case openai.ChatMessageRoleSystem:
-							messageClass = "message-system"
-						}
-
-						html += fmt.Sprintf(`
-                <div class="message %s">
-                    <div class="message-role">#%d - %s</div>
-                    <div class="message-content">%s</div>
-                </div>`, messageClass, msgIndex, template.HTMLEscapeString(msg.Role), FormatMessage(msg))
-					}
-				}
-
-				// Archived messages
-				if archivedMsgs > 0 {
-					html += fmt.Sprintf(`
-                <div style="margin-top: 2rem; padding-top: 1rem; border-top: 2px solid #e2e8f0;">
-                    <div class="messages-header">
-                        📦 Archived Messages (%d)
-                    </div>`, archivedMsgs)
-					for i, msg := range session.SummarizedMessages {
-						msgIndex := i + 1
-						messageClass := ""
-						switch msg.Role {
-						case openai.ChatMessageRoleUser:
-							messageClass = "message-user"
-						case openai.ChatMessageRoleAssistant:
-							messageClass = "message-assistant"
-						case openai.ChatMessageRoleTool:
-							messageClass = "message-tool"
-						case openai.ChatMessageRoleSystem:
-							messageClass = "message-system"
-						}
-						html += fmt.Sprintf(`
-                    <div class="message %s" style="opacity: 0.7;">
-                        <div class="message-role">#%d (Archived) - %s</div>
-                        <div class="message-content">%s</div>
-                    </div>`, messageClass, msgIndex, template.HTMLEscapeString(msg.Role), FormatMessage(msg))
-					}
-					html += `
-                </div>`
-				}
-
-				html += `
-            </div>
-        </div>`
-			}
-
-			html += `
-        </div>
-    </div>`
-		}
-	}
-
-	html += `
+// generateBootstrapFooter generates HTML footer
+func generateBootstrapFooter() string {
+	return `
     <script>
         // Auto-refresh every 30 seconds
         setTimeout(function() {
@@ -719,6 +228,1057 @@ func (h *DebugHandler) GenerateHTML() (string, error) {
     </script>
 </body>
 </html>`
+}
+
+// extractToolCallsFromSession extracts tool calls from session messages
+func (h *DebugHandler) extractToolCallsFromSession(session *model.Session) []ToolCallInfo {
+	var toolCalls []ToolCallInfo
+
+	// Extract from active messages
+	for _, msg := range session.ConversationState.Msgs {
+		if len(msg.ToolCalls) > 0 {
+			for _, tc := range msg.ToolCalls {
+				argsJSON, _ := json.MarshalIndent(tc.Function.Arguments, "", "  ")
+				// Find corresponding tool result
+				result := ""
+				if toolResult, ok := session.ToolResults[tc.ID]; ok {
+					result = toolResult
+				}
+
+				toolCalls = append(toolCalls, ToolCallInfo{
+					SessionID:    session.SessionID,
+					UserID:       session.UserID,
+					MessageID:    "", // We don't have message ID in ChatCompletionMessage
+					ToolCallID:   tc.ID,
+					FunctionName: tc.Function.Name,
+					Arguments:    string(argsJSON),
+					Result:       result,
+					CreatedAt:    session.UpdatedAt, // Approximate
+				})
+			}
+		}
+	}
+
+	return toolCalls
+}
+
+// extractToolCallsFromMessages extracts tool calls from database messages
+func (h *DebugHandler) extractToolCallsFromMessages(messages []*model.Message, session *model.Session) []ToolCallInfo {
+	var toolCalls []ToolCallInfo
+	debugStore := h.store.(DebugStore)
+
+	// Get session to access ToolResults
+	if session == nil && len(messages) > 0 {
+		sess, err := debugStore.GetSession(messages[0].SessionID)
+		if err == nil {
+			session = sess
+		}
+	}
+
+	for _, msg := range messages {
+		if msg.HasToolCalls {
+			// We need to get the actual ChatCompletionMessage to access ToolCalls
+			// For now, we'll mark it and try to get from session
+			if session != nil {
+				// Look for messages with tool calls in session
+				for _, smsg := range session.ConversationState.Msgs {
+					if len(smsg.ToolCalls) > 0 {
+						for _, tc := range smsg.ToolCalls {
+							argsJSON, _ := json.MarshalIndent(tc.Function.Arguments, "", "  ")
+							result := ""
+							if toolResult, ok := session.ToolResults[tc.ID]; ok {
+								result = toolResult
+							}
+
+							toolCalls = append(toolCalls, ToolCallInfo{
+								SessionID:    msg.SessionID,
+								UserID:       msg.UserID,
+								MessageID:    msg.MessageID,
+								ToolCallID:   tc.ID,
+								FunctionName: tc.Function.Name,
+								Arguments:    string(argsJSON),
+								Result:       result,
+								CreatedAt:    msg.CreatedAt,
+							})
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return toolCalls
+}
+
+// GenerateDashboardHTML generates the dashboard HTML page
+func (h *DebugHandler) GenerateDashboardHTML() (string, error) {
+	debugStore := h.store.(DebugStore)
+
+	totalUsers, err := h.GetUserCount()
+	if err != nil {
+		return "", fmt.Errorf("failed to get user count: %w", err)
+	}
+
+	totalSessions, err := h.GetSessionCount()
+	if err != nil {
+		return "", fmt.Errorf("failed to get session count: %w", err)
+	}
+
+	allMessages, err := debugStore.GetAllMessages()
+	if err != nil {
+		return "", fmt.Errorf("failed to get messages: %w", err)
+	}
+	totalMessages := len(allMessages)
+
+	allFiles, err := debugStore.GetAllOpenedFiles()
+	if err != nil {
+		return "", fmt.Errorf("failed to get files: %w", err)
+	}
+	totalFiles := len(allFiles)
+
+	// Count tool calls
+	totalToolCalls := 0
+	for _, msg := range allMessages {
+		if msg.HasToolCalls {
+			totalToolCalls++
+		}
+	}
+
+	html := generateBootstrapHeader("Agentize Debug - Dashboard")
+	html += generateNavigationBar("/agentize/debug")
+	html += `<div class="container mt-4">`
+
+	// Stats cards
+	html += `<div class="row mb-4">
+        <div class="col-md-2">
+            <div class="card text-center">
+                <div class="card-body">
+                    <h2 class="card-title text-primary">` + fmt.Sprintf("%d", totalUsers) + `</h2>
+                    <p class="card-text">👤 Users</p>
+                    <a href="/agentize/debug/users" class="btn btn-sm btn-outline-primary">View</a>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-2">
+            <div class="card text-center">
+                <div class="card-body">
+                    <h2 class="card-title text-success">` + fmt.Sprintf("%d", totalSessions) + `</h2>
+                    <p class="card-text">📊 Sessions</p>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-2">
+            <div class="card text-center">
+                <div class="card-body">
+                    <h2 class="card-title text-info">` + fmt.Sprintf("%d", totalMessages) + `</h2>
+                    <p class="card-text">💬 Messages</p>
+                    <a href="/agentize/debug/messages" class="btn btn-sm btn-outline-info">View</a>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-2">
+            <div class="card text-center">
+                <div class="card-body">
+                    <h2 class="card-title text-warning">` + fmt.Sprintf("%d", totalFiles) + `</h2>
+                    <p class="card-text">📁 Files</p>
+                    <a href="/agentize/debug/files" class="btn btn-sm btn-outline-warning">View</a>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-2">
+            <div class="card text-center">
+                <div class="card-body">
+                    <h2 class="card-title text-danger">` + fmt.Sprintf("%d", totalToolCalls) + `</h2>
+                    <p class="card-text">🔧 Tool Calls</p>
+                    <a href="/agentize/debug/tool-calls" class="btn btn-sm btn-outline-danger">View</a>
+                </div>
+            </div>
+        </div>
+    </div>`
+
+	// Quick links
+	html += `<div class="row">
+        <div class="col-12">
+            <div class="card">
+                <div class="card-header">
+                    <h5>Quick Links</h5>
+                </div>
+                <div class="card-body">
+                    <div class="list-group">
+                        <a href="/agentize/debug/users" class="list-group-item list-group-item-action">
+                            <div class="d-flex w-100 justify-content-between">
+                                <h6 class="mb-1">👤 View All Users</h6>
+                            </div>
+                            <p class="mb-1">Browse all users and their sessions</p>
+                        </a>
+                        <a href="/agentize/debug/messages" class="list-group-item list-group-item-action">
+                            <div class="d-flex w-100 justify-content-between">
+                                <h6 class="mb-1">💬 View All Messages</h6>
+                            </div>
+                            <p class="mb-1">See all messages across all sessions</p>
+                        </a>
+                        <a href="/agentize/debug/files" class="list-group-item list-group-item-action">
+                            <div class="d-flex w-100 justify-content-between">
+                                <h6 class="mb-1">📁 View All Opened Files</h6>
+                            </div>
+                            <p class="mb-1">Browse all files that were opened</p>
+                        </a>
+                        <a href="/agentize/debug/tool-calls" class="list-group-item list-group-item-action">
+                            <div class="d-flex w-100 justify-content-between">
+                                <h6 class="mb-1">🔧 View All Tool Calls</h6>
+                            </div>
+                            <p class="mb-1">See all tool calls and their results</p>
+                        </a>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>`
+
+	html += `</div>`
+	html += generateBootstrapFooter()
+
+	return html, nil
+}
+
+// GenerateHTML generates the debug HTML page (legacy - redirects to dashboard)
+func (h *DebugHandler) GenerateHTML() (string, error) {
+	return h.GenerateDashboardHTML()
+}
+
+// GenerateUsersHTML generates the users list HTML page
+func (h *DebugHandler) GenerateUsersHTML() (string, error) {
+	debugStore := h.store.(DebugStore)
+
+	users, err := debugStore.GetAllUsers()
+	if err != nil {
+		return "", fmt.Errorf("failed to get users: %w", err)
+	}
+
+	sessionsByUser, err := h.GetAllSessions()
+	if err != nil {
+		return "", fmt.Errorf("failed to get sessions: %w", err)
+	}
+
+	html := generateBootstrapHeader("Agentize Debug - Users")
+	html += generateNavigationBar("/agentize/debug/users")
+	html += `<div class="container mt-4">
+        <div class="card">
+            <div class="card-header">
+                <h4>👤 All Users (` + fmt.Sprintf("%d", len(users)) + `)</h4>
+            </div>
+            <div class="card-body">`
+
+	if len(users) == 0 {
+		html += `<div class="alert alert-info">No users found.</div>`
+	} else {
+		html += `<div class="table-responsive">
+                <table class="table table-striped table-hover">
+                    <thead>
+                        <tr>
+                            <th>User ID</th>
+                            <th>Sessions</th>
+                            <th>Ban Status</th>
+                            <th>Nonsense Count</th>
+                            <th>Created At</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>`
+
+		for _, user := range users {
+			sessionCount := len(sessionsByUser[user.UserID])
+			banStatus := "✅ Active"
+			if user.IsCurrentlyBanned() {
+				banStatus = "🚫 Banned"
+				if !user.BanUntil.IsZero() {
+					banStatus += fmt.Sprintf(" (until %s)", FormatTime(user.BanUntil))
+				} else {
+					banStatus += " (permanent)"
+				}
+			}
+
+			html += fmt.Sprintf(`
+                        <tr>
+                            <td><code>%s</code></td>
+                            <td><span class="badge bg-primary">%d</span></td>
+                            <td>%s</td>
+                            <td><span class="badge bg-warning">%d</span></td>
+                            <td>%s</td>
+                            <td><a href="/agentize/debug/users/%s" class="btn btn-sm btn-outline-primary">View Details</a></td>
+                        </tr>`,
+				template.HTMLEscapeString(user.UserID),
+				sessionCount,
+				banStatus,
+				user.NonsenseCount,
+				FormatTime(user.CreatedAt),
+				template.URLQueryEscaper(user.UserID))
+		}
+
+		html += `</tbody>
+                </table>
+            </div>`
+	}
+
+	html += `</div>
+        </div>
+    </div>`
+	html += generateBootstrapFooter()
+
+	return html, nil
+}
+
+// GenerateUserDetailHTML generates the user detail HTML page
+func (h *DebugHandler) GenerateUserDetailHTML(userID string) (string, error) {
+	debugStore := h.store.(DebugStore)
+
+	user, err := debugStore.GetUser(userID)
+	if err != nil {
+		return "", fmt.Errorf("failed to get user: %w", err)
+	}
+	if user == nil {
+		return "", fmt.Errorf("user not found: %s", userID)
+	}
+
+	sessionsByUser, err := h.GetAllSessions()
+	if err != nil {
+		return "", fmt.Errorf("failed to get sessions: %w", err)
+	}
+	userSessions := sessionsByUser[userID]
+
+	messages, err := debugStore.GetMessagesByUser(userID)
+	if err != nil {
+		return "", fmt.Errorf("failed to get messages: %w", err)
+	}
+
+	// Get opened files for user
+	allFiles, err := debugStore.GetAllOpenedFiles()
+	if err != nil {
+		return "", fmt.Errorf("failed to get files: %w", err)
+	}
+	var userFiles []*model.OpenedFile
+	for _, f := range allFiles {
+		if f.UserID == userID {
+			userFiles = append(userFiles, f)
+		}
+	}
+
+	html := generateBootstrapHeader("Agentize Debug - User: " + userID)
+	html += generateNavigationBar("/agentize/debug/users")
+	html += `<div class="container mt-4">
+        <nav aria-label="breadcrumb">
+            <ol class="breadcrumb">
+                <li class="breadcrumb-item"><a href="/agentize/debug">Dashboard</a></li>
+                <li class="breadcrumb-item"><a href="/agentize/debug/users">Users</a></li>
+                <li class="breadcrumb-item active">` + template.HTMLEscapeString(userID) + `</li>
+            </ol>
+        </nav>`
+
+	// User info card
+	banStatus := "✅ Active"
+	if user.IsCurrentlyBanned() {
+		banStatus = "🚫 Banned"
+		if !user.BanUntil.IsZero() {
+			banStatus += fmt.Sprintf(" (until %s)", FormatTime(user.BanUntil))
+		} else {
+			banStatus += " (permanent)"
+		}
+		if user.BanMessage != "" {
+			banStatus += ": " + template.HTMLEscapeString(user.BanMessage)
+		}
+	}
+
+	html += fmt.Sprintf(`
+        <div class="card mb-4">
+            <div class="card-header">
+                <h4>👤 User Information</h4>
+            </div>
+            <div class="card-body">
+                <div class="row">
+                    <div class="col-md-6">
+                        <p><strong>User ID:</strong> <code>%s</code></p>
+                        <p><strong>Status:</strong> %s</p>
+                        <p><strong>Nonsense Count:</strong> <span class="badge bg-warning">%d</span></p>
+                    </div>
+                    <div class="col-md-6">
+                        <p><strong>Created At:</strong> %s</p>
+                        <p><strong>Updated At:</strong> %s</p>
+                        <p><strong>Last Nonsense:</strong> %s</p>
+                    </div>
+                </div>
+            </div>
+        </div>`,
+		template.HTMLEscapeString(user.UserID),
+		banStatus,
+		user.NonsenseCount,
+		FormatTime(user.CreatedAt),
+		FormatTime(user.UpdatedAt),
+		FormatTime(user.LastNonsenseTime))
+
+	// Sessions card
+	html += fmt.Sprintf(`
+        <div class="card mb-4">
+            <div class="card-header">
+                <h5>📊 Sessions (%d)</h5>
+            </div>
+            <div class="card-body">`, len(userSessions))
+
+	if len(userSessions) == 0 {
+		html += `<div class="alert alert-info">No sessions found for this user.</div>`
+	} else {
+		html += `<div class="list-group">`
+		for _, session := range userSessions {
+			title := session.Title
+			if title == "" {
+				title = "Untitled Session"
+			}
+			html += fmt.Sprintf(`
+                <a href="/agentize/debug/sessions/%s" class="list-group-item list-group-item-action">
+                    <div class="d-flex w-100 justify-content-between">
+                        <h6 class="mb-1">%s</h6>
+                        <small>%s</small>
+                    </div>
+                    <p class="mb-1"><code>%s</code></p>
+                    <small>Updated: %s</small>
+                </a>`,
+				template.URLQueryEscaper(session.SessionID),
+				template.HTMLEscapeString(title),
+				string(session.AgentType),
+				template.HTMLEscapeString(session.SessionID),
+				FormatTime(session.UpdatedAt))
+		}
+		html += `</div>`
+	}
+
+	html += `</div>
+        </div>`
+
+	// Messages card
+	html += fmt.Sprintf(`
+        <div class="card mb-4">
+            <div class="card-header">
+                <h5>💬 Messages (%d) <a href="/agentize/debug/messages?user=%s" class="btn btn-sm btn-outline-primary float-end">View All</a></h5>
+            </div>
+            <div class="card-body">`, len(messages), template.URLQueryEscaper(userID))
+
+	if len(messages) == 0 {
+		html += `<div class="alert alert-info">No messages found for this user.</div>`
+	} else {
+		html += `<div class="table-responsive">
+                <table class="table table-sm">
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>Role</th>
+                            <th>Content</th>
+                            <th>Session</th>
+                        </tr>
+                    </thead>
+                    <tbody>`
+
+		// Show last 10 messages
+		displayCount := len(messages)
+		if displayCount > 10 {
+			displayCount = 10
+		}
+		for i := len(messages) - displayCount; i < len(messages); i++ {
+			msg := messages[i]
+			content := msg.Content
+			if len(content) > 100 {
+				content = content[:100] + "..."
+			}
+			html += fmt.Sprintf(`
+                        <tr>
+                            <td>%s</td>
+                            <td><span class="badge bg-secondary">%s</span></td>
+                            <td>%s</td>
+                            <td><a href="/agentize/debug/sessions/%s">%s</a></td>
+                        </tr>`,
+				FormatTime(msg.CreatedAt),
+				template.HTMLEscapeString(msg.Role),
+				template.HTMLEscapeString(content),
+				template.URLQueryEscaper(msg.SessionID),
+				template.HTMLEscapeString(msg.SessionID[:8]+"..."))
+		}
+
+		html += `</tbody>
+                </table>
+            </div>`
+	}
+
+	html += `</div>
+        </div>`
+
+	// Files card
+	html += fmt.Sprintf(`
+        <div class="card mb-4">
+            <div class="card-header">
+                <h5>📁 Opened Files (%d)</h5>
+            </div>
+            <div class="card-body">`, len(userFiles))
+
+	if len(userFiles) == 0 {
+		html += `<div class="alert alert-info">No opened files found for this user.</div>`
+	} else {
+		html += `<div class="table-responsive">
+                <table class="table table-sm">
+                    <thead>
+                        <tr>
+                            <th>File Path</th>
+                            <th>Status</th>
+                            <th>Opened At</th>
+                            <th>Session</th>
+                        </tr>
+                    </thead>
+                    <tbody>`
+
+		for _, f := range userFiles {
+			status := "✅ Open"
+			if !f.IsOpen {
+				status = "❌ Closed"
+			}
+			html += fmt.Sprintf(`
+                        <tr>
+                            <td><code>%s</code></td>
+                            <td>%s</td>
+                            <td>%s</td>
+                            <td><a href="/agentize/debug/sessions/%s">%s</a></td>
+                        </tr>`,
+				template.HTMLEscapeString(f.FilePath),
+				status,
+				FormatTime(f.OpenedAt),
+				template.URLQueryEscaper(f.SessionID),
+				template.HTMLEscapeString(f.SessionID[:8]+"..."))
+		}
+
+		html += `</tbody>
+                </table>
+            </div>`
+	}
+
+	html += `</div>
+        </div>
+    </div>`
+	html += generateBootstrapFooter()
+
+	return html, nil
+}
+
+// GenerateSessionDetailHTML generates the session detail HTML page
+func (h *DebugHandler) GenerateSessionDetailHTML(sessionID string) (string, error) {
+	debugStore := h.store.(DebugStore)
+
+	session, err := debugStore.GetSession(sessionID)
+	if err != nil {
+		return "", fmt.Errorf("failed to get session: %w", err)
+	}
+	if session == nil {
+		return "", fmt.Errorf("session not found: %s", sessionID)
+	}
+
+	messages, err := debugStore.GetMessagesBySession(sessionID)
+	if err != nil {
+		return "", fmt.Errorf("failed to get messages: %w", err)
+	}
+
+	files, err := debugStore.GetOpenedFilesBySession(sessionID)
+	if err != nil {
+		return "", fmt.Errorf("failed to get files: %w", err)
+	}
+
+	toolCalls := h.extractToolCallsFromSession(session)
+
+	html := generateBootstrapHeader("Agentize Debug - Session: " + sessionID)
+	html += generateNavigationBar("/agentize/debug")
+	html += `<div class="container mt-4">
+        <nav aria-label="breadcrumb">
+            <ol class="breadcrumb">
+                <li class="breadcrumb-item"><a href="/agentize/debug">Dashboard</a></li>
+                <li class="breadcrumb-item"><a href="/agentize/debug/users">Users</a></li>
+                <li class="breadcrumb-item"><a href="/agentize/debug/users/` + template.URLQueryEscaper(session.UserID) + `">` + template.HTMLEscapeString(session.UserID) + `</a></li>
+                <li class="breadcrumb-item active">Session</li>
+            </ol>
+        </nav>`
+
+	// Session info card
+	title := session.Title
+	if title == "" {
+		title = "Untitled Session"
+	}
+	agentTypeBadge := ""
+	if session.AgentType != "" {
+		badgeClass := "bg-secondary"
+		switch session.AgentType {
+		case model.AgentTypeCore:
+			badgeClass = "bg-danger"
+		case model.AgentTypeHigh:
+			badgeClass = "bg-primary"
+		case model.AgentTypeLow:
+			badgeClass = "bg-success"
+		}
+		agentTypeBadge = fmt.Sprintf(`<span class="badge %s">%s</span>`, badgeClass, string(session.AgentType))
+	}
+
+	inProgressBadge := ""
+	if session.ConversationState.InProgress {
+		inProgressBadge = `<span class="badge bg-warning">In Progress</span> `
+	}
+
+	html += fmt.Sprintf(`
+        <div class="card mb-4">
+            <div class="card-header">
+                <h4>📊 Session Information</h4>
+            </div>
+            <div class="card-body">
+                <div class="row">
+                    <div class="col-md-6">
+                        <p><strong>Session ID:</strong> <code>%s</code></p>
+                        <p><strong>Title:</strong> %s</p>
+                        <p><strong>Agent Type:</strong> %s %s</p>
+                        <p><strong>User:</strong> <a href="/agentize/debug/users/%s">%s</a></p>
+                    </div>
+                    <div class="col-md-6">
+                        <p><strong>Created At:</strong> %s</p>
+                        <p><strong>Updated At:</strong> %s (%s)</p>
+                        <p><strong>Messages:</strong> %d active + %d archived</p>
+                        <p><strong>Opened Files:</strong> %d</p>
+                    </div>
+                </div>
+            </div>
+        </div>`,
+		template.HTMLEscapeString(session.SessionID),
+		template.HTMLEscapeString(title),
+		inProgressBadge,
+		agentTypeBadge,
+		template.URLQueryEscaper(session.UserID),
+		template.HTMLEscapeString(session.UserID),
+		FormatTime(session.CreatedAt),
+		FormatTime(session.UpdatedAt),
+		FormatDuration(session.UpdatedAt),
+		len(session.ConversationState.Msgs),
+		len(session.SummarizedMessages),
+		len(files))
+
+	// Messages card
+	html += fmt.Sprintf(`
+        <div class="card mb-4">
+            <div class="card-header">
+                <h5>💬 Messages (%d)</h5>
+            </div>
+            <div class="card-body">`, len(messages))
+
+	if len(messages) == 0 {
+		html += `<div class="alert alert-info">No messages found for this session.</div>`
+	} else {
+		html += `<div class="list-group">`
+		for _, msg := range messages {
+			content := msg.Content
+			if len(content) > 200 {
+				content = content[:200] + "..."
+			}
+			badgeClass := "bg-secondary"
+			switch msg.Role {
+			case openai.ChatMessageRoleUser:
+				badgeClass = "bg-primary"
+			case openai.ChatMessageRoleAssistant:
+				badgeClass = "bg-success"
+			case openai.ChatMessageRoleTool:
+				badgeClass = "bg-warning"
+			case openai.ChatMessageRoleSystem:
+				badgeClass = "bg-info"
+			}
+
+			toolCallBadge := ""
+			if msg.HasToolCalls {
+				toolCallBadge = ` <span class="badge bg-danger">Has Tool Calls</span>`
+			}
+
+			html += fmt.Sprintf(`
+                <div class="list-group-item">
+                    <div class="d-flex w-100 justify-content-between">
+                        <h6 class="mb-1"><span class="badge %s">%s</span>%s</h6>
+                        <small>%s</small>
+                    </div>
+                    <p class="mb-1">%s</p>
+                    <small>Message ID: <code>%s</code></small>
+                </div>`,
+				badgeClass,
+				template.HTMLEscapeString(msg.Role),
+				toolCallBadge,
+				FormatTime(msg.CreatedAt),
+				template.HTMLEscapeString(content),
+				template.HTMLEscapeString(msg.MessageID))
+		}
+		html += `</div>`
+	}
+
+	html += `</div>
+        </div>`
+
+	// Tool Calls card
+	html += fmt.Sprintf(`
+        <div class="card mb-4">
+            <div class="card-header">
+                <h5>🔧 Tool Calls (%d) <a href="/agentize/debug/tool-calls?session=%s" class="btn btn-sm btn-outline-danger float-end">View All</a></h5>
+            </div>
+            <div class="card-body">`, len(toolCalls), template.URLQueryEscaper(sessionID))
+
+	if len(toolCalls) == 0 {
+		html += `<div class="alert alert-info">No tool calls found for this session.</div>`
+	} else {
+		html += `<div class="table-responsive">
+                <table class="table table-sm">
+                    <thead>
+                        <tr>
+                            <th>Function</th>
+                            <th>Arguments</th>
+                            <th>Result</th>
+                            <th>Time</th>
+                        </tr>
+                    </thead>
+                    <tbody>`
+
+		for _, tc := range toolCalls {
+			args := tc.Arguments
+			if len(args) > 150 {
+				args = args[:150] + "..."
+			}
+			result := tc.Result
+			if len(result) > 150 {
+				result = result[:150] + "..."
+			}
+			html += fmt.Sprintf(`
+                        <tr>
+                            <td><code>%s</code></td>
+                            <td><pre class="mb-0" style="max-width: 300px; overflow: auto;">%s</pre></td>
+                            <td><pre class="mb-0" style="max-width: 300px; overflow: auto;">%s</pre></td>
+                            <td>%s</td>
+                        </tr>`,
+				template.HTMLEscapeString(tc.FunctionName),
+				template.HTMLEscapeString(args),
+				template.HTMLEscapeString(result),
+				FormatTime(tc.CreatedAt))
+		}
+
+		html += `</tbody>
+                </table>
+            </div>`
+	}
+
+	html += `</div>
+        </div>`
+
+	// Files card
+	html += fmt.Sprintf(`
+        <div class="card mb-4">
+            <div class="card-header">
+                <h5>📁 Opened Files (%d)</h5>
+            </div>
+            <div class="card-body">`, len(files))
+
+	if len(files) == 0 {
+		html += `<div class="alert alert-info">No opened files found for this session.</div>`
+	} else {
+		html += `<div class="table-responsive">
+                <table class="table table-sm">
+                    <thead>
+                        <tr>
+                            <th>File Path</th>
+                            <th>File Name</th>
+                            <th>Status</th>
+                            <th>Opened At</th>
+                            <th>Closed At</th>
+                        </tr>
+                    </thead>
+                    <tbody>`
+
+		for _, f := range files {
+			status := "✅ Open"
+			if !f.IsOpen {
+				status = "❌ Closed"
+			}
+			closedAt := "N/A"
+			if !f.ClosedAt.IsZero() {
+				closedAt = FormatTime(f.ClosedAt)
+			}
+			html += fmt.Sprintf(`
+                        <tr>
+                            <td><code>%s</code></td>
+                            <td>%s</td>
+                            <td>%s</td>
+                            <td>%s</td>
+                            <td>%s</td>
+                        </tr>`,
+				template.HTMLEscapeString(f.FilePath),
+				template.HTMLEscapeString(f.FileName),
+				status,
+				FormatTime(f.OpenedAt),
+				closedAt)
+		}
+
+		html += `</tbody>
+                </table>
+            </div>`
+	}
+
+	html += `</div>
+        </div>
+    </div>`
+	html += generateBootstrapFooter()
+
+	return html, nil
+}
+
+// GenerateMessagesHTML generates the messages list HTML page
+func (h *DebugHandler) GenerateMessagesHTML() (string, error) {
+	debugStore := h.store.(DebugStore)
+
+	messages, err := debugStore.GetAllMessages()
+	if err != nil {
+		return "", fmt.Errorf("failed to get messages: %w", err)
+	}
+
+	html := generateBootstrapHeader("Agentize Debug - Messages")
+	html += generateNavigationBar("/agentize/debug/messages")
+	html += `<div class="container mt-4">
+        <div class="card">
+            <div class="card-header">
+                <h4>💬 All Messages (` + fmt.Sprintf("%d", len(messages)) + `)</h4>
+            </div>
+            <div class="card-body">`
+
+	if len(messages) == 0 {
+		html += `<div class="alert alert-info">No messages found.</div>`
+	} else {
+		html += `<div class="table-responsive">
+                <table class="table table-striped table-hover">
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>Role</th>
+                            <th>Content</th>
+                            <th>User</th>
+                            <th>Session</th>
+                            <th>Tool Calls</th>
+                        </tr>
+                    </thead>
+                    <tbody>`
+
+		for _, msg := range messages {
+			content := msg.Content
+			if len(content) > 150 {
+				content = content[:150] + "..."
+			}
+			badgeClass := "bg-secondary"
+			switch msg.Role {
+			case openai.ChatMessageRoleUser:
+				badgeClass = "bg-primary"
+			case openai.ChatMessageRoleAssistant:
+				badgeClass = "bg-success"
+			case openai.ChatMessageRoleTool:
+				badgeClass = "bg-warning"
+			case openai.ChatMessageRoleSystem:
+				badgeClass = "bg-info"
+			}
+
+			toolCallBadge := ""
+			if msg.HasToolCalls {
+				toolCallBadge = `<span class="badge bg-danger">Yes</span>`
+			} else {
+				toolCallBadge = `<span class="badge bg-secondary">No</span>`
+			}
+
+			html += fmt.Sprintf(`
+                        <tr>
+                            <td>%s</td>
+                            <td><span class="badge %s">%s</span></td>
+                            <td>%s</td>
+                            <td><a href="/agentize/debug/users/%s">%s</a></td>
+                            <td><a href="/agentize/debug/sessions/%s">%s</a></td>
+                            <td>%s</td>
+                        </tr>`,
+				FormatTime(msg.CreatedAt),
+				badgeClass,
+				template.HTMLEscapeString(msg.Role),
+				template.HTMLEscapeString(content),
+				template.URLQueryEscaper(msg.UserID),
+				template.HTMLEscapeString(msg.UserID[:min(20, len(msg.UserID))]+"..."),
+				template.URLQueryEscaper(msg.SessionID),
+				template.HTMLEscapeString(msg.SessionID[:min(20, len(msg.SessionID))]+"..."),
+				toolCallBadge)
+		}
+
+		html += `</tbody>
+                </table>
+            </div>`
+	}
+
+	html += `</div>
+        </div>
+    </div>`
+	html += generateBootstrapFooter()
+
+	return html, nil
+}
+
+// GenerateFilesHTML generates the opened files list HTML page
+func (h *DebugHandler) GenerateFilesHTML() (string, error) {
+	debugStore := h.store.(DebugStore)
+
+	files, err := debugStore.GetAllOpenedFiles()
+	if err != nil {
+		return "", fmt.Errorf("failed to get files: %w", err)
+	}
+
+	html := generateBootstrapHeader("Agentize Debug - Opened Files")
+	html += generateNavigationBar("/agentize/debug/files")
+	html += `<div class="container mt-4">
+        <div class="card">
+            <div class="card-header">
+                <h4>📁 All Opened Files (` + fmt.Sprintf("%d", len(files)) + `)</h4>
+            </div>
+            <div class="card-body">`
+
+	if len(files) == 0 {
+		html += `<div class="alert alert-info">No opened files found.</div>`
+	} else {
+		html += `<div class="table-responsive">
+                <table class="table table-striped table-hover">
+                    <thead>
+                        <tr>
+                            <th>File Path</th>
+                            <th>File Name</th>
+                            <th>Status</th>
+                            <th>Opened At</th>
+                            <th>Closed At</th>
+                            <th>User</th>
+                            <th>Session</th>
+                        </tr>
+                    </thead>
+                    <tbody>`
+
+		for _, f := range files {
+			status := "✅ Open"
+			if !f.IsOpen {
+				status = "❌ Closed"
+			}
+			closedAt := "N/A"
+			if !f.ClosedAt.IsZero() {
+				closedAt = FormatTime(f.ClosedAt)
+			}
+			html += fmt.Sprintf(`
+                        <tr>
+                            <td><code>%s</code></td>
+                            <td>%s</td>
+                            <td>%s</td>
+                            <td>%s</td>
+                            <td>%s</td>
+                            <td><a href="/agentize/debug/users/%s">%s</a></td>
+                            <td><a href="/agentize/debug/sessions/%s">%s</a></td>
+                        </tr>`,
+				template.HTMLEscapeString(f.FilePath),
+				template.HTMLEscapeString(f.FileName),
+				status,
+				FormatTime(f.OpenedAt),
+				closedAt,
+				template.URLQueryEscaper(f.UserID),
+				template.HTMLEscapeString(f.UserID[:min(20, len(f.UserID))]+"..."),
+				template.URLQueryEscaper(f.SessionID),
+				template.HTMLEscapeString(f.SessionID[:min(20, len(f.SessionID))]+"..."))
+		}
+
+		html += `</tbody>
+                </table>
+            </div>`
+	}
+
+	html += `</div>
+        </div>
+    </div>`
+	html += generateBootstrapFooter()
+
+	return html, nil
+}
+
+// GenerateToolCallsHTML generates the tool calls list HTML page
+func (h *DebugHandler) GenerateToolCallsHTML() (string, error) {
+	// Extract tool calls from all sessions
+	var allToolCalls []ToolCallInfo
+	sessionsByUser, err := h.GetAllSessions()
+	if err != nil {
+		return "", fmt.Errorf("failed to get sessions: %w", err)
+	}
+
+	for _, sessions := range sessionsByUser {
+		for _, session := range sessions {
+			toolCalls := h.extractToolCallsFromSession(session)
+			allToolCalls = append(allToolCalls, toolCalls...)
+		}
+	}
+
+	html := generateBootstrapHeader("Agentize Debug - Tool Calls")
+	html += generateNavigationBar("/agentize/debug/tool-calls")
+	html += `<div class="container mt-4">
+        <div class="card">
+            <div class="card-header">
+                <h4>🔧 All Tool Calls (` + fmt.Sprintf("%d", len(allToolCalls)) + `)</h4>
+            </div>
+            <div class="card-body">`
+
+	if len(allToolCalls) == 0 {
+		html += `<div class="alert alert-info">No tool calls found.</div>`
+	} else {
+		html += `<div class="table-responsive">
+                <table class="table table-striped table-hover">
+                    <thead>
+                        <tr>
+                            <th>Function</th>
+                            <th>Arguments</th>
+                            <th>Result</th>
+                            <th>User</th>
+                            <th>Session</th>
+                            <th>Time</th>
+                        </tr>
+                    </thead>
+                    <tbody>`
+
+		for _, tc := range allToolCalls {
+			args := tc.Arguments
+			if len(args) > 100 {
+				args = args[:100] + "..."
+			}
+			result := tc.Result
+			if len(result) > 100 {
+				result = result[:100] + "..."
+			}
+			html += fmt.Sprintf(`
+                        <tr>
+                            <td><code>%s</code></td>
+                            <td><pre class="mb-0" style="max-width: 200px; overflow: auto; font-size: 0.8em;">%s</pre></td>
+                            <td><pre class="mb-0" style="max-width: 200px; overflow: auto; font-size: 0.8em;">%s</pre></td>
+                            <td><a href="/agentize/debug/users/%s">%s</a></td>
+                            <td><a href="/agentize/debug/sessions/%s">%s</a></td>
+                            <td>%s</td>
+                        </tr>`,
+				template.HTMLEscapeString(tc.FunctionName),
+				template.HTMLEscapeString(args),
+				template.HTMLEscapeString(result),
+				template.URLQueryEscaper(tc.UserID),
+				template.HTMLEscapeString(tc.UserID[:min(20, len(tc.UserID))]+"..."),
+				template.URLQueryEscaper(tc.SessionID),
+				template.HTMLEscapeString(tc.SessionID[:min(20, len(tc.SessionID))]+"..."),
+				FormatTime(tc.CreatedAt))
+		}
+
+		html += `</tbody>
+                </table>
+            </div>`
+	}
+
+	html += `</div>
+        </div>
+    </div>`
+	html += generateBootstrapFooter()
 
 	return html, nil
 }

@@ -327,6 +327,12 @@ func (ag *Agentize) RegisterRoutes(router *gin.Engine) {
 	router.GET("/agentize/docs", ag.handleDocs)
 	router.GET("/agentize/health", ag.handleHealth)
 	router.GET("/agentize/debug", ag.handleDebug)
+	router.GET("/agentize/debug/users", ag.handleDebugUsers)
+	router.GET("/agentize/debug/users/:userID", ag.handleDebugUserDetail)
+	router.GET("/agentize/debug/sessions/:sessionID", ag.handleDebugSessionDetail)
+	router.GET("/agentize/debug/messages", ag.handleDebugMessages)
+	router.GET("/agentize/debug/files", ag.handleDebugFiles)
+	router.GET("/agentize/debug/tool-calls", ag.handleDebugToolCalls)
 }
 
 // handleIndex handles the main index page with links to graph and docs
@@ -595,7 +601,7 @@ func (ag *Agentize) GetRegisteredTools() []string {
 	return nil
 }
 
-// handleDebug handles debug page requests for sessions
+// handleDebug handles debug page requests for dashboard
 func (ag *Agentize) handleDebug(c *gin.Context) {
 	sessionStore := ag.GetSessionStore()
 	if sessionStore == nil {
@@ -609,9 +615,165 @@ func (ag *Agentize) handleDebug(c *gin.Context) {
 		return
 	}
 
-	html, err := debugHandler.GenerateHTML()
+	html, err := debugHandler.GenerateDashboardHTML()
 	if err != nil {
 		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to generate debug page: %v", err)})
+		return
+	}
+
+	c.Header("Content-Type", "text/html; charset=utf-8")
+	c.String(200, html)
+}
+
+// handleDebugUsers handles users list page requests
+func (ag *Agentize) handleDebugUsers(c *gin.Context) {
+	sessionStore := ag.GetSessionStore()
+	if sessionStore == nil {
+		c.JSON(500, gin.H{"error": "Session store not available"})
+		return
+	}
+
+	debugHandler, err := store.NewDebugHandler(sessionStore)
+	if err != nil {
+		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to create debug handler: %v", err)})
+		return
+	}
+
+	html, err := debugHandler.GenerateUsersHTML()
+	if err != nil {
+		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to generate users page: %v", err)})
+		return
+	}
+
+	c.Header("Content-Type", "text/html; charset=utf-8")
+	c.String(200, html)
+}
+
+// handleDebugUserDetail handles user detail page requests
+func (ag *Agentize) handleDebugUserDetail(c *gin.Context) {
+	userID := c.Param("userID")
+	if userID == "" {
+		c.JSON(400, gin.H{"error": "userID parameter is required"})
+		return
+	}
+
+	sessionStore := ag.GetSessionStore()
+	if sessionStore == nil {
+		c.JSON(500, gin.H{"error": "Session store not available"})
+		return
+	}
+
+	debugHandler, err := store.NewDebugHandler(sessionStore)
+	if err != nil {
+		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to create debug handler: %v", err)})
+		return
+	}
+
+	html, err := debugHandler.GenerateUserDetailHTML(userID)
+	if err != nil {
+		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to generate user detail page: %v", err)})
+		return
+	}
+
+	c.Header("Content-Type", "text/html; charset=utf-8")
+	c.String(200, html)
+}
+
+// handleDebugSessionDetail handles session detail page requests
+func (ag *Agentize) handleDebugSessionDetail(c *gin.Context) {
+	sessionID := c.Param("sessionID")
+	if sessionID == "" {
+		c.JSON(400, gin.H{"error": "sessionID parameter is required"})
+		return
+	}
+
+	sessionStore := ag.GetSessionStore()
+	if sessionStore == nil {
+		c.JSON(500, gin.H{"error": "Session store not available"})
+		return
+	}
+
+	debugHandler, err := store.NewDebugHandler(sessionStore)
+	if err != nil {
+		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to create debug handler: %v", err)})
+		return
+	}
+
+	html, err := debugHandler.GenerateSessionDetailHTML(sessionID)
+	if err != nil {
+		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to generate session detail page: %v", err)})
+		return
+	}
+
+	c.Header("Content-Type", "text/html; charset=utf-8")
+	c.String(200, html)
+}
+
+// handleDebugMessages handles messages list page requests
+func (ag *Agentize) handleDebugMessages(c *gin.Context) {
+	sessionStore := ag.GetSessionStore()
+	if sessionStore == nil {
+		c.JSON(500, gin.H{"error": "Session store not available"})
+		return
+	}
+
+	debugHandler, err := store.NewDebugHandler(sessionStore)
+	if err != nil {
+		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to create debug handler: %v", err)})
+		return
+	}
+
+	html, err := debugHandler.GenerateMessagesHTML()
+	if err != nil {
+		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to generate messages page: %v", err)})
+		return
+	}
+
+	c.Header("Content-Type", "text/html; charset=utf-8")
+	c.String(200, html)
+}
+
+// handleDebugFiles handles opened files list page requests
+func (ag *Agentize) handleDebugFiles(c *gin.Context) {
+	sessionStore := ag.GetSessionStore()
+	if sessionStore == nil {
+		c.JSON(500, gin.H{"error": "Session store not available"})
+		return
+	}
+
+	debugHandler, err := store.NewDebugHandler(sessionStore)
+	if err != nil {
+		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to create debug handler: %v", err)})
+		return
+	}
+
+	html, err := debugHandler.GenerateFilesHTML()
+	if err != nil {
+		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to generate files page: %v", err)})
+		return
+	}
+
+	c.Header("Content-Type", "text/html; charset=utf-8")
+	c.String(200, html)
+}
+
+// handleDebugToolCalls handles tool calls list page requests
+func (ag *Agentize) handleDebugToolCalls(c *gin.Context) {
+	sessionStore := ag.GetSessionStore()
+	if sessionStore == nil {
+		c.JSON(500, gin.H{"error": "Session store not available"})
+		return
+	}
+
+	debugHandler, err := store.NewDebugHandler(sessionStore)
+	if err != nil {
+		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to create debug handler: %v", err)})
+		return
+	}
+
+	html, err := debugHandler.GenerateToolCallsHTML()
+	if err != nil {
+		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to generate tool calls page: %v", err)})
 		return
 	}
 

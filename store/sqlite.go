@@ -931,5 +931,155 @@ func (s *SQLiteStore) GetCurrentlyOpenedFilesBySession(sessionID string) ([]*mod
 	return files, nil
 }
 
+// GetAllUsers returns all users
+func (s *SQLiteStore) GetAllUsers() ([]*model.User, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.Query(
+		"SELECT data, created_at, updated_at FROM users ORDER BY created_at DESC",
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query users: %w", err)
+	}
+	defer rows.Close()
+
+	var users []*model.User
+	for rows.Next() {
+		var data string
+		var createdAt, updatedAt int64
+
+		if err := rows.Scan(&data, &createdAt, &updatedAt); err != nil {
+			return nil, fmt.Errorf("failed to scan user: %w", err)
+		}
+
+		user := &model.User{}
+		if err := json.Unmarshal([]byte(data), user); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal user: %w", err)
+		}
+
+		// Restore timestamps
+		user.CreatedAt = time.Unix(createdAt, 0)
+		user.UpdatedAt = time.Unix(updatedAt, 0)
+
+		users = append(users, user)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating users: %w", err)
+	}
+
+	return users, nil
+}
+
+// GetAllMessages returns all messages
+func (s *SQLiteStore) GetAllMessages() ([]*model.Message, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.Query(
+		`SELECT message_id, user_id, session_id, role, content, model,
+			prompt_tokens, completion_tokens, total_tokens,
+			request_model, max_tokens, temperature, has_tool_calls, finish_reason, created_at
+		FROM messages ORDER BY created_at DESC`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query messages: %w", err)
+	}
+	defer rows.Close()
+
+	var messages []*model.Message
+	for rows.Next() {
+		msg := &model.Message{}
+		var createdAt int64
+		var hasToolCallsInt int
+
+		err := rows.Scan(
+			&msg.MessageID,
+			&msg.UserID,
+			&msg.SessionID,
+			&msg.Role,
+			&msg.Content,
+			&msg.Model,
+			&msg.PromptTokens,
+			&msg.CompletionTokens,
+			&msg.TotalTokens,
+			&msg.RequestModel,
+			&msg.MaxTokens,
+			&msg.Temperature,
+			&hasToolCallsInt,
+			&msg.FinishReason,
+			&createdAt,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan message: %w", err)
+		}
+
+		msg.HasToolCalls = hasToolCallsInt != 0
+		msg.CreatedAt = time.Unix(createdAt, 0)
+		messages = append(messages, msg)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating messages: %w", err)
+	}
+
+	return messages, nil
+}
+
+// GetAllOpenedFiles returns all opened files
+func (s *SQLiteStore) GetAllOpenedFiles() ([]*model.OpenedFile, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.Query(
+		`SELECT file_id, session_id, user_id, file_path, file_name, opened_at, closed_at, is_open
+		FROM opened_files ORDER BY opened_at DESC`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query opened files: %w", err)
+	}
+	defer rows.Close()
+
+	var files []*model.OpenedFile
+	for rows.Next() {
+		f := &model.OpenedFile{}
+		var openedAt, closedAt int64
+		var isOpenInt int
+
+		err := rows.Scan(
+			&f.FileID,
+			&f.SessionID,
+			&f.UserID,
+			&f.FilePath,
+			&f.FileName,
+			&openedAt,
+			&closedAt,
+			&isOpenInt,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan opened file: %w", err)
+		}
+
+		f.OpenedAt = time.Unix(openedAt, 0)
+		if closedAt > 0 {
+			f.ClosedAt = time.Unix(closedAt, 0)
+		}
+		f.IsOpen = isOpenInt != 0
+		files = append(files, f)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating opened files: %w", err)
+	}
+
+	return files, nil
+}
+
+// GetSession is an alias for Get to match DebugStore interface
+func (s *SQLiteStore) GetSession(sessionID string) (*model.Session, error) {
+	return s.Get(sessionID)
+}
+
 // Ensure SQLiteStore implements model.SessionStore
 var _ model.SessionStore = (*SQLiteStore)(nil)
