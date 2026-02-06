@@ -155,6 +155,14 @@ func FormatDuration(t time.Time) string {
 	}
 }
 
+// getModelDisplay returns a formatted model name for display
+func getModelDisplay(modelName string) string {
+	if modelName == "" {
+		return "<span class=\"text-muted\">Not set</span>"
+	}
+	return template.HTMLEscapeString(modelName)
+}
+
 // min returns the minimum of two integers
 func min(a, b int) int {
 	if a < b {
@@ -776,13 +784,36 @@ func (h *DebugHandler) GenerateUserDetailHTML(userID string) (string, error) {
 			if title == "" {
 				title = "Untitled Session"
 			}
+
+			summaryDisplay := "-"
+			if session.Summary != "" {
+				summaryDisplay = template.HTMLEscapeString(session.Summary)
+				if len(summaryDisplay) > 100 {
+					summaryDisplay = summaryDisplay[:100] + "..."
+				}
+			}
+
+			summarizedAtDisplay := "-"
+			if !session.SummarizedAt.IsZero() {
+				summarizedAtDisplay = FormatTime(session.SummarizedAt)
+			}
+
+			tagsDisplay := "-"
+			if len(session.Tags) > 0 {
+				tagsDisplay = template.HTMLEscapeString(strings.Join(session.Tags, ", "))
+			}
+
 			html += fmt.Sprintf(`
                 <a href="/agentize/debug/sessions/%s" class="list-group-item list-group-item-action">
                     <div class="d-flex w-100 justify-content-between align-items-start">
                         <div class="flex-grow-1">
                             <h6 class="mb-2">%s</h6>
                             <p class="mb-1"><code class="text-break">%s</code></p>
-                            <small class="text-muted">Updated: %s</small>
+                            <small class="text-muted">Created: %s | Updated: %s</small>
+                            <small class="text-muted d-block">Model: <code>%s</code></small>
+                            <small class="text-muted d-block">Summary: %s</small>
+                            <small class="text-muted d-block">Summarized At: %s</small>
+                            <small class="text-muted d-block">Tags: %s</small>
                         </div>
                         <span class="badge bg-secondary ms-2">%s</span>
                     </div>
@@ -790,7 +821,12 @@ func (h *DebugHandler) GenerateUserDetailHTML(userID string) (string, error) {
 				template.URLQueryEscaper(session.SessionID),
 				template.HTMLEscapeString(title),
 				template.HTMLEscapeString(session.SessionID),
+				FormatTime(session.CreatedAt),
 				FormatTime(session.UpdatedAt),
+				getModelDisplay(session.Model),
+				summaryDisplay,
+				summarizedAtDisplay,
+				tagsDisplay,
 				template.HTMLEscapeString(string(session.AgentType)))
 		}
 		html += `</div>`
@@ -820,6 +856,7 @@ func (h *DebugHandler) GenerateUserDetailHTML(userID string) (string, error) {
                             <th class="text-nowrap">Time</th>
                             <th class="text-center text-nowrap">Role</th>
                             <th>Content</th>
+                            <th class="text-center text-nowrap">Model</th>
                             <th class="text-nowrap">Session</th>
                         </tr>
                     </thead>
@@ -852,12 +889,14 @@ func (h *DebugHandler) GenerateUserDetailHTML(userID string) (string, error) {
                             <td class="text-nowrap">%s</td>
                             <td class="text-center"><span class="badge %s">%s</span></td>
                             <td class="text-break">%s</td>
+                            <td class="text-center"><code>%s</code></td>
                             <td class="text-nowrap"><a href="/agentize/debug/sessions/%s" class="text-decoration-none">%s</a></td>
                         </tr>`,
 				FormatTime(msg.CreatedAt),
 				badgeClass,
 				template.HTMLEscapeString(msg.Role),
 				template.HTMLEscapeString(content),
+				getModelDisplay(msg.Model),
 				template.URLQueryEscaper(msg.SessionID),
 				template.HTMLEscapeString(msg.SessionID[:8]+"..."))
 		}
@@ -1031,6 +1070,25 @@ func (h *DebugHandler) GenerateSessionDetailHTML(sessionID string) (string, erro
 		activeMessagesCount = len(session.ConversationState.Msgs)
 	}
 
+	summaryDisplay := "-"
+	if session.Summary != "" {
+		summaryDisplay = template.HTMLEscapeString(session.Summary)
+	}
+
+	summarizedAtDisplay := "-"
+	if !session.SummarizedAt.IsZero() {
+		summarizedAtDisplay = FormatTime(session.SummarizedAt) + " <small>(" + FormatDuration(session.SummarizedAt) + ")</small>"
+	}
+
+	tagsDisplay := "-"
+	if len(session.Tags) > 0 {
+		var tagBadges []string
+		for _, tag := range session.Tags {
+			tagBadges = append(tagBadges, fmt.Sprintf(`<span class="badge bg-info">%s</span>`, template.HTMLEscapeString(tag)))
+		}
+		tagsDisplay = strings.Join(tagBadges, " ")
+	}
+
 	html += fmt.Sprintf(`
         <div class="card mb-4">
             <div class="card-header">
@@ -1052,18 +1110,34 @@ func (h *DebugHandler) GenerateSessionDetailHTML(sessionID string) (string, erro
                             <div>%s %s</div>
                         </div>
                         <div class="mb-3">
+                            <strong class="d-block mb-2">Model:</strong>
+                            <div><code>%s</code></div>
+                        </div>
+                        <div class="mb-3">
                             <strong class="d-block mb-2">User:</strong>
                             <a href="/agentize/debug/users/%s" class="text-decoration-none">%s</a>
+                        </div>
+                        <div class="mb-3">
+                            <strong class="d-block mb-2">Summary:</strong>
+                            <div class="text-justify">%s</div>
+                        </div>
+                        <div class="mb-3">
+                            <strong class="d-block mb-2">Tags:</strong>
+                            <div>%s</div>
                         </div>
                     </div>
                     <div class="col-md-6">
                         <div class="mb-3">
                             <strong class="d-block mb-2">Created At:</strong>
-                            <div class="text-muted">%s</div>
+                            <div class="text-muted">%s <small>(%s)</small></div>
                         </div>
                         <div class="mb-3">
                             <strong class="d-block mb-2">Updated At:</strong>
                             <div class="text-muted">%s <small>(%s)</small></div>
+                        </div>
+                        <div class="mb-3">
+                            <strong class="d-block mb-2">Summarized At:</strong>
+                            <div class="text-muted">%s</div>
                         </div>
                         <div class="mb-3">
                             <strong class="d-block mb-2">Messages:</strong>
@@ -1081,11 +1155,16 @@ func (h *DebugHandler) GenerateSessionDetailHTML(sessionID string) (string, erro
 		template.HTMLEscapeString(title),
 		inProgressBadge,
 		agentTypeBadge,
+		getModelDisplay(session.Model),
 		template.URLQueryEscaper(session.UserID),
 		template.HTMLEscapeString(session.UserID),
+		summaryDisplay,
+		tagsDisplay,
 		FormatTime(session.CreatedAt),
+		FormatDuration(session.CreatedAt),
 		FormatTime(session.UpdatedAt),
 		FormatDuration(session.UpdatedAt),
+		summarizedAtDisplay,
 		activeMessagesCount,
 		archivedMessagesCount,
 		len(files))
@@ -1164,6 +1243,7 @@ func (h *DebugHandler) GenerateSessionDetailHTML(sessionID string) (string, erro
                     <div class="d-flex w-100 justify-content-between align-items-start mb-2">
                         <div>
                             <span class="badge %s me-2">%s</span>%s
+                            <span class="badge bg-secondary ms-2">Model: <code>%s</code></span>
                         </div>
                         <small class="text-muted">%s</small>
                     </div>
@@ -1173,6 +1253,7 @@ func (h *DebugHandler) GenerateSessionDetailHTML(sessionID string) (string, erro
 				badgeClass,
 				template.HTMLEscapeString(msg.Role),
 				toolCallBadge,
+				getModelDisplay(msg.Model),
 				FormatTime(msg.CreatedAt),
 				template.HTMLEscapeString(content),
 				template.HTMLEscapeString(msg.MessageID))
@@ -1345,10 +1426,15 @@ func (h *DebugHandler) GenerateSessionsHTML() (string, error) {
                             <th class="text-nowrap">Session ID</th>
                             <th class="text-nowrap">Title</th>
                             <th class="text-center text-nowrap">Agent Type</th>
+                            <th class="text-center text-nowrap">Model</th>
                             <th class="text-nowrap">User</th>
                             <th class="text-center text-nowrap">Messages</th>
                             <th class="text-center text-nowrap">Files</th>
+                            <th class="text-nowrap">Summary</th>
+                            <th class="text-nowrap">Tags</th>
+                            <th class="text-nowrap">Created At</th>
                             <th class="text-nowrap">Updated At</th>
+                            <th class="text-nowrap">Summarized At</th>
                             <th class="text-center text-nowrap">Actions</th>
                         </tr>
                     </thead>
@@ -1391,14 +1477,40 @@ func (h *DebugHandler) GenerateSessionsHTML() (string, error) {
 				filesCount = len(files)
 			}
 
+			summaryDisplay := "-"
+			if session.Summary != "" {
+				summaryDisplay = template.HTMLEscapeString(session.Summary)
+				if len(summaryDisplay) > 50 {
+					summaryDisplay = summaryDisplay[:50] + "..."
+				}
+			}
+
+			tagsDisplay := "-"
+			if len(session.Tags) > 0 {
+				tagsDisplay = template.HTMLEscapeString(strings.Join(session.Tags, ", "))
+				if len(tagsDisplay) > 30 {
+					tagsDisplay = tagsDisplay[:30] + "..."
+				}
+			}
+
+			summarizedAtDisplay := "-"
+			if !session.SummarizedAt.IsZero() {
+				summarizedAtDisplay = FormatTime(session.SummarizedAt)
+			}
+
 			html += fmt.Sprintf(`
                         <tr class="%s">
                             <td><code class="text-break">%s</code></td>
                             <td>%s</td>
                             <td class="text-center">%s</td>
+                            <td class="text-center"><code>%s</code></td>
                             <td class="text-nowrap"><a href="/agentize/debug/users/%s" class="text-decoration-none">%s</a></td>
                             <td class="text-center"><span class="badge bg-primary">%d</span></td>
                             <td class="text-center"><span class="badge bg-info">%d</span></td>
+                            <td class="text-break" style="max-width: 200px;">%s</td>
+                            <td class="text-break" style="max-width: 150px;">%s</td>
+                            <td class="text-nowrap">%s</td>
+                            <td class="text-nowrap">%s</td>
                             <td class="text-nowrap">%s</td>
                             <td class="text-center"><a href="/agentize/debug/sessions/%s" class="btn btn-sm btn-outline-primary">View Details</a></td>
                         </tr>`,
@@ -1406,11 +1518,16 @@ func (h *DebugHandler) GenerateSessionsHTML() (string, error) {
 				template.HTMLEscapeString(session.SessionID),
 				template.HTMLEscapeString(title),
 				agentTypeBadge,
+				getModelDisplay(session.Model),
 				template.URLQueryEscaper(session.UserID),
 				template.HTMLEscapeString(session.UserID[:min(20, len(session.UserID))]+"..."),
 				totalMessagesCount,
 				filesCount,
+				summaryDisplay,
+				tagsDisplay,
+				FormatTime(session.CreatedAt),
 				FormatTime(session.UpdatedAt),
+				summarizedAtDisplay,
 				template.URLQueryEscaper(session.SessionID))
 		}
 
@@ -1459,6 +1576,7 @@ func (h *DebugHandler) GenerateMessagesHTML() (string, error) {
                             <th class="text-nowrap">Time</th>
                             <th class="text-center text-nowrap">Role</th>
                             <th>Content</th>
+                            <th class="text-center text-nowrap">Model</th>
                             <th class="text-nowrap">User</th>
                             <th class="text-nowrap">Session</th>
                             <th class="text-center text-nowrap">Tool Calls</th>
@@ -1495,6 +1613,7 @@ func (h *DebugHandler) GenerateMessagesHTML() (string, error) {
                             <td class="text-nowrap">%s</td>
                             <td class="text-center"><span class="badge %s">%s</span></td>
                             <td class="text-break">%s</td>
+                            <td class="text-center"><code>%s</code></td>
                             <td class="text-nowrap"><a href="/agentize/debug/users/%s" class="text-decoration-none">%s</a></td>
                             <td class="text-nowrap"><a href="/agentize/debug/sessions/%s" class="text-decoration-none">%s</a></td>
                             <td class="text-center">%s</td>
@@ -1503,6 +1622,7 @@ func (h *DebugHandler) GenerateMessagesHTML() (string, error) {
 				badgeClass,
 				template.HTMLEscapeString(msg.Role),
 				template.HTMLEscapeString(content),
+				getModelDisplay(msg.Model),
 				template.URLQueryEscaper(msg.UserID),
 				template.HTMLEscapeString(msg.UserID[:min(20, len(msg.UserID))]+"..."),
 				template.URLQueryEscaper(msg.SessionID),

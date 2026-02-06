@@ -47,6 +47,9 @@ type Session struct {
 
 	// Agent type identifier (core, high, low)
 	AgentType AgentType
+
+	// Model name used in this session (e.g., "gpt-4o", "gpt-4o-mini")
+	Model string
 }
 
 // NodeDigest is a lightweight representation of a node (for memory efficiency)
@@ -75,6 +78,7 @@ func NewSession(userID string) *Session {
 		Summary:            "",
 		SummarizedMessages: []openai.ChatCompletionMessage{},
 		AgentType:          "",
+		Model:              "",
 	}
 }
 

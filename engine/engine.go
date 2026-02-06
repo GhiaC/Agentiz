@@ -360,6 +360,10 @@ func (e *Engine) ProcessMessage(
 
 		// Save user message to database
 		userMsg := model.NewUserMessage(session.UserID, sessionID, userMessage)
+		// Set model from session if available
+		if session.Model != "" {
+			userMsg.Model = session.Model
+		}
 		if sqliteStore, ok := e.Sessions.(interface {
 			PutMessage(*model.Message) error
 		}); ok {
@@ -881,6 +885,15 @@ func (e *Engine) processChatRequest(
 	modelName := e.llmConfig.Model
 	if modelName == "" {
 		modelName = "gpt-4o-mini"
+	}
+
+	// Update session model if different from stored model
+	if session.Model != modelName {
+		session.Model = modelName
+		// Save session to persist model name
+		if err := e.Sessions.Put(session); err != nil {
+			log.Log.Warnf("[Engine] ⚠️  Failed to update session model | SessionID: %s | Error: %v", sessionID, err)
+		}
 	}
 
 	// Build request messages with system prompts (one message per node for AI caching)
