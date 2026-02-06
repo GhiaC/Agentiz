@@ -329,6 +329,7 @@ func (ag *Agentize) RegisterRoutes(router *gin.Engine) {
 	router.GET("/agentize/debug", ag.handleDebug)
 	router.GET("/agentize/debug/users", ag.handleDebugUsers)
 	router.GET("/agentize/debug/users/:userID", ag.handleDebugUserDetail)
+	router.GET("/agentize/debug/sessions", ag.handleDebugSessions)
 	router.GET("/agentize/debug/sessions/:sessionID", ag.handleDebugSessionDetail)
 	router.GET("/agentize/debug/messages", ag.handleDebugMessages)
 	router.GET("/agentize/debug/files", ag.handleDebugFiles)
@@ -672,6 +673,30 @@ func (ag *Agentize) handleDebugUserDetail(c *gin.Context) {
 	html, err := debugHandler.GenerateUserDetailHTML(userID)
 	if err != nil {
 		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to generate user detail page: %v", err)})
+		return
+	}
+
+	c.Header("Content-Type", "text/html; charset=utf-8")
+	c.String(200, html)
+}
+
+// handleDebugSessions handles sessions list page requests
+func (ag *Agentize) handleDebugSessions(c *gin.Context) {
+	sessionStore := ag.GetSessionStore()
+	if sessionStore == nil {
+		c.JSON(500, gin.H{"error": "Session store not available"})
+		return
+	}
+
+	debugHandler, err := store.NewDebugHandler(sessionStore)
+	if err != nil {
+		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to create debug handler: %v", err)})
+		return
+	}
+
+	html, err := debugHandler.GenerateSessionsHTML()
+	if err != nil {
+		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to generate sessions page: %v", err)})
 		return
 	}
 

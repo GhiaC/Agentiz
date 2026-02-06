@@ -7,6 +7,10 @@ type User struct {
 	// UserID is the unique identifier for the user
 	UserID string
 
+	// User information (optional)
+	Name     string // User's display name (optional)
+	Username string // User's username (optional)
+
 	// Ban status
 	IsBanned   bool      // Whether the user is currently banned
 	BanUntil   time.Time // When the ban expires (zero time means permanent ban)

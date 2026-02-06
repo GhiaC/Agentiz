@@ -172,6 +172,7 @@ func generateNavigationBar(currentPage string) string {
 	}{
 		{"/agentize/debug", "📊", "Dashboard"},
 		{"/agentize/debug/users", "👤", "Users"},
+		{"/agentize/debug/sessions", "📋", "Sessions"},
 		{"/agentize/debug/messages", "💬", "Messages"},
 		{"/agentize/debug/files", "📁", "Files"},
 		{"/agentize/debug/tool-calls", "🔧", "Tool Calls"},
@@ -563,6 +564,8 @@ func (h *DebugHandler) GenerateUsersHTML() (string, error) {
                     <thead>
                         <tr>
                             <th class="text-nowrap">User ID</th>
+                            <th class="text-nowrap">Name</th>
+                            <th class="text-nowrap">Username</th>
                             <th class="text-center text-nowrap">Sessions</th>
                             <th class="text-center text-nowrap">Ban Status</th>
                             <th class="text-center text-nowrap">Nonsense Count</th>
@@ -585,9 +588,20 @@ func (h *DebugHandler) GenerateUsersHTML() (string, error) {
 				banStatus = fmt.Sprintf(`<span class="badge bg-danger">%s</span>`, banText)
 			}
 
+			nameDisplay := "-"
+			if user.Name != "" {
+				nameDisplay = template.HTMLEscapeString(user.Name)
+			}
+			usernameDisplay := "-"
+			if user.Username != "" {
+				usernameDisplay = template.HTMLEscapeString(user.Username)
+			}
+
 			html += fmt.Sprintf(`
                         <tr>
                             <td><code class="text-break">%s</code></td>
+                            <td>%s</td>
+                            <td>%s</td>
                             <td class="text-center"><span class="badge bg-primary">%d</span></td>
                             <td class="text-center">%s</td>
                             <td class="text-center"><span class="badge bg-warning text-dark">%d</span></td>
@@ -595,6 +609,8 @@ func (h *DebugHandler) GenerateUsersHTML() (string, error) {
                             <td class="text-center"><a href="/agentize/debug/users/%s" class="btn btn-sm btn-outline-primary">View Details</a></td>
                         </tr>`,
 				template.HTMLEscapeString(user.UserID),
+				nameDisplay,
+				usernameDisplay,
 				sessionCount,
 				banStatus,
 				user.NonsenseCount,
@@ -677,6 +693,15 @@ func (h *DebugHandler) GenerateUserDetailHTML(userID string) (string, error) {
 		}
 	}
 
+	nameDisplay := "-"
+	if user.Name != "" {
+		nameDisplay = template.HTMLEscapeString(user.Name)
+	}
+	usernameDisplay := "-"
+	if user.Username != "" {
+		usernameDisplay = template.HTMLEscapeString(user.Username)
+	}
+
 	html += fmt.Sprintf(`
         <div class="card mb-4">
             <div class="card-header">
@@ -688,6 +713,14 @@ func (h *DebugHandler) GenerateUserDetailHTML(userID string) (string, error) {
                         <div class="mb-3">
                             <strong class="d-block mb-2">User ID:</strong>
                             <code class="d-block p-2 bg-light rounded text-break">%s</code>
+                        </div>
+                        <div class="mb-3">
+                            <strong class="d-block mb-2">Name:</strong>
+                            <div>%s</div>
+                        </div>
+                        <div class="mb-3">
+                            <strong class="d-block mb-2">Username:</strong>
+                            <div>%s</div>
                         </div>
                         <div class="mb-3">
                             <strong class="d-block mb-2">Status:</strong>
@@ -716,6 +749,8 @@ func (h *DebugHandler) GenerateUserDetailHTML(userID string) (string, error) {
             </div>
         </div>`,
 		template.HTMLEscapeString(user.UserID),
+		nameDisplay,
+		usernameDisplay,
 		banStatus,
 		user.NonsenseCount,
 		FormatTime(user.CreatedAt),
@@ -921,10 +956,6 @@ func (h *DebugHandler) GenerateSessionDetailHTML(sessionID string) (string, erro
 		// If error, use empty slice
 		dbToolCalls = []*model.ToolCall{}
 	}
-	if err != nil {
-		// If error, use empty slice
-		dbToolCalls = []*model.ToolCall{}
-	}
 
 	// Convert to ToolCallInfo
 	var toolCalls []ToolCallInfo
@@ -974,8 +1005,30 @@ func (h *DebugHandler) GenerateSessionDetailHTML(sessionID string) (string, erro
 	}
 
 	inProgressBadge := ""
-	if session.ConversationState.InProgress {
+	if session.ConversationState != nil && session.ConversationState.InProgress {
 		inProgressBadge = `<span class="badge bg-warning">In Progress</span> `
+	}
+
+	// Extract system prompts from ConversationState.Msgs
+	var systemPrompts []string
+	if session.ConversationState != nil {
+		for _, msg := range session.ConversationState.Msgs {
+			if msg.Role == openai.ChatMessageRoleSystem && msg.Content != "" {
+				systemPrompts = append(systemPrompts, msg.Content)
+			}
+		}
+		// Also check summarized messages
+		for _, msg := range session.SummarizedMessages {
+			if msg.Role == openai.ChatMessageRoleSystem && msg.Content != "" {
+				systemPrompts = append(systemPrompts, msg.Content)
+			}
+		}
+	}
+
+	activeMessagesCount := 0
+	archivedMessagesCount := len(session.SummarizedMessages)
+	if session.ConversationState != nil {
+		activeMessagesCount = len(session.ConversationState.Msgs)
 	}
 
 	html += fmt.Sprintf(`
@@ -1033,9 +1086,42 @@ func (h *DebugHandler) GenerateSessionDetailHTML(sessionID string) (string, erro
 		FormatTime(session.CreatedAt),
 		FormatTime(session.UpdatedAt),
 		FormatDuration(session.UpdatedAt),
-		len(session.ConversationState.Msgs),
-		len(session.SummarizedMessages),
+		activeMessagesCount,
+		archivedMessagesCount,
 		len(files))
+
+	// System Prompts card
+	if len(systemPrompts) > 0 {
+		html += `<div class="card mb-4">
+            <div class="card-header">
+                <h5 class="mb-0"><i class="bi bi-gear-fill me-2"></i>System Prompts (` + fmt.Sprintf("%d", len(systemPrompts)) + `)</h5>
+            </div>
+            <div class="card-body">`
+		for i, prompt := range systemPrompts {
+			promptDisplay := template.HTMLEscapeString(prompt)
+			if len(promptDisplay) > 500 {
+				promptDisplay = promptDisplay[:500] + "..."
+			}
+			html += fmt.Sprintf(`
+                <div class="mb-3">
+                    <strong class="d-block mb-2">System Prompt #%d:</strong>
+                    <pre class="p-3 bg-light rounded" style="max-height: 300px; overflow-y: auto; white-space: pre-wrap; word-wrap: break-word;">%s</pre>
+                </div>`, i+1, promptDisplay)
+		}
+		html += `</div>
+        </div>`
+	} else {
+		html += `<div class="card mb-4">
+            <div class="card-header">
+                <h5 class="mb-0"><i class="bi bi-gear-fill me-2"></i>System Prompts</h5>
+            </div>
+            <div class="card-body">
+                <div class="alert alert-info text-center">
+                    <i class="bi bi-info-circle me-2"></i>No system prompts found in this session.
+                </div>
+            </div>
+        </div>`
+	}
 
 	// Messages card
 	html += fmt.Sprintf(`
@@ -1201,6 +1287,131 @@ func (h *DebugHandler) GenerateSessionDetailHTML(sessionID string) (string, erro
 				status,
 				FormatTime(f.OpenedAt),
 				closedAt)
+		}
+
+		html += `</tbody>
+                </table>
+            </div>`
+	}
+
+	html += `</div>
+        </div>
+    </div>
+    </div>`
+	html += generateBootstrapFooter()
+
+	return html, nil
+}
+
+// GenerateSessionsHTML generates the sessions list HTML page
+func (h *DebugHandler) GenerateSessionsHTML() (string, error) {
+	debugStore := h.store.(DebugStore)
+
+	sessionsByUser, err := h.GetAllSessions()
+	if err != nil {
+		return "", fmt.Errorf("failed to get sessions: %w", err)
+	}
+
+	// Flatten sessions list
+	var allSessions []*model.Session
+	for _, sessions := range sessionsByUser {
+		allSessions = append(allSessions, sessions...)
+	}
+
+	// Sort by UpdatedAt (newest first)
+	sort.Slice(allSessions, func(i, j int) bool {
+		return allSessions[i].UpdatedAt.After(allSessions[j].UpdatedAt)
+	})
+
+	html := generateBootstrapHeader("Agentize Debug - Sessions")
+	html += generateNavigationBar("/agentize/debug/sessions")
+	html += `<div class="container">
+    <div class="main-container">
+        <div class="card">
+            <div class="card-header">
+                <h4 class="mb-0"><i class="bi bi-diagram-3-fill me-2"></i>All Sessions (` + fmt.Sprintf("%d", len(allSessions)) + `)</h4>
+            </div>
+            <div class="card-body">`
+
+	if len(allSessions) == 0 {
+		html += `<div class="alert alert-info text-center">
+                <i class="bi bi-info-circle me-2"></i>No sessions found.
+            </div>`
+	} else {
+		html += `<div class="table-responsive">
+                <table class="table table-striped table-hover align-middle">
+                    <thead>
+                        <tr>
+                            <th class="text-nowrap">Session ID</th>
+                            <th class="text-nowrap">Title</th>
+                            <th class="text-center text-nowrap">Agent Type</th>
+                            <th class="text-nowrap">User</th>
+                            <th class="text-center text-nowrap">Messages</th>
+                            <th class="text-center text-nowrap">Files</th>
+                            <th class="text-nowrap">Updated At</th>
+                            <th class="text-center text-nowrap">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>`
+
+		for _, session := range allSessions {
+			title := session.Title
+			if title == "" {
+				title = "Untitled Session"
+			}
+
+			agentTypeBadge := ""
+			rowClass := ""
+			if session.AgentType != "" {
+				badgeClass := "bg-secondary"
+				switch session.AgentType {
+				case model.AgentTypeCore:
+					badgeClass = "bg-danger"
+					rowClass = "table-danger" // Highlight Core sessions
+				case model.AgentTypeHigh:
+					badgeClass = "bg-primary"
+				case model.AgentTypeLow:
+					badgeClass = "bg-success"
+				}
+				agentTypeBadge = fmt.Sprintf(`<span class="badge %s">%s</span>`, badgeClass, string(session.AgentType))
+			} else {
+				agentTypeBadge = `<span class="badge bg-secondary">-</span>`
+			}
+
+			activeMessagesCount := 0
+			if session.ConversationState != nil {
+				activeMessagesCount = len(session.ConversationState.Msgs)
+			}
+			totalMessagesCount := activeMessagesCount + len(session.SummarizedMessages)
+
+			// Get opened files count
+			files, err := debugStore.GetOpenedFilesBySession(session.SessionID)
+			filesCount := 0
+			if err == nil {
+				filesCount = len(files)
+			}
+
+			html += fmt.Sprintf(`
+                        <tr class="%s">
+                            <td><code class="text-break">%s</code></td>
+                            <td>%s</td>
+                            <td class="text-center">%s</td>
+                            <td class="text-nowrap"><a href="/agentize/debug/users/%s" class="text-decoration-none">%s</a></td>
+                            <td class="text-center"><span class="badge bg-primary">%d</span></td>
+                            <td class="text-center"><span class="badge bg-info">%d</span></td>
+                            <td class="text-nowrap">%s</td>
+                            <td class="text-center"><a href="/agentize/debug/sessions/%s" class="btn btn-sm btn-outline-primary">View Details</a></td>
+                        </tr>`,
+				rowClass,
+				template.HTMLEscapeString(session.SessionID),
+				template.HTMLEscapeString(title),
+				agentTypeBadge,
+				template.URLQueryEscaper(session.UserID),
+				template.HTMLEscapeString(session.UserID[:min(20, len(session.UserID))]+"..."),
+				totalMessagesCount,
+				filesCount,
+				FormatTime(session.UpdatedAt),
+				template.URLQueryEscaper(session.SessionID))
 		}
 
 		html += `</tbody>
