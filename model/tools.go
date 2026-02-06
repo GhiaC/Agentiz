@@ -1,5 +1,7 @@
 package model
 
+import "time"
+
 // MergeStrategy defines how tools with the same name should be handled
 type MergeStrategy string
 
@@ -217,4 +219,32 @@ func (t *Tool) SetActive() {
 	t.Status = ToolStatusActive
 	t.DisableReason = DisableReasonNone
 	t.ErrorMessage = ""
+}
+
+// ToolCall represents a tool call execution record
+type ToolCall struct {
+	// ToolCallID is the unique identifier for this tool call (from OpenAI)
+	ToolCallID string
+
+	// MessageID identifies the message that triggered this tool call
+	MessageID string
+
+	// SessionID identifies the session this tool call belongs to
+	SessionID string
+
+	// UserID identifies the user who triggered this tool call
+	UserID string
+
+	// FunctionName is the name of the function/tool that was called
+	FunctionName string
+
+	// Arguments is the JSON string of arguments passed to the tool
+	Arguments string
+
+	// Response is the result/response from the tool execution
+	Response string
+
+	// Metadata
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }

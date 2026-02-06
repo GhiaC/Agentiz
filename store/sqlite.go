@@ -125,6 +125,23 @@ func (s *SQLiteStore) initSchema() error {
 	CREATE INDEX IF NOT EXISTS idx_opened_files_user_id ON opened_files(user_id);
 	CREATE INDEX IF NOT EXISTS idx_opened_files_file_path ON opened_files(file_path);
 	CREATE INDEX IF NOT EXISTS idx_opened_files_is_open ON opened_files(is_open);
+	
+	CREATE TABLE IF NOT EXISTS tool_calls (
+		tool_call_id TEXT PRIMARY KEY,
+		message_id TEXT NOT NULL,
+		session_id TEXT NOT NULL,
+		user_id TEXT NOT NULL,
+		function_name TEXT NOT NULL,
+		arguments TEXT NOT NULL,
+		response TEXT DEFAULT '',
+		created_at INTEGER NOT NULL,
+		updated_at INTEGER NOT NULL
+	);
+	
+	CREATE INDEX IF NOT EXISTS idx_tool_calls_message_id ON tool_calls(message_id);
+	CREATE INDEX IF NOT EXISTS idx_tool_calls_session_id ON tool_calls(session_id);
+	CREATE INDEX IF NOT EXISTS idx_tool_calls_user_id ON tool_calls(user_id);
+	CREATE INDEX IF NOT EXISTS idx_tool_calls_created_at ON tool_calls(created_at);
 	`
 
 	_, err := s.db.Exec(schema)
@@ -1079,6 +1096,157 @@ func (s *SQLiteStore) GetAllOpenedFiles() ([]*model.OpenedFile, error) {
 // GetSession is an alias for Get to match DebugStore interface
 func (s *SQLiteStore) GetSession(sessionID string) (*model.Session, error) {
 	return s.Get(sessionID)
+}
+
+// PutToolCall stores a tool call in the database
+func (s *SQLiteStore) PutToolCall(toolCall *model.ToolCall) error {
+	if toolCall == nil {
+		return fmt.Errorf("toolCall cannot be nil")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	createdAt := toolCall.CreatedAt.Unix()
+	updatedAt := toolCall.UpdatedAt.Unix()
+
+	// Use INSERT OR REPLACE for upsert behavior
+	_, err := s.db.Exec(
+		`INSERT OR REPLACE INTO tool_calls (
+			tool_call_id, message_id, session_id, user_id, function_name, arguments, response, created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		toolCall.ToolCallID,
+		toolCall.MessageID,
+		toolCall.SessionID,
+		toolCall.UserID,
+		toolCall.FunctionName,
+		toolCall.Arguments,
+		toolCall.Response,
+		createdAt,
+		updatedAt,
+	)
+
+	if err != nil {
+		return fmt.Errorf("failed to store tool call: %w", err)
+	}
+
+	return nil
+}
+
+// UpdateToolCallResponse updates the response for a tool call
+func (s *SQLiteStore) UpdateToolCallResponse(toolCallID string, response string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	updatedAt := time.Now().Unix()
+
+	_, err := s.db.Exec(
+		`UPDATE tool_calls 
+		 SET response = ?, updated_at = ? 
+		 WHERE tool_call_id = ?`,
+		response,
+		updatedAt,
+		toolCallID,
+	)
+
+	if err != nil {
+		return fmt.Errorf("failed to update tool call response: %w", err)
+	}
+
+	return nil
+}
+
+// GetToolCallsBySession returns all tool calls for a session
+func (s *SQLiteStore) GetToolCallsBySession(sessionID string) ([]*model.ToolCall, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.Query(
+		`SELECT tool_call_id, message_id, session_id, user_id, function_name, arguments, response, created_at, updated_at
+		FROM tool_calls WHERE session_id = ? ORDER BY created_at ASC`,
+		sessionID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query tool calls: %w", err)
+	}
+	defer rows.Close()
+
+	var toolCalls []*model.ToolCall
+	for rows.Next() {
+		tc := &model.ToolCall{}
+		var createdAt, updatedAt int64
+
+		err := rows.Scan(
+			&tc.ToolCallID,
+			&tc.MessageID,
+			&tc.SessionID,
+			&tc.UserID,
+			&tc.FunctionName,
+			&tc.Arguments,
+			&tc.Response,
+			&createdAt,
+			&updatedAt,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan tool call: %w", err)
+		}
+
+		tc.CreatedAt = time.Unix(createdAt, 0)
+		tc.UpdatedAt = time.Unix(updatedAt, 0)
+		toolCalls = append(toolCalls, tc)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating tool calls: %w", err)
+	}
+
+	return toolCalls, nil
+}
+
+// GetAllToolCalls returns all tool calls
+func (s *SQLiteStore) GetAllToolCalls() ([]*model.ToolCall, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.Query(
+		`SELECT tool_call_id, message_id, session_id, user_id, function_name, arguments, response, created_at, updated_at
+		FROM tool_calls ORDER BY created_at DESC`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query tool calls: %w", err)
+	}
+	defer rows.Close()
+
+	var toolCalls []*model.ToolCall
+	for rows.Next() {
+		tc := &model.ToolCall{}
+		var createdAt, updatedAt int64
+
+		err := rows.Scan(
+			&tc.ToolCallID,
+			&tc.MessageID,
+			&tc.SessionID,
+			&tc.UserID,
+			&tc.FunctionName,
+			&tc.Arguments,
+			&tc.Response,
+			&createdAt,
+			&updatedAt,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan tool call: %w", err)
+		}
+
+		tc.CreatedAt = time.Unix(createdAt, 0)
+		tc.UpdatedAt = time.Unix(updatedAt, 0)
+		toolCalls = append(toolCalls, tc)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating tool calls: %w", err)
+	}
+
+	return toolCalls, nil
 }
 
 // Ensure SQLiteStore implements model.SessionStore

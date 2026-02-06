@@ -35,6 +35,8 @@ type DebugStore interface {
 	GetOpenedFilesBySession(sessionID string) ([]*model.OpenedFile, error)
 	GetUser(userID string) (*model.User, error)
 	GetSession(sessionID string) (*model.Session, error)
+	GetAllToolCalls() ([]*model.ToolCall, error)
+	GetToolCallsBySession(sessionID string) ([]*model.ToolCall, error)
 }
 
 // DebugHandler provides HTML debugging interface for SessionStore
@@ -913,7 +915,31 @@ func (h *DebugHandler) GenerateSessionDetailHTML(sessionID string) (string, erro
 		return "", fmt.Errorf("failed to get files: %w", err)
 	}
 
-	toolCalls := h.extractToolCallsFromSession(session)
+	// Get tool calls from database instead of session
+	dbToolCalls, err2 := debugStore.GetToolCallsBySession(sessionID)
+	if err2 != nil {
+		// If error, use empty slice
+		dbToolCalls = []*model.ToolCall{}
+	}
+	if err != nil {
+		// If error, use empty slice
+		dbToolCalls = []*model.ToolCall{}
+	}
+
+	// Convert to ToolCallInfo
+	var toolCalls []ToolCallInfo
+	for _, tc := range dbToolCalls {
+		toolCalls = append(toolCalls, ToolCallInfo{
+			SessionID:    tc.SessionID,
+			UserID:       tc.UserID,
+			MessageID:    tc.MessageID,
+			ToolCallID:   tc.ToolCallID,
+			FunctionName: tc.FunctionName,
+			Arguments:    tc.Arguments,
+			Result:       tc.Response,
+			CreatedAt:    tc.CreatedAt,
+		})
+	}
 
 	html := generateBootstrapHeader("Agentize Debug - Session: " + sessionID)
 	html += generateNavigationBar("/agentize/debug")
@@ -1372,18 +1398,27 @@ func (h *DebugHandler) GenerateFilesHTML() (string, error) {
 
 // GenerateToolCallsHTML generates the tool calls list HTML page
 func (h *DebugHandler) GenerateToolCallsHTML() (string, error) {
-	// Extract tool calls from all sessions
-	var allToolCalls []ToolCallInfo
-	sessionsByUser, err := h.GetAllSessions()
+	debugStore := h.store.(DebugStore)
+
+	// Get tool calls from database
+	dbToolCalls, err := debugStore.GetAllToolCalls()
 	if err != nil {
-		return "", fmt.Errorf("failed to get sessions: %w", err)
+		return "", fmt.Errorf("failed to get tool calls: %w", err)
 	}
 
-	for _, sessions := range sessionsByUser {
-		for _, session := range sessions {
-			toolCalls := h.extractToolCallsFromSession(session)
-			allToolCalls = append(allToolCalls, toolCalls...)
-		}
+	// Convert to ToolCallInfo for display
+	var allToolCalls []ToolCallInfo
+	for _, tc := range dbToolCalls {
+		allToolCalls = append(allToolCalls, ToolCallInfo{
+			SessionID:    tc.SessionID,
+			UserID:       tc.UserID,
+			MessageID:    tc.MessageID,
+			ToolCallID:   tc.ToolCallID,
+			FunctionName: tc.FunctionName,
+			Arguments:    tc.Arguments,
+			Result:       tc.Response,
+			CreatedAt:    tc.CreatedAt,
+		})
 	}
 
 	html := generateBootstrapHeader("Agentize Debug - Tool Calls")

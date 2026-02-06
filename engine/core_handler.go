@@ -538,11 +538,17 @@ func (ch *CoreHandler) processWithTools(
 		choice := resp.Choices[0]
 
 		// Save message to database
-		ch.saveCoreMessage(userID, request, resp, choice)
+		messageID := ch.saveCoreMessage(userID, request, resp, choice)
 
 		// If no tool calls, return the response
 		if len(choice.Message.ToolCalls) == 0 {
 			return choice.Message.Content, nil
+		}
+
+		// Get Core session to get sessionID
+		coreSession, err := ch.getOrCreateCoreSession(userID)
+		if err != nil {
+			log.Log.Warnf("[CoreHandler] ⚠️  Failed to get core session for tool call save | UserID: %s | Error: %v", userID, err)
 		}
 
 		// Add assistant message with tool calls
@@ -550,9 +556,19 @@ func (ch *CoreHandler) processWithTools(
 
 		// Execute each tool call
 		for _, toolCall := range choice.Message.ToolCalls {
+			// Save tool call to database (before execution)
+			if coreSession != nil {
+				ch.saveToolCall(userID, coreSession.SessionID, messageID, toolCall)
+			}
+
 			result, err := ch.executeCoreTool(ctx, userID, toolCall)
 			if err != nil {
 				result = fmt.Sprintf("Error executing tool: %v", err)
+			}
+
+			// Update tool call response in database
+			if coreSession != nil {
+				ch.updateToolCallResponse(toolCall.ID, result)
 			}
 
 			// Add tool result
@@ -1013,17 +1029,18 @@ func (ch *CoreHandler) banUserTool(_ context.Context, args map[string]interface{
 }
 
 // saveCoreMessage saves a message from CoreHandler to the database
+// Returns the messageID of the saved message
 func (ch *CoreHandler) saveCoreMessage(
 	userID string,
 	request openai.ChatCompletionRequest,
 	response openai.ChatCompletionResponse,
 	choice openai.ChatCompletionChoice,
-) {
+) string {
 	// Get Core session to get sessionID
 	coreSession, err := ch.getOrCreateCoreSession(userID)
 	if err != nil {
 		log.Log.Warnf("[CoreHandler] ⚠️  Failed to get core session for message save | UserID: %s | Error: %v", userID, err)
-		return
+		return ""
 	}
 
 	// Get message content
@@ -1044,6 +1061,7 @@ func (ch *CoreHandler) saveCoreMessage(
 	)
 
 	ch.saveMessage(msg)
+	return msg.MessageID
 }
 
 // saveMessage saves a message to the database
@@ -1056,6 +1074,46 @@ func (ch *CoreHandler) saveMessage(msg *model.Message) {
 			log.Log.Warnf("[CoreHandler] ⚠️  Failed to save message | MessageID: %s | Error: %v", msg.MessageID, err)
 		} else {
 			log.Log.Infof("[CoreHandler] 💾 Message saved | MessageID: %s | Model: %s | Tokens: %d", msg.MessageID, msg.Model, msg.TotalTokens)
+		}
+	}
+}
+
+// saveToolCall saves a tool call to the database
+func (ch *CoreHandler) saveToolCall(userID string, sessionID string, messageID string, toolCall openai.ToolCall) {
+	store := ch.sessionHandler.GetStore()
+	if sqliteStore, ok := store.(interface {
+		PutToolCall(*model.ToolCall) error
+	}); ok {
+		now := time.Now()
+		tc := &model.ToolCall{
+			ToolCallID:   toolCall.ID,
+			MessageID:    messageID,
+			SessionID:    sessionID,
+			UserID:       userID,
+			FunctionName: toolCall.Function.Name,
+			Arguments:    toolCall.Function.Arguments,
+			Response:     "", // Will be updated after execution
+			CreatedAt:    now,
+			UpdatedAt:    now,
+		}
+		if err := sqliteStore.PutToolCall(tc); err != nil {
+			log.Log.Warnf("[CoreHandler] ⚠️  Failed to save tool call | ToolCallID: %s | Error: %v", toolCall.ID, err)
+		} else {
+			log.Log.Infof("[CoreHandler] 🔧 Tool call saved | ToolCallID: %s | Function: %s", toolCall.ID, toolCall.Function.Name)
+		}
+	}
+}
+
+// updateToolCallResponse updates the response for a tool call
+func (ch *CoreHandler) updateToolCallResponse(toolCallID string, response string) {
+	store := ch.sessionHandler.GetStore()
+	if sqliteStore, ok := store.(interface {
+		UpdateToolCallResponse(string, string) error
+	}); ok {
+		if err := sqliteStore.UpdateToolCallResponse(toolCallID, response); err != nil {
+			log.Log.Warnf("[CoreHandler] ⚠️  Failed to update tool call response | ToolCallID: %s | Error: %v", toolCallID, err)
+		} else {
+			log.Log.Infof("[CoreHandler] ✅ Tool call response updated | ToolCallID: %s", toolCallID)
 		}
 	}
 }
