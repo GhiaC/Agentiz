@@ -64,6 +64,9 @@ type CoreHandler struct {
 
 	// Function registry for Core's tools
 	coreTools *model.FunctionRegistry
+
+	// User moderation helper
+	userModeration *UserModeration
 }
 
 // NewCoreHandler creates a new CoreHandler with the given UserAgents
@@ -100,6 +103,15 @@ func (ch *CoreHandler) UseLLMConfig(config LLMConfig) error {
 
 	ch.llmClient = openai.NewClientWithConfig(openaiConfig)
 	ch.llmConfig = config
+
+	// Initialize user moderation helper
+	ch.userModeration = NewUserModeration(
+		ch.isNonsenseMessageFast,
+		ch.isNonsenseMessageLLM,
+		ch.getOrCreateUser,
+		ch.saveUser,
+	)
+
 	return nil
 }
 
@@ -135,6 +147,25 @@ func (ch *CoreHandler) ProcessMessage(
 		return "", fmt.Errorf("LLM client not configured. Call UseLLMConfig first")
 	}
 
+	// Check user ban status and nonsense messages
+	if ch.userModeration != nil {
+		// Check if user is banned
+		if isBanned, banMessage := ch.userModeration.CheckBanStatus(userID); isBanned {
+			return banMessage, nil
+		}
+
+		// Check if message is nonsense and handle auto-ban
+		shouldBan, banMessage, err := ch.userModeration.ProcessNonsenseCheck(ctx, userID, userMessage)
+		if err != nil {
+			log.Log.Warnf("[CoreHandler] ⚠️  Failed to process nonsense check, proceeding anyway | UserID: %s | Error: %v", userID, err)
+		} else if shouldBan {
+			return banMessage, nil
+		} else if banMessage != "" {
+			// Warning message (no ban yet)
+			return banMessage, nil
+		}
+	}
+
 	// Get or create Core session for this user
 	coreSession, err := ch.getOrCreateCoreSession(userID)
 	if err != nil {
@@ -155,6 +186,10 @@ func (ch *CoreHandler) ProcessMessage(
 			Content: userMessage,
 		},
 	)
+
+	// Save user message to database
+	userMsg := model.NewUserMessage(userID, coreSession.SessionID, userMessage)
+	ch.saveMessage(userMsg)
 
 	// Save Core session after adding user message
 	if err := ch.saveCoreSession(coreSession); err != nil {
@@ -447,6 +482,31 @@ func (ch *CoreHandler) getCoreToolsForLLM() []openai.Tool {
 				},
 			},
 		},
+		{
+			Type: openai.ToolTypeFunction,
+			Function: &openai.FunctionDefinition{
+				Name:        "ban_user",
+				Description: "Ban a user for a specified duration. Use this when a user repeatedly sends nonsense messages or violates rules. Duration is in hours (0 means permanent ban). Note: Once banned, the user's messages will not be processed, so this action should be used carefully.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"user_id": map[string]interface{}{
+							"type":        "string",
+							"description": "The user ID to ban",
+						},
+						"duration_hours": map[string]interface{}{
+							"type":        "number",
+							"description": "Ban duration in hours (0 for permanent ban)",
+						},
+						"message": map[string]interface{}{
+							"type":        "string",
+							"description": "Optional custom ban message to show to the user",
+						},
+					},
+					"required": []string{"user_id", "duration_hours"},
+				},
+			},
+		},
 	}
 }
 
@@ -461,11 +521,12 @@ func (ch *CoreHandler) processWithTools(
 	currentMessages := messages
 
 	for i := 0; i < maxIterations; i++ {
-		resp, err := ch.llmClient.CreateChatCompletion(ctx, openai.ChatCompletionRequest{
+		request := openai.ChatCompletionRequest{
 			Model:    ch.llmConfig.Model,
 			Messages: currentMessages,
 			Tools:    tools,
-		})
+		}
+		resp, err := ch.llmClient.CreateChatCompletion(ctx, request)
 		if err != nil {
 			return "", formatLLMError(err)
 		}
@@ -475,6 +536,9 @@ func (ch *CoreHandler) processWithTools(
 		}
 
 		choice := resp.Choices[0]
+
+		// Save message to database
+		ch.saveCoreMessage(userID, request, resp, choice)
 
 		// If no tool calls, return the response
 		if len(choice.Message.ToolCalls) == 0 {
@@ -541,6 +605,9 @@ func (ch *CoreHandler) executeCoreTool(
 
 	case "update_session_metadata":
 		return ch.updateSessionMetadataTool(args)
+
+	case "ban_user":
+		return ch.banUserTool(ctx, args)
 
 	default:
 		return "", fmt.Errorf("unknown tool: %s", toolCall.Function.Name)
@@ -733,4 +800,262 @@ func (ch *CoreHandler) GetUserAgentHigh() *Engine {
 // GetUserAgentLow returns the cost-effective UserAgent
 func (ch *CoreHandler) GetUserAgentLow() *Engine {
 	return ch.userAgentLow
+}
+
+// getOrCreateUser gets or creates a user from the store
+func (ch *CoreHandler) getOrCreateUser(userID string) (*model.User, error) {
+	store := ch.sessionHandler.GetStore()
+
+	// Try to cast to SQLiteStore to access user methods
+	if sqliteStore, ok := store.(interface {
+		GetOrCreateUser(string) (*model.User, error)
+	}); ok {
+		return sqliteStore.GetOrCreateUser(userID)
+	}
+
+	// If store doesn't support user management, return nil
+	return nil, nil
+}
+
+// saveUser saves a user to the store
+func (ch *CoreHandler) saveUser(user *model.User) error {
+	store := ch.sessionHandler.GetStore()
+
+	// Try to cast to SQLiteStore to access user methods
+	if sqliteStore, ok := store.(interface {
+		PutUser(*model.User) error
+	}); ok {
+		return sqliteStore.PutUser(user)
+	}
+
+	return fmt.Errorf("store does not support user management")
+}
+
+// isNonsenseMessageFast uses fast heuristics to detect nonsense messages (no LLM cost)
+func (ch *CoreHandler) isNonsenseMessageFast(message string) bool {
+	trimmed := strings.TrimSpace(message)
+
+	// Very short messages
+	if len(trimmed) < 3 {
+		return true
+	}
+
+	// Count different character types
+	hasLetter := false
+	hasDigit := false
+	hasSpace := false
+	specialCharCount := 0
+	emojiCount := 0
+	repeatedCharCount := 0
+
+	var lastChar rune
+	repeatCount := 0
+
+	for i, r := range trimmed {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= 'آ' && r <= 'ی') {
+			hasLetter = true
+		} else if r >= '0' && r <= '9' {
+			hasDigit = true
+		} else if r == ' ' || r == '\t' || r == '\n' {
+			hasSpace = true
+		} else {
+			// Check for emoji or special characters
+			if r > 127 {
+				emojiCount++
+			} else {
+				specialCharCount++
+			}
+		}
+
+		// Check for repeated characters
+		if i > 0 && r == lastChar {
+			repeatCount++
+		} else {
+			if repeatCount > 3 {
+				repeatedCharCount += repeatCount
+			}
+			repeatCount = 1
+		}
+		lastChar = r
+	}
+
+	if repeatCount > 3 {
+		repeatedCharCount += repeatCount
+	}
+
+	// Heuristic rules (fast, no LLM cost)
+
+	// 1. Only special characters or emojis (no letters/numbers)
+	if !hasLetter && !hasDigit && (specialCharCount > len(trimmed)/2 || emojiCount > len(trimmed)/2) {
+		return true
+	}
+
+	// 2. Too many repeated characters (e.g., "aaaaaa", "111111")
+	if repeatedCharCount > len(trimmed)/2 {
+		return true
+	}
+
+	// 3. Too many special characters relative to text
+	if hasLetter && specialCharCount > len(trimmed)/3 {
+		return true
+	}
+
+	// 4. Very long message with no spaces (likely spam/gibberish)
+	if len(trimmed) > 50 && !hasSpace {
+		return true
+	}
+
+	// 5. Only numbers (unless it's a short number which might be valid)
+	if !hasLetter && hasDigit && len(trimmed) > 10 {
+		return true
+	}
+
+	// 6. Pattern detection: same character repeated many times
+	if len(trimmed) > 5 {
+		charFreq := make(map[rune]int)
+		for _, r := range trimmed {
+			charFreq[r]++
+		}
+		for _, count := range charFreq {
+			if count > len(trimmed)*2/3 {
+				return true // One character dominates
+			}
+		}
+	}
+
+	return false
+}
+
+// isNonsenseMessageLLM uses LLM to verify if a message is nonsense (expensive, use sparingly)
+func (ch *CoreHandler) isNonsenseMessageLLM(ctx context.Context, message string) (bool, error) {
+	if ch.llmClient == nil {
+		return false, fmt.Errorf("LLM client not configured")
+	}
+
+	// Use LLM to detect nonsense messages
+	systemPrompt := `You are a message quality checker. Determine if a user message is nonsense, spam, or meaningless.
+
+A message is considered nonsense if it:
+- Contains only random characters, symbols, or gibberish
+- Is completely unrelated to any meaningful conversation
+- Contains only emojis or symbols without text
+- Is clearly spam or trolling
+- Makes no sense in any context
+
+A message is NOT nonsense if it:
+- Contains actual questions or requests
+- Has meaningful content, even if short
+- Is part of a conversation
+- Contains code, technical terms, or specific topics
+
+Respond with only "YES" if the message is nonsense, or "NO" if it's meaningful.`
+
+	resp, err := ch.llmClient.CreateChatCompletion(ctx, openai.ChatCompletionRequest{
+		Model: ch.llmConfig.Model,
+		Messages: []openai.ChatCompletionMessage{
+			{Role: openai.ChatMessageRoleSystem, Content: systemPrompt},
+			{Role: openai.ChatMessageRoleUser, Content: message},
+		},
+		MaxTokens:   10,
+		Temperature: 0.1,
+	})
+
+	if err != nil {
+		return false, err
+	}
+
+	if len(resp.Choices) == 0 {
+		return false, fmt.Errorf("no response from LLM")
+	}
+
+	response := strings.TrimSpace(strings.ToUpper(resp.Choices[0].Message.Content))
+	return response == "YES" || strings.HasPrefix(response, "YES"), nil
+}
+
+// banUserTool bans a user for a specified duration
+func (ch *CoreHandler) banUserTool(_ context.Context, args map[string]interface{}) (string, error) {
+	userID, ok := args["user_id"].(string)
+	if !ok || userID == "" {
+		return "", fmt.Errorf("user_id is required")
+	}
+
+	durationHours, ok := args["duration_hours"].(float64)
+	if !ok {
+		return "", fmt.Errorf("duration_hours is required and must be a number")
+	}
+
+	message, _ := args["message"].(string)
+	if message == "" {
+		if durationHours == 0 {
+			message = "شما به صورت دائمی محدود شده‌اید."
+		} else {
+			message = fmt.Sprintf("شما به مدت %.0f ساعت محدود شده‌اید.", durationHours)
+		}
+	}
+
+	user, err := ch.getOrCreateUser(userID)
+	if err != nil {
+		return "", fmt.Errorf("failed to get user: %w", err)
+	}
+
+	var banDuration time.Duration
+	if durationHours > 0 {
+		banDuration = time.Duration(durationHours) * time.Hour
+	}
+
+	user.Ban(banDuration, message)
+	if err := ch.saveUser(user); err != nil {
+		return "", fmt.Errorf("failed to save user ban: %w", err)
+	}
+
+	log.Log.Infof("[CoreHandler] 🚫 User banned | UserID: %s | Duration: %v", userID, banDuration)
+	return fmt.Sprintf("User %s has been banned. Duration: %v", userID, banDuration), nil
+}
+
+// saveCoreMessage saves a message from CoreHandler to the database
+func (ch *CoreHandler) saveCoreMessage(
+	userID string,
+	request openai.ChatCompletionRequest,
+	response openai.ChatCompletionResponse,
+	choice openai.ChatCompletionChoice,
+) {
+	// Get Core session to get sessionID
+	coreSession, err := ch.getOrCreateCoreSession(userID)
+	if err != nil {
+		log.Log.Warnf("[CoreHandler] ⚠️  Failed to get core session for message save | UserID: %s | Error: %v", userID, err)
+		return
+	}
+
+	// Get message content
+	content := choice.Message.Content
+	if content == "" && len(choice.Message.ToolCalls) > 0 {
+		content = fmt.Sprintf("[Tool Calls: %d]", len(choice.Message.ToolCalls))
+	}
+
+	// Create message record
+	msg := model.NewMessage(
+		userID,
+		coreSession.SessionID,
+		openai.ChatMessageRoleAssistant,
+		content,
+		request,
+		response,
+		choice,
+	)
+
+	ch.saveMessage(msg)
+}
+
+// saveMessage saves a message to the database
+func (ch *CoreHandler) saveMessage(msg *model.Message) {
+	store := ch.sessionHandler.GetStore()
+	if sqliteStore, ok := store.(interface {
+		PutMessage(*model.Message) error
+	}); ok {
+		if err := sqliteStore.PutMessage(msg); err != nil {
+			log.Log.Warnf("[CoreHandler] ⚠️  Failed to save message | MessageID: %s | Error: %v", msg.MessageID, err)
+		} else {
+			log.Log.Infof("[CoreHandler] 💾 Message saved | MessageID: %s | Model: %s | Tokens: %d", msg.MessageID, msg.Model, msg.TotalTokens)
+		}
+	}
 }

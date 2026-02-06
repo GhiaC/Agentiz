@@ -4,13 +4,13 @@ This package provides storage implementations for Agentize sessions.
 
 ## Available Stores
 
-### MemoryStore (Default)
+### DBStore (Default)
 In-memory storage that doesn't persist data across restarts. Suitable for testing and development.
 
 ```go
 import "github.com/ghiac/agentize/store"
 
-memoryStore := store.NewMemoryStore()
+dbStore := store.NewDBStore()
 ```
 
 ### SQLiteStore

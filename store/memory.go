@@ -8,13 +8,22 @@ import (
 	"github.com/ghiac/agentize/model"
 )
 
-// MemoryStore is an in-memory implementation of SessionStore
-// It also manages visited nodes for each user (similar to Memory in engine/memory.go)
-type MemoryStore struct {
-	sessions map[string]*model.Session
-	mu       sync.RWMutex
+// DBStore is a simple wrapper around SQLiteStore with read cache
+// It uses in-memory cache for frequently accessed data (sessions, users) while persisting to SQLite
+type DBStore struct {
+	// SQLite backend - all data is persisted in database
+	sqliteStore *SQLiteStore
+
+	// Read cache for sessions (simple LRU-like behavior)
+	sessionsCache map[string]*model.Session
+	sessionsMu    sync.RWMutex
+
+	// Read cache for users
+	usersCache map[string]*model.User
+	usersMu    sync.RWMutex
 
 	// UserNodes tracks visited nodes for each user (user-level, not session-level)
+	// This stays in-memory for performance as it's frequently accessed
 	userNodes sync.Map
 	userLock  map[string]*sync.Mutex
 	nodesMu   sync.RWMutex // Protects userLock map
@@ -23,19 +32,40 @@ type MemoryStore struct {
 // UserNodes represents visited nodes for a user
 type UserNodes struct {
 	VisitedNodes map[string]*model.NodeDigest // Map of node path -> NodeDigest
-	LastActivity time.Time
+	LastActivity time.Time                    // Last time user visited any node
 }
 
-// NewMemoryStore creates a new in-memory session store
-func NewMemoryStore() *MemoryStore {
-	return &MemoryStore{
-		sessions: make(map[string]*model.Session),
-		userLock: make(map[string]*sync.Mutex),
+// NewDBStore creates a new DBStore with SQLite backend
+// Uses default path: ./data/sessions.db
+func NewDBStore() (*DBStore, error) {
+	return NewDBStoreWithPath("./data/sessions.db")
+}
+
+// NewDBStoreWithPath creates a new DBStore with custom database path
+func NewDBStoreWithPath(dbPath string) (*DBStore, error) {
+	sqliteStore, err := NewSQLiteStore(dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize SQLite store: %w", err)
 	}
+
+	return &DBStore{
+		sqliteStore:   sqliteStore,
+		sessionsCache: make(map[string]*model.Session),
+		usersCache:    make(map[string]*model.User),
+		userLock:      make(map[string]*sync.Mutex),
+	}, nil
+}
+
+// Close closes the database connection
+func (s *DBStore) Close() error {
+	if s.sqliteStore != nil {
+		return s.sqliteStore.Close()
+	}
+	return nil
 }
 
 // getOrCreateLock gets or creates a mutex for a userID
-func (s *MemoryStore) getOrCreateLock(userID string) *sync.Mutex {
+func (s *DBStore) getOrCreateLock(userID string) *sync.Mutex {
 	s.nodesMu.RLock()
 	lock, exists := s.userLock[userID]
 	s.nodesMu.RUnlock()
@@ -58,60 +88,79 @@ func (s *MemoryStore) getOrCreateLock(userID string) *sync.Mutex {
 }
 
 // Get retrieves a session by ID
-func (s *MemoryStore) Get(sessionID string) (*model.Session, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	session, ok := s.sessions[sessionID]
-	if !ok {
-		return nil, fmt.Errorf("session not found: %s", sessionID)
+// First checks cache, then falls back to database
+func (s *DBStore) Get(sessionID string) (*model.Session, error) {
+	// Check cache first
+	s.sessionsMu.RLock()
+	if session, ok := s.sessionsCache[sessionID]; ok {
+		s.sessionsMu.RUnlock()
+		// Return a copy to prevent external modification
+		sessionCopy := *session
+		return &sessionCopy, nil
 	}
+	s.sessionsMu.RUnlock()
+
+	// Not in cache, get from database
+	session, err := s.sqliteStore.Get(sessionID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Add to cache
+	s.sessionsMu.Lock()
+	sessionCopy := *session
+	s.sessionsCache[sessionID] = &sessionCopy
+	s.sessionsMu.Unlock()
 
 	return session, nil
 }
 
 // Put stores or updates a session
-func (s *MemoryStore) Put(session *model.Session) error {
-	if session == nil {
-		return fmt.Errorf("session cannot be nil")
+// Updates both cache and database (write-through)
+func (s *DBStore) Put(session *model.Session) error {
+	// Update database first
+	if err := s.sqliteStore.Put(session); err != nil {
+		return err
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	session.UpdatedAt = time.Now()
-	s.sessions[session.SessionID] = session
+	// Update cache
+	s.sessionsMu.Lock()
+	sessionCopy := *session
+	s.sessionsCache[session.SessionID] = &sessionCopy
+	s.sessionsMu.Unlock()
 
 	return nil
 }
 
 // Delete removes a session
-func (s *MemoryStore) Delete(sessionID string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+// Removes from both cache and database
+func (s *DBStore) Delete(sessionID string) error {
+	// Delete from database
+	if err := s.sqliteStore.Delete(sessionID); err != nil {
+		return err
+	}
 
-	delete(s.sessions, sessionID)
+	// Remove from cache
+	s.sessionsMu.Lock()
+	delete(s.sessionsCache, sessionID)
+	s.sessionsMu.Unlock()
+
 	return nil
 }
 
-// List returns all sessions for a user
-func (s *MemoryStore) List(userID string) ([]*model.Session, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+// List returns all sessions for a user (delegates to SQLiteStore)
+func (s *DBStore) List(userID string) ([]*model.Session, error) {
+	return s.sqliteStore.List(userID)
+}
 
-	var sessions []*model.Session
-	for _, session := range s.sessions {
-		if session.UserID == userID {
-			sessions = append(sessions, session)
-		}
-	}
-
-	return sessions, nil
+// GetAllSessions returns all sessions grouped by userID (delegates to SQLiteStore)
+func (s *DBStore) GetAllSessions() (map[string][]*model.Session, error) {
+	return s.sqliteStore.GetAllSessions()
 }
 
 // AddVisitedNode adds a visited node for a user
-// This tracks nodes at user level, across all sessions
-func (s *MemoryStore) AddVisitedNode(userID string, nodeDigest *model.NodeDigest) {
+// This tracks nodes at user level, across all sessions (in-memory only for performance)
+func (s *DBStore) AddVisitedNode(userID string, nodeDigest *model.NodeDigest) {
 	if nodeDigest == nil {
 		return
 	}
@@ -140,7 +189,7 @@ func (s *MemoryStore) AddVisitedNode(userID string, nodeDigest *model.NodeDigest
 }
 
 // GetVisitedNodes returns all visited nodes for a user
-func (s *MemoryStore) GetVisitedNodes(userID string) map[string]*model.NodeDigest {
+func (s *DBStore) GetVisitedNodes(userID string) map[string]*model.NodeDigest {
 	lock := s.getOrCreateLock(userID)
 	lock.Lock()
 	defer lock.Unlock()
@@ -160,7 +209,7 @@ func (s *MemoryStore) GetVisitedNodes(userID string) map[string]*model.NodeDiges
 }
 
 // GetVisitedNodePaths returns a list of visited node paths for a user
-func (s *MemoryStore) GetVisitedNodePaths(userID string) []string {
+func (s *DBStore) GetVisitedNodePaths(userID string) []string {
 	lock := s.getOrCreateLock(userID)
 	lock.Lock()
 	defer lock.Unlock()
@@ -177,7 +226,7 @@ func (s *MemoryStore) GetVisitedNodePaths(userID string) []string {
 }
 
 // HasVisitedNode checks if a user has visited a specific node
-func (s *MemoryStore) HasVisitedNode(userID string, nodePath string) bool {
+func (s *DBStore) HasVisitedNode(userID string, nodePath string) bool {
 	lock := s.getOrCreateLock(userID)
 	lock.Lock()
 	defer lock.Unlock()
@@ -191,7 +240,7 @@ func (s *MemoryStore) HasVisitedNode(userID string, nodePath string) bool {
 }
 
 // ClearVisitedNodes clears all visited nodes for a user
-func (s *MemoryStore) ClearVisitedNodes(userID string) {
+func (s *DBStore) ClearVisitedNodes(userID string) {
 	lock := s.getOrCreateLock(userID)
 	lock.Lock()
 	defer lock.Unlock()
@@ -199,21 +248,95 @@ func (s *MemoryStore) ClearVisitedNodes(userID string) {
 	s.userNodes.Delete(userID)
 }
 
+// GetUser retrieves a user by ID
+// First checks cache, then falls back to database
+func (s *DBStore) GetUser(userID string) (*model.User, error) {
+	// Check cache first
+	s.usersMu.RLock()
+	if user, ok := s.usersCache[userID]; ok {
+		s.usersMu.RUnlock()
+		// Return a copy to prevent external modification
+		userCopy := *user
+		return &userCopy, nil
+	}
+	s.usersMu.RUnlock()
+
+	// Not in cache, get from database
+	user, err := s.sqliteStore.GetUser(userID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Add to cache if found
+	if user != nil {
+		s.usersMu.Lock()
+		userCopy := *user
+		s.usersCache[userID] = &userCopy
+		s.usersMu.Unlock()
+	}
+
+	return user, nil
+}
+
+// PutUser stores or updates a user
+// Updates both cache and database (write-through)
+func (s *DBStore) PutUser(user *model.User) error {
+	// Update database first
+	if err := s.sqliteStore.PutUser(user); err != nil {
+		return err
+	}
+
+	// Update cache
+	s.usersMu.Lock()
+	userCopy := *user
+	s.usersCache[user.UserID] = &userCopy
+	s.usersMu.Unlock()
+
+	return nil
+}
+
+// GetOrCreateUser gets an existing user or creates a new one (delegates to SQLiteStore)
+func (s *DBStore) GetOrCreateUser(userID string) (*model.User, error) {
+	return s.sqliteStore.GetOrCreateUser(userID)
+}
+
+// PutMessage stores a message (delegates to SQLiteStore)
+func (s *DBStore) PutMessage(message *model.Message) error {
+	return s.sqliteStore.PutMessage(message)
+}
+
+// GetMessagesBySession returns all messages for a session (delegates to SQLiteStore)
+func (s *DBStore) GetMessagesBySession(sessionID string) ([]*model.Message, error) {
+	return s.sqliteStore.GetMessagesBySession(sessionID)
+}
+
+// GetMessagesByUser returns all messages for a user (delegates to SQLiteStore)
+func (s *DBStore) GetMessagesByUser(userID string) ([]*model.Message, error) {
+	return s.sqliteStore.GetMessagesByUser(userID)
+}
+
+// AddOpenedFile records that a file was opened in a session (delegates to SQLiteStore)
+func (s *DBStore) AddOpenedFile(openedFile *model.OpenedFile) error {
+	return s.sqliteStore.AddOpenedFile(openedFile)
+}
+
+// CloseOpenedFile marks a file as closed (delegates to SQLiteStore)
+func (s *DBStore) CloseOpenedFile(sessionID string, filePath string) error {
+	return s.sqliteStore.CloseOpenedFile(sessionID, filePath)
+}
+
+// GetOpenedFilesBySession returns all opened files for a session (delegates to SQLiteStore)
+func (s *DBStore) GetOpenedFilesBySession(sessionID string) ([]*model.OpenedFile, error) {
+	return s.sqliteStore.GetOpenedFilesBySession(sessionID)
+}
+
+// GetCurrentlyOpenedFilesBySession returns only currently open files for a session (delegates to SQLiteStore)
+func (s *DBStore) GetCurrentlyOpenedFilesBySession(sessionID string) ([]*model.OpenedFile, error) {
+	return s.sqliteStore.GetCurrentlyOpenedFilesBySession(sessionID)
+}
+
 // SessionStore is an alias for model.SessionStore for backward compatibility
 type SessionStore = model.SessionStore
 
-// GetAllSessions returns all sessions grouped by userID
-func (s *MemoryStore) GetAllSessions() (map[string][]*model.Session, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	sessionsByUser := make(map[string][]*model.Session)
-	for _, session := range s.sessions {
-		sessionsByUser[session.UserID] = append(sessionsByUser[session.UserID], session)
-	}
-
-	return sessionsByUser, nil
-}
-
-// Ensure MemoryStore implements model.SessionStore
-var _ model.SessionStore = (*MemoryStore)(nil)
+// Ensure DBStore implements model.SessionStore
+var _ model.SessionStore = (*DBStore)(nil)

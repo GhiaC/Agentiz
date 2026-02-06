@@ -80,6 +80,51 @@ func (s *SQLiteStore) initSchema() error {
 	CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
 	CREATE INDEX IF NOT EXISTS idx_sessions_updated_at ON sessions(updated_at);
 	CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_user_core ON sessions(user_id, agent_type) WHERE agent_type = 'core';
+	
+	CREATE TABLE IF NOT EXISTS users (
+		user_id TEXT PRIMARY KEY,
+		data TEXT NOT NULL,
+		created_at INTEGER NOT NULL,
+		updated_at INTEGER NOT NULL
+	);
+	
+	CREATE TABLE IF NOT EXISTS messages (
+		message_id TEXT PRIMARY KEY,
+		user_id TEXT NOT NULL,
+		session_id TEXT NOT NULL,
+		role TEXT NOT NULL,
+		content TEXT NOT NULL,
+		model TEXT,
+		prompt_tokens INTEGER DEFAULT 0,
+		completion_tokens INTEGER DEFAULT 0,
+		total_tokens INTEGER DEFAULT 0,
+		request_model TEXT,
+		max_tokens INTEGER,
+		temperature REAL,
+		has_tool_calls INTEGER DEFAULT 0,
+		finish_reason TEXT,
+		created_at INTEGER NOT NULL
+	);
+	
+	CREATE INDEX IF NOT EXISTS idx_messages_user_id ON messages(user_id);
+	CREATE INDEX IF NOT EXISTS idx_messages_session_id ON messages(session_id);
+	CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at);
+	
+	CREATE TABLE IF NOT EXISTS opened_files (
+		file_id TEXT PRIMARY KEY,
+		session_id TEXT NOT NULL,
+		user_id TEXT NOT NULL,
+		file_path TEXT NOT NULL,
+		file_name TEXT,
+		opened_at INTEGER NOT NULL,
+		closed_at INTEGER,
+		is_open INTEGER DEFAULT 1
+	);
+	
+	CREATE INDEX IF NOT EXISTS idx_opened_files_session_id ON opened_files(session_id);
+	CREATE INDEX IF NOT EXISTS idx_opened_files_user_id ON opened_files(user_id);
+	CREATE INDEX IF NOT EXISTS idx_opened_files_file_path ON opened_files(file_path);
+	CREATE INDEX IF NOT EXISTS idx_opened_files_is_open ON opened_files(is_open);
 	`
 
 	_, err := s.db.Exec(schema)
@@ -472,6 +517,418 @@ func (s *SQLiteStore) ClearVisitedNodes(userID string) {
 // Example: store, err := NewSQLiteStoreFromFile("./data/sessions.db")
 func NewSQLiteStoreFromFile(dbPath string) (model.SessionStore, error) {
 	return NewSQLiteStore(dbPath)
+}
+
+// GetUser retrieves a user by ID
+func (s *SQLiteStore) GetUser(userID string) (*model.User, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var data string
+	var createdAt, updatedAt int64
+
+	err := s.db.QueryRow(
+		"SELECT data, created_at, updated_at FROM users WHERE user_id = ?",
+		userID,
+	).Scan(&data, &createdAt, &updatedAt)
+
+	if err == sql.ErrNoRows {
+		return nil, nil // User not found, return nil without error
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to query user: %w", err)
+	}
+
+	user := &model.User{}
+	if err := json.Unmarshal([]byte(data), user); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal user: %w", err)
+	}
+
+	// Restore timestamps
+	user.CreatedAt = time.Unix(createdAt, 0)
+	user.UpdatedAt = time.Unix(updatedAt, 0)
+
+	return user, nil
+}
+
+// PutUser stores or updates a user
+func (s *SQLiteStore) PutUser(user *model.User) error {
+	if user == nil {
+		return fmt.Errorf("user cannot be nil")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	user.UpdatedAt = time.Now()
+
+	// Serialize user to JSON
+	data, err := json.Marshal(user)
+	if err != nil {
+		return fmt.Errorf("failed to marshal user: %w", err)
+	}
+
+	createdAt := user.CreatedAt.Unix()
+	updatedAt := user.UpdatedAt.Unix()
+
+	// Use INSERT OR REPLACE for upsert behavior
+	_, err = s.db.Exec(
+		`INSERT OR REPLACE INTO users (user_id, data, created_at, updated_at)
+		 VALUES (?, ?, ?, ?)`,
+		user.UserID,
+		string(data),
+		createdAt,
+		updatedAt,
+	)
+
+	if err != nil {
+		return fmt.Errorf("failed to store user: %w", err)
+	}
+
+	return nil
+}
+
+// GetOrCreateUser gets an existing user or creates a new one
+func (s *SQLiteStore) GetOrCreateUser(userID string) (*model.User, error) {
+	user, err := s.GetUser(userID)
+	if err != nil {
+		return nil, err
+	}
+	if user != nil {
+		return user, nil
+	}
+
+	// Create new user
+	user = model.NewUser(userID)
+	if err := s.PutUser(user); err != nil {
+		return nil, err
+	}
+
+	return user, nil
+}
+
+// PutMessage stores a message in the database
+func (s *SQLiteStore) PutMessage(message *model.Message) error {
+	if message == nil {
+		return fmt.Errorf("message cannot be nil")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	createdAt := message.CreatedAt.Unix()
+
+	// Convert bool to int for SQLite
+	hasToolCalls := 0
+	if message.HasToolCalls {
+		hasToolCalls = 1
+	}
+
+	// Use INSERT OR REPLACE for upsert behavior
+	_, err := s.db.Exec(
+		`INSERT OR REPLACE INTO messages (
+			message_id, user_id, session_id, role, content, model,
+			prompt_tokens, completion_tokens, total_tokens,
+			request_model, max_tokens, temperature, has_tool_calls, finish_reason, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		message.MessageID,
+		message.UserID,
+		message.SessionID,
+		message.Role,
+		message.Content,
+		message.Model,
+		message.PromptTokens,
+		message.CompletionTokens,
+		message.TotalTokens,
+		message.RequestModel,
+		message.MaxTokens,
+		message.Temperature,
+		hasToolCalls,
+		message.FinishReason,
+		createdAt,
+	)
+
+	if err != nil {
+		return fmt.Errorf("failed to store message: %w", err)
+	}
+
+	return nil
+}
+
+// GetMessagesBySession returns all messages for a session
+func (s *SQLiteStore) GetMessagesBySession(sessionID string) ([]*model.Message, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.Query(
+		`SELECT message_id, user_id, session_id, role, content, model,
+			prompt_tokens, completion_tokens, total_tokens,
+			request_model, max_tokens, temperature, has_tool_calls, finish_reason, created_at
+		FROM messages WHERE session_id = ? ORDER BY created_at ASC`,
+		sessionID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query messages: %w", err)
+	}
+	defer rows.Close()
+
+	var messages []*model.Message
+	for rows.Next() {
+		msg := &model.Message{}
+		var createdAt int64
+		var hasToolCallsInt int
+
+		err := rows.Scan(
+			&msg.MessageID,
+			&msg.UserID,
+			&msg.SessionID,
+			&msg.Role,
+			&msg.Content,
+			&msg.Model,
+			&msg.PromptTokens,
+			&msg.CompletionTokens,
+			&msg.TotalTokens,
+			&msg.RequestModel,
+			&msg.MaxTokens,
+			&msg.Temperature,
+			&hasToolCallsInt,
+			&msg.FinishReason,
+			&createdAt,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan message: %w", err)
+		}
+
+		msg.HasToolCalls = hasToolCallsInt != 0
+		msg.CreatedAt = time.Unix(createdAt, 0)
+		messages = append(messages, msg)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating messages: %w", err)
+	}
+
+	return messages, nil
+}
+
+// GetMessagesByUser returns all messages for a user
+func (s *SQLiteStore) GetMessagesByUser(userID string) ([]*model.Message, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.Query(
+		`SELECT message_id, user_id, session_id, role, content, model,
+			prompt_tokens, completion_tokens, total_tokens,
+			request_model, max_tokens, temperature, has_tool_calls, finish_reason, created_at
+		FROM messages WHERE user_id = ? ORDER BY created_at ASC`,
+		userID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query messages: %w", err)
+	}
+	defer rows.Close()
+
+	var messages []*model.Message
+	for rows.Next() {
+		msg := &model.Message{}
+		var createdAt int64
+		var hasToolCallsInt int
+
+		err := rows.Scan(
+			&msg.MessageID,
+			&msg.UserID,
+			&msg.SessionID,
+			&msg.Role,
+			&msg.Content,
+			&msg.Model,
+			&msg.PromptTokens,
+			&msg.CompletionTokens,
+			&msg.TotalTokens,
+			&msg.RequestModel,
+			&msg.MaxTokens,
+			&msg.Temperature,
+			&hasToolCallsInt,
+			&msg.FinishReason,
+			&createdAt,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan message: %w", err)
+		}
+
+		msg.HasToolCalls = hasToolCallsInt != 0
+		msg.CreatedAt = time.Unix(createdAt, 0)
+		messages = append(messages, msg)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating messages: %w", err)
+	}
+
+	return messages, nil
+}
+
+// AddOpenedFile records that a file was opened in a session
+func (s *SQLiteStore) AddOpenedFile(openedFile *model.OpenedFile) error {
+	if openedFile == nil {
+		return fmt.Errorf("openedFile cannot be nil")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	openedAt := openedFile.OpenedAt.Unix()
+	var closedAt int64
+	if !openedFile.ClosedAt.IsZero() {
+		closedAt = openedFile.ClosedAt.Unix()
+	}
+
+	isOpen := 0
+	if openedFile.IsOpen {
+		isOpen = 1
+	}
+
+	_, err := s.db.Exec(
+		`INSERT OR REPLACE INTO opened_files (
+			file_id, session_id, user_id, file_path, file_name, opened_at, closed_at, is_open
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		openedFile.FileID,
+		openedFile.SessionID,
+		openedFile.UserID,
+		openedFile.FilePath,
+		openedFile.FileName,
+		openedAt,
+		closedAt,
+		isOpen,
+	)
+
+	if err != nil {
+		return fmt.Errorf("failed to store opened file: %w", err)
+	}
+
+	return nil
+}
+
+// CloseOpenedFile marks a file as closed
+func (s *SQLiteStore) CloseOpenedFile(sessionID string, filePath string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	closedAt := time.Now().Unix()
+
+	_, err := s.db.Exec(
+		`UPDATE opened_files 
+		 SET is_open = 0, closed_at = ? 
+		 WHERE session_id = ? AND file_path = ? AND is_open = 1`,
+		closedAt,
+		sessionID,
+		filePath,
+	)
+
+	if err != nil {
+		return fmt.Errorf("failed to close opened file: %w", err)
+	}
+
+	return nil
+}
+
+// GetOpenedFilesBySession returns all opened files for a session
+func (s *SQLiteStore) GetOpenedFilesBySession(sessionID string) ([]*model.OpenedFile, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.Query(
+		`SELECT file_id, session_id, user_id, file_path, file_name, opened_at, closed_at, is_open
+		FROM opened_files WHERE session_id = ? ORDER BY opened_at ASC`,
+		sessionID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query opened files: %w", err)
+	}
+	defer rows.Close()
+
+	var files []*model.OpenedFile
+	for rows.Next() {
+		f := &model.OpenedFile{}
+		var openedAt, closedAt int64
+		var isOpenInt int
+
+		err := rows.Scan(
+			&f.FileID,
+			&f.SessionID,
+			&f.UserID,
+			&f.FilePath,
+			&f.FileName,
+			&openedAt,
+			&closedAt,
+			&isOpenInt,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan opened file: %w", err)
+		}
+
+		f.OpenedAt = time.Unix(openedAt, 0)
+		if closedAt > 0 {
+			f.ClosedAt = time.Unix(closedAt, 0)
+		}
+		f.IsOpen = isOpenInt != 0
+		files = append(files, f)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating opened files: %w", err)
+	}
+
+	return files, nil
+}
+
+// GetCurrentlyOpenedFilesBySession returns only currently open files for a session
+func (s *SQLiteStore) GetCurrentlyOpenedFilesBySession(sessionID string) ([]*model.OpenedFile, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.Query(
+		`SELECT file_id, session_id, user_id, file_path, file_name, opened_at, closed_at, is_open
+		FROM opened_files WHERE session_id = ? AND is_open = 1 ORDER BY opened_at ASC`,
+		sessionID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query opened files: %w", err)
+	}
+	defer rows.Close()
+
+	var files []*model.OpenedFile
+	for rows.Next() {
+		f := &model.OpenedFile{}
+		var openedAt, closedAt int64
+		var isOpenInt int
+
+		err := rows.Scan(
+			&f.FileID,
+			&f.SessionID,
+			&f.UserID,
+			&f.FilePath,
+			&f.FileName,
+			&openedAt,
+			&closedAt,
+			&isOpenInt,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan opened file: %w", err)
+		}
+
+		f.OpenedAt = time.Unix(openedAt, 0)
+		if closedAt > 0 {
+			f.ClosedAt = time.Unix(closedAt, 0)
+		}
+		f.IsOpen = isOpenInt != 0
+		files = append(files, f)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating opened files: %w", err)
+	}
+
+	return files, nil
 }
 
 // Ensure SQLiteStore implements model.SessionStore

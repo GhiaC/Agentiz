@@ -60,9 +60,15 @@ func NewWithOptions(path string, opts *Options) (*Agentize, error) {
 	}
 
 	// Determine session store
-	sessionStore := store.SessionStore(store.NewMemoryStore())
+	var sessionStore store.SessionStore
 	if opts != nil && opts.SessionStore != nil {
 		sessionStore = opts.SessionStore
+	} else {
+		dbStore, err := store.NewDBStore()
+		if err != nil {
+			return nil, fmt.Errorf("failed to create DBStore: %w", err)
+		}
+		sessionStore = dbStore
 	}
 
 	// Determine function registry

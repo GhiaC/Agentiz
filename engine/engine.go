@@ -153,13 +153,48 @@ func (e *Engine) OpenFile(sessionID string, path string) (string, error) {
 	}
 
 	// Check if already opened
+	alreadyOpened := false
 	for _, digest := range session.NodeDigests {
 		if digest.Path == path {
+			alreadyOpened = true
 			// Already opened, return content
 			node, err := e.Repo.LoadNode(path)
 			if err != nil {
 				return "", fmt.Errorf("failed to load node: %w", err)
 			}
+
+			// Check if file is recorded as open in database, if not, record it
+			if sqliteStore, ok := e.Sessions.(interface {
+				GetCurrentlyOpenedFilesBySession(string) ([]*model.OpenedFile, error)
+				AddOpenedFile(*model.OpenedFile) error
+			}); ok {
+				openedFiles, err := sqliteStore.GetCurrentlyOpenedFilesBySession(sessionID)
+				if err != nil {
+					log.Log.Warnf("[Engine] ⚠️  Failed to get opened files | SessionID: %s | Error: %v", sessionID, err)
+				} else {
+					// Check if file is already recorded
+					isRecorded := false
+					for _, f := range openedFiles {
+						if f.FilePath == path && f.IsOpen {
+							isRecorded = true
+							break
+						}
+					}
+
+					// Record file if not found in database
+					if !isRecorded {
+						fileName := path
+						if node.Title != "" {
+							fileName = node.Title
+						}
+						openedFile := model.NewOpenedFile(sessionID, session.UserID, path, fileName)
+						if err := sqliteStore.AddOpenedFile(openedFile); err != nil {
+							log.Log.Warnf("[Engine] ⚠️  Failed to record opened file | SessionID: %s | Path: %s | Error: %v", sessionID, path, err)
+						}
+					}
+				}
+			}
+
 			return node.Content, nil
 		}
 	}
@@ -176,6 +211,24 @@ func (e *Engine) OpenFile(sessionID string, path string) (string, error) {
 	// Persist session
 	if err := e.Sessions.Put(session); err != nil {
 		return "", fmt.Errorf("failed to update session: %w", err)
+	}
+
+	// Record opened file in database (only if not already opened)
+	if !alreadyOpened {
+		if sqliteStore, ok := e.Sessions.(interface {
+			AddOpenedFile(*model.OpenedFile) error
+		}); ok {
+			fileName := path
+			if node.Title != "" {
+				fileName = node.Title
+			}
+			openedFile := model.NewOpenedFile(sessionID, session.UserID, path, fileName)
+			if err := sqliteStore.AddOpenedFile(openedFile); err != nil {
+				log.Log.Warnf("[Engine] ⚠️  Failed to record opened file | SessionID: %s | Path: %s | Error: %v", sessionID, path, err)
+			} else {
+				log.Log.Infof("[Engine] 📂 File opened recorded | SessionID: %s | Path: %s | FileID: %s", sessionID, path, openedFile.FileID)
+			}
+		}
 	}
 
 	return node.Content, nil
@@ -215,6 +268,17 @@ func (e *Engine) CloseFile(sessionID string, path string) error {
 	// Persist session
 	if err := e.Sessions.Put(session); err != nil {
 		return fmt.Errorf("failed to update session: %w", err)
+	}
+
+	// Record closed file in database
+	if sqliteStore, ok := e.Sessions.(interface {
+		CloseOpenedFile(string, string) error
+	}); ok {
+		if err := sqliteStore.CloseOpenedFile(sessionID, path); err != nil {
+			log.Log.Warnf("[Engine] ⚠️  Failed to record closed file | SessionID: %s | Path: %s | Error: %v", sessionID, path, err)
+		} else {
+			log.Log.Infof("[Engine] 📂 File closed recorded | SessionID: %s | Path: %s", sessionID, path)
+		}
 	}
 
 	return nil
@@ -280,6 +344,11 @@ func (e *Engine) ProcessMessage(
 
 	// Add user message
 	if len(userMessage) > 1 {
+		// Get session to access userID
+		session, err := e.Sessions.Get(sessionID)
+		if err != nil {
+			return "", 0, fmt.Errorf("failed to get session: %w", err)
+		}
 		if err := e.appendMessages(sessionID, []openai.ChatCompletionMessage{
 			{
 				Role:    openai.ChatMessageRoleUser,
@@ -287,6 +356,16 @@ func (e *Engine) ProcessMessage(
 			},
 		}); err != nil {
 			return "", 0, fmt.Errorf("failed to add user message: %w", err)
+		}
+
+		// Save user message to database
+		userMsg := model.NewUserMessage(session.UserID, sessionID, userMessage)
+		if sqliteStore, ok := e.Sessions.(interface {
+			PutMessage(*model.Message) error
+		}); ok {
+			if err := sqliteStore.PutMessage(userMsg); err != nil {
+				log.Log.Warnf("[Engine] ⚠️  Failed to save user message | SessionID: %s | Error: %v", sessionID, err)
+			}
 		}
 	}
 
@@ -822,14 +901,12 @@ func (e *Engine) processChatRequest(
 		len(systemPrompts), len(openaiTools), len(reqMessages))
 
 	// Make OpenAI API call
-	resp, err := e.llmClient.CreateChatCompletion(
-		ctx,
-		openai.ChatCompletionRequest{
-			Model:    modelName,
-			Messages: reqMessages,
-			Tools:    openaiTools,
-		},
-	)
+	request := openai.ChatCompletionRequest{
+		Model:    modelName,
+		Messages: reqMessages,
+		Tools:    openaiTools,
+	}
+	resp, err := e.llmClient.CreateChatCompletion(ctx, request)
 
 	if err != nil {
 		return "", 0, formatLLMError(err)
@@ -841,6 +918,9 @@ func (e *Engine) processChatRequest(
 
 	choice := resp.Choices[0]
 	tokenUsage := resp.Usage.TotalTokens
+
+	// Save message to database
+	e.saveMessage(session, request, resp, choice)
 
 	// Handle tool calls
 	if choice.FinishReason == openai.FinishReasonToolCalls {
@@ -934,4 +1014,40 @@ func (e *Engine) processChatRequest(
 	})
 
 	return textResponse, tokenUsage, nil
+}
+
+// saveMessage saves a message to the database
+func (e *Engine) saveMessage(
+	session *model.Session,
+	request openai.ChatCompletionRequest,
+	response openai.ChatCompletionResponse,
+	choice openai.ChatCompletionChoice,
+) {
+	// Get user message content
+	content := choice.Message.Content
+	if content == "" && len(choice.Message.ToolCalls) > 0 {
+		content = fmt.Sprintf("[Tool Calls: %d]", len(choice.Message.ToolCalls))
+	}
+
+	// Create message record
+	msg := model.NewMessage(
+		session.UserID,
+		session.SessionID,
+		openai.ChatMessageRoleAssistant,
+		content,
+		request,
+		response,
+		choice,
+	)
+
+	// Try to save to database if store supports it
+	if sqliteStore, ok := e.Sessions.(interface {
+		PutMessage(*model.Message) error
+	}); ok {
+		if err := sqliteStore.PutMessage(msg); err != nil {
+			log.Log.Warnf("[Engine] ⚠️  Failed to save message | SessionID: %s | Error: %v", session.SessionID, err)
+		} else {
+			log.Log.Infof("[Engine] 💾 Message saved | MessageID: %s | Model: %s | Tokens: %d", msg.MessageID, msg.Model, msg.TotalTokens)
+		}
+	}
 }
