@@ -545,6 +545,23 @@ func (ch *CoreHandler) getCoreToolsForLLM() []openai.Tool {
 				},
 			},
 		},
+		{
+			Type: openai.ToolTypeFunction,
+			Function: &openai.FunctionDefinition{
+				Name:        "web_search_deepresearch",
+				Description: "Same as web_search but uses Tongyi DeepResearch model (alibaba/tongyi-deepresearch-30b-a3b). Use for testing or when you want deep-research style search results.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"query": map[string]interface{}{
+							"type":        "string",
+							"description": "The search query to find information on the web",
+						},
+					},
+					"required": []string{"query"},
+				},
+			},
+		},
 	}
 }
 
@@ -677,7 +694,9 @@ func (ch *CoreHandler) executeCoreTool(
 		return ch.banUserTool(ctx, args)
 
 	case "web_search":
-		return ch.webSearchTool(ctx, userID, args)
+		return ch.webSearchWithModelTool(ctx, userID, args, "")
+	case "web_search_deepresearch":
+		return ch.webSearchWithModelTool(ctx, userID, args, SearchModelTongyiDeepResearch)
 
 	default:
 		return "", fmt.Errorf("unknown tool: %s", toolCall.Function.Name)
@@ -941,25 +960,17 @@ func (ch *CoreHandler) banUserTool(_ context.Context, args map[string]interface{
 	return fmt.Sprintf("User %s has been banned. Duration: %v", userID, banDuration), nil
 }
 
-// webSearchTool performs a web search using OpenAI's web search capability
-func (ch *CoreHandler) webSearchTool(ctx context.Context, userID string, args map[string]interface{}) (string, error) {
+// webSearchWithModelTool performs a web search; if searchModel is empty, uses the default.
+func (ch *CoreHandler) webSearchWithModelTool(ctx context.Context, userID string, args map[string]interface{}, searchModel string) (string, error) {
 	query, ok := args["query"].(string)
 	if !ok || query == "" {
 		return "", fmt.Errorf("query is required")
 	}
-
-	// Ensure userID is in context
-	if userID != "" {
-		ctx = model.WithUserID(ctx, userID)
-	}
-
-	// Use the helper function to perform web search
-	result, err := PerformWebSearch(ctx, ch.llmClient, ch.llmConfig, query, userID)
+	result, err := PerformWebSearchWithModel(ctx, ch.llmClient, ch.llmConfig, query, userID, searchModel)
 	if err != nil {
 		log.Log.Errorf("[CoreHandler] ❌ Web search failed | UserID: %s | Query: %s | Error: %v", userID, query, err)
 		return "", fmt.Errorf("web search failed: %w", err)
 	}
-
 	log.Log.Infof("[CoreHandler] ✅ Web search completed | UserID: %s | Query: %s | Result length: %d chars", userID, query, len(result))
 	return result, nil
 }
