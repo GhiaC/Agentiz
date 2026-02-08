@@ -30,6 +30,9 @@ type CoreHandlerConfig struct {
 
 	// Session configuration
 	AutoSummarizeThreshold int // Default: 20 messages
+
+	// WebSearchDisabled disables web_search and web_search_deepresearch tools
+	WebSearchDisabled bool
 }
 
 // DefaultCoreHandlerConfig returns default configuration
@@ -39,6 +42,7 @@ func DefaultCoreHandlerConfig() CoreHandlerConfig {
 		UserAgentHighModel:     "gpt-4o-mini",
 		UserAgentLowModel:      "gpt-4o-mini",
 		AutoSummarizeThreshold: 5,
+		WebSearchDisabled:      true, // Web search disabled by default
 	}
 }
 
@@ -397,7 +401,25 @@ func (ch *CoreHandler) buildSystemPrompts(userID string) ([]string, error) {
 	// 1. Core Controller base prompt
 	prompts = append(prompts, coreControllerPrompt)
 
-	// 2. Sessions summary prompt
+	// 2. Session context - Summary and tags from previous conversations (if summarized)
+	// This provides context from archived messages that are no longer in the active conversation
+	ch.coreSessionsMu.RLock()
+	coreSession := ch.coreSessions[userID]
+	ch.coreSessionsMu.RUnlock()
+	if coreSession != nil {
+		sessionContext := ch.buildCoreSessionContext(coreSession)
+		if sessionContext != "" {
+			prompts = append(prompts, sessionContext)
+		}
+	}
+
+	// 3. Active sessions prompt (shows current active session for each agent type)
+	activePrompt := ch.buildActiveSessionsPrompt(userID)
+	if activePrompt != "" {
+		prompts = append(prompts, activePrompt)
+	}
+
+	// 4. Sessions list prompt (for change_session)
 	sessionsPrompt, err := ch.sessionHandler.GetSessionsPrompt(userID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get sessions prompt: %w", err)
@@ -405,6 +427,88 @@ func (ch *CoreHandler) buildSystemPrompts(userID string) ([]string, error) {
 	prompts = append(prompts, sessionsPrompt)
 
 	return prompts, nil
+}
+
+// buildCoreSessionContext builds session context with summary and tags for the Core
+// This is used to provide context from archived/summarized messages
+// Note: ExMsgs is only for debug purposes and is NOT included in the LLM context
+func (ch *CoreHandler) buildCoreSessionContext(session *model.Session) string {
+	// Only include context if session has been summarized (has summary or tags)
+	if session.Summary == "" && len(session.Tags) == 0 {
+		return ""
+	}
+
+	var sb strings.Builder
+	sb.WriteString("# Core Session Context\n\n")
+	sb.WriteString("This is a continuation of a previous conversation. Here is the context from earlier messages:\n\n")
+
+	if session.Summary != "" {
+		sb.WriteString("## Summary of Previous Conversation\n")
+		sb.WriteString(session.Summary)
+		sb.WriteString("\n\n")
+	}
+
+	if len(session.Tags) > 0 {
+		sb.WriteString("## Topics Discussed\n")
+		sb.WriteString(strings.Join(session.Tags, ", "))
+		sb.WriteString("\n")
+	}
+
+	return sb.String()
+}
+
+// buildActiveSessionsPrompt generates a prompt showing current active sessions
+func (ch *CoreHandler) buildActiveSessionsPrompt(userID string) string {
+	user, err := ch.getOrCreateUser(userID)
+	if err != nil || user == nil {
+		return ""
+	}
+
+	var sb strings.Builder
+	sb.WriteString("## Current Active Sessions\n\n")
+	sb.WriteString("These are the currently active sessions. Messages are automatically sent to these sessions.\n\n")
+
+	hasActiveSessions := false
+
+	// Check each agent type
+	agentTypes := []struct {
+		agentType model.AgentType
+		name      string
+	}{
+		{model.AgentTypeHigh, "UserAgent-High"},
+		{model.AgentTypeLow, "UserAgent-Low"},
+	}
+
+	for _, at := range agentTypes {
+		sessionID := user.GetActiveSessionID(at.agentType)
+		if sessionID == "" {
+			sb.WriteString(fmt.Sprintf("- **%s**: No active session (will be created automatically on first message)\n", at.name))
+			continue
+		}
+
+		// Get session details
+		session, err := ch.sessionHandler.GetSession(sessionID)
+		if err != nil || session == nil {
+			sb.WriteString(fmt.Sprintf("- **%s**: No active session (previous session was deleted)\n", at.name))
+			continue
+		}
+
+		hasActiveSessions = true
+		title := session.Title
+		if title == "" {
+			title = "Untitled"
+		}
+		msgCount := len(session.ConversationState.Msgs)
+		sb.WriteString(fmt.Sprintf("- **%s**: [%s] \"%s\" (%d messages)\n", at.name, sessionID, title, msgCount))
+	}
+
+	if !hasActiveSessions {
+		return ""
+	}
+
+	sb.WriteString("\nUse `create_session` to start a new topic, or `change_session` to switch to a different session.\n")
+
+	return sb.String()
 }
 
 // buildMessages builds the message array for the LLM call
@@ -428,25 +532,21 @@ func (ch *CoreHandler) buildMessages(systemPrompts []string, conversationMsgs []
 
 // getCoreToolsForLLM returns the tools in OpenAI format
 func (ch *CoreHandler) getCoreToolsForLLM() []openai.Tool {
-	return []openai.Tool{
+	tools := []openai.Tool{
 		{
 			Type: openai.ToolTypeFunction,
 			Function: &openai.FunctionDefinition{
 				Name:        "call_user_agent_high",
-				Description: "Send a message to the high-intelligence UserAgent for complex tasks",
+				Description: "Send a message to the high-intelligence UserAgent for complex tasks. Session is managed automatically.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
-						"session_id": map[string]interface{}{
-							"type":        "string",
-							"description": "The session ID to use for this conversation. This is the value inside the square brackets [XXX] from the sessions list, NOT the title in quotes. Example: if you see '[1802460620-260205-ahov] \"Some Title\"', use '1802460620-260205-ahov' as session_id.",
-						},
 						"message": map[string]interface{}{
 							"type":        "string",
 							"description": "The message to send to the UserAgent",
 						},
 					},
-					"required": []string{"session_id", "message"},
+					"required": []string{"message"},
 				},
 			},
 		},
@@ -454,20 +554,16 @@ func (ch *CoreHandler) getCoreToolsForLLM() []openai.Tool {
 			Type: openai.ToolTypeFunction,
 			Function: &openai.FunctionDefinition{
 				Name:        "call_user_agent_low",
-				Description: "Send a message to the cost-effective UserAgent for simple tasks",
+				Description: "Send a message to the cost-effective UserAgent for simple tasks. Session is managed automatically.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
-						"session_id": map[string]interface{}{
-							"type":        "string",
-							"description": "The session ID to use for this conversation. This is the value inside the square brackets [XXX] from the sessions list, NOT the title in quotes. Example: if you see '[1802460620-260205-ahov] \"Some Title\"', use '1802460620-260205-ahov' as session_id.",
-						},
 						"message": map[string]interface{}{
 							"type":        "string",
 							"description": "The message to send to the UserAgent",
 						},
 					},
-					"required": []string{"session_id", "message"},
+					"required": []string{"message"},
 				},
 			},
 		},
@@ -475,7 +571,7 @@ func (ch *CoreHandler) getCoreToolsForLLM() []openai.Tool {
 			Type: openai.ToolTypeFunction,
 			Function: &openai.FunctionDefinition{
 				Name:        "create_session",
-				Description: "Create a new session for a UserAgent",
+				Description: "Create a new session for a UserAgent and make it the active session. Use when starting a new topic or conversation.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -496,17 +592,22 @@ func (ch *CoreHandler) getCoreToolsForLLM() []openai.Tool {
 		{
 			Type: openai.ToolTypeFunction,
 			Function: &openai.FunctionDefinition{
-				Name:        "summarize_session",
-				Description: "Trigger summarization of a session to archive old messages",
+				Name:        "change_session",
+				Description: "Switch to a different existing session. Use when user wants to continue a previous conversation.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
+						"agent_type": map[string]interface{}{
+							"type":        "string",
+							"enum":        []string{"high", "low"},
+							"description": "The type of UserAgent",
+						},
 						"session_id": map[string]interface{}{
 							"type":        "string",
-							"description": "The session ID to summarize",
+							"description": "The session ID to switch to (from list_sessions)",
 						},
 					},
-					"required": []string{"session_id"},
+					"required": []string{"agent_type", "session_id"},
 				},
 			},
 		},
@@ -514,36 +615,10 @@ func (ch *CoreHandler) getCoreToolsForLLM() []openai.Tool {
 			Type: openai.ToolTypeFunction,
 			Function: &openai.FunctionDefinition{
 				Name:        "list_sessions",
-				Description: "Get a refreshed list of all sessions for the current user",
+				Description: "Get a list of all sessions for the current user. Use to find sessions for change_session.",
 				Parameters: map[string]interface{}{
 					"type":       "object",
 					"properties": map[string]interface{}{},
-				},
-			},
-		},
-		{
-			Type: openai.ToolTypeFunction,
-			Function: &openai.FunctionDefinition{
-				Name:        "update_session_metadata",
-				Description: "Update the title and tags of a session",
-				Parameters: map[string]interface{}{
-					"type": "object",
-					"properties": map[string]interface{}{
-						"session_id": map[string]interface{}{
-							"type":        "string",
-							"description": "The session ID to update",
-						},
-						"title": map[string]interface{}{
-							"type":        "string",
-							"description": "New title for the session",
-						},
-						"tags": map[string]interface{}{
-							"type":        "array",
-							"items":       map[string]interface{}{"type": "string"},
-							"description": "Tags to apply to the session",
-						},
-					},
-					"required": []string{"session_id"},
 				},
 			},
 		},
@@ -572,7 +647,11 @@ func (ch *CoreHandler) getCoreToolsForLLM() []openai.Tool {
 				},
 			},
 		},
-		{
+	}
+
+	// Add web search tools only if not disabled
+	if !ch.config.WebSearchDisabled {
+		tools = append(tools, openai.Tool{
 			Type: openai.ToolTypeFunction,
 			Function: &openai.FunctionDefinition{
 				Name:        "web_search",
@@ -588,8 +667,8 @@ func (ch *CoreHandler) getCoreToolsForLLM() []openai.Tool {
 					"required": []string{"query"},
 				},
 			},
-		},
-		{
+		})
+		tools = append(tools, openai.Tool{
 			Type: openai.ToolTypeFunction,
 			Function: &openai.FunctionDefinition{
 				Name:        "web_search_deepresearch",
@@ -605,8 +684,10 @@ func (ch *CoreHandler) getCoreToolsForLLM() []openai.Tool {
 					"required": []string{"query"},
 				},
 			},
-		},
+		})
 	}
+
+	return tools
 }
 
 // processWithTools handles the LLM call and tool execution loop
@@ -726,14 +807,11 @@ func (ch *CoreHandler) executeCoreTool(
 	case "create_session":
 		return ch.createSessionTool(ctx, userID, args)
 
-	case "summarize_session":
-		return ch.summarizeSessionTool(ctx, args)
+	case "change_session":
+		return ch.changeSessionTool(ctx, userID, args)
 
 	case "list_sessions":
 		return ch.listSessionsTool(userID)
-
-	case "update_session_metadata":
-		return ch.updateSessionMetadataTool(args)
 
 	case "ban_user":
 		return ch.banUserTool(ctx, args)
@@ -749,61 +827,29 @@ func (ch *CoreHandler) executeCoreTool(
 }
 
 // callUserAgent sends a message to a UserAgent
+// Session is automatically managed - uses active session or creates new one
 func (ch *CoreHandler) callUserAgent(
 	ctx context.Context,
-	userID string, // userID - reserved for future use
+	userID string,
 	args map[string]interface{},
 	agent *Engine,
 	agentType model.AgentType,
 ) (string, error) {
-	sessionID, ok := args["session_id"].(string)
-	if !ok || sessionID == "" {
-		return "", fmt.Errorf("session_id is required")
-	}
-
 	message, ok := args["message"].(string)
 	if !ok || message == "" {
 		return "", fmt.Errorf("message is required")
 	}
 
-	log.Log.Infof("[CoreHandler] 🎯 Selecting session for UserAgent | SessionID: %s | AgentType: %s | UserID: %s",
-		sessionID, agentType, userID)
-
-	// Verify session exists and belongs to the right agent type
-	session, err := ch.sessionHandler.GetSession(sessionID)
+	// Get or create active session for this agent type
+	sessionID, err := ch.getOrCreateActiveSession(userID, agentType)
 	if err != nil {
-		log.Log.Errorf("[CoreHandler] ❌ Session not found | SessionID: %s | Error: %v", sessionID, err)
-		return "", fmt.Errorf("session not found: %s", sessionID)
-	}
-	if session.AgentType != agentType {
-		log.Log.Warnf("[CoreHandler] ⚠️  Session type mismatch | SessionID: %s | Expected: %s | Got: %s | Creating new session",
-			sessionID, agentType, session.AgentType)
-
-		// Create a new session of the correct type
-		newSession, err := ch.sessionHandler.CreateSession(userID, agentType)
-		if err != nil {
-			log.Log.Errorf("[CoreHandler] ❌ Failed to create new session | UserID: %s | AgentType: %s | Error: %v",
-				userID, agentType, err)
-			return "", fmt.Errorf("failed to create %s session: %w", agentType, err)
-		}
-
-		// Update sessionID in args for future use
-		sessionID = newSession.SessionID
-		args["session_id"] = sessionID
-
-		log.Log.Infof("[CoreHandler] ✅ Created new session for escalation | SessionID: %s | AgentType: %s | UserID: %s",
-			sessionID, agentType, userID)
-
-		// Get the new session
-		session = newSession
+		log.Log.Errorf("[CoreHandler] ❌ Failed to get/create active session | UserID: %s | AgentType: %s | Error: %v",
+			userID, agentType, err)
+		return "", fmt.Errorf("failed to get active session: %w", err)
 	}
 
-	log.Log.Infof("[CoreHandler] ✅ Session selected | SessionID: %s | AgentType: %s | Title: %s | Message length: %d chars",
-		sessionID, agentType, getSessionTitleForLog(session), len(message))
-
-	// List all available sessions for comparison
-	allSessions, _ := ch.sessionHandler.ListUserSessions(userID)
-	log.Log.Infof("[CoreHandler] 📊 Available sessions for user: %d | Selected: %s", len(allSessions), sessionID)
+	log.Log.Infof("[CoreHandler] 🎯 Using active session | SessionID: %s | AgentType: %s | UserID: %s | Message length: %d chars",
+		sessionID, agentType, userID, len(message))
 
 	// Process message through the UserAgent
 	response, _, err := agent.ProcessMessage(ctx, sessionID, message)
@@ -858,25 +904,64 @@ func (ch *CoreHandler) createSessionTool(_ context.Context, userID string, args 
 		log.Log.Infof("[CoreHandler] 📝 Set session title | SessionID: %s | Title: %s", session.SessionID, title)
 	}
 
-	// List all sessions after creation
-	allSessions, _ := ch.sessionHandler.ListUserSessions(userID)
-	log.Log.Infof("[CoreHandler] ✅ Session created successfully | SessionID: %s | Total user sessions: %d", session.SessionID, len(allSessions))
+	// Set as active session automatically
+	if err := ch.setActiveSessionID(userID, agentType, session.SessionID); err != nil {
+		log.Log.Warnf("[CoreHandler] ⚠️  Failed to set active session | UserID: %s | AgentType: %s | Error: %v", userID, agentType, err)
+	}
 
-	return fmt.Sprintf("Created session: %s (type: %s)", session.SessionID, agentType), nil
+	log.Log.Infof("[CoreHandler] ✅ Session created and set as active | SessionID: %s | AgentType: %s", session.SessionID, agentType)
+
+	return fmt.Sprintf("Created new session and set as active (type: %s)", agentType), nil
 }
 
-// summarizeSessionTool triggers session summarization
-func (ch *CoreHandler) summarizeSessionTool(ctx context.Context, args map[string]interface{}) (string, error) {
+// changeSessionTool switches to an existing session
+func (ch *CoreHandler) changeSessionTool(_ context.Context, userID string, args map[string]interface{}) (string, error) {
+	agentTypeStr, ok := args["agent_type"].(string)
+	if !ok || agentTypeStr == "" {
+		return "", fmt.Errorf("agent_type is required")
+	}
+
 	sessionID, ok := args["session_id"].(string)
 	if !ok || sessionID == "" {
 		return "", fmt.Errorf("session_id is required")
 	}
 
-	if err := ch.sessionHandler.SummarizeSession(ctx, sessionID); err != nil {
-		return "", fmt.Errorf("failed to summarize session: %w", err)
+	var agentType model.AgentType
+	switch agentTypeStr {
+	case "high":
+		agentType = model.AgentTypeHigh
+	case "low":
+		agentType = model.AgentTypeLow
+	default:
+		return "", fmt.Errorf("invalid agent_type: %s", agentTypeStr)
 	}
 
-	return fmt.Sprintf("Session %s summarized successfully", sessionID), nil
+	log.Log.Infof("[CoreHandler] 🛠️  changeSessionTool called | UserID: %s | AgentType: %s | SessionID: %s", userID, agentType, sessionID)
+
+	// Verify session exists and belongs to the correct agent type
+	session, err := ch.sessionHandler.GetSession(sessionID)
+	if err != nil {
+		log.Log.Errorf("[CoreHandler] ❌ Session not found | SessionID: %s | Error: %v", sessionID, err)
+		return "", fmt.Errorf("session not found: %s", sessionID)
+	}
+
+	if session.AgentType != agentType {
+		return "", fmt.Errorf("session %s is not a %s session (it's a %s session)", sessionID, agentType, session.AgentType)
+	}
+
+	// Set as active session
+	if err := ch.setActiveSessionID(userID, agentType, sessionID); err != nil {
+		return "", fmt.Errorf("failed to set active session: %w", err)
+	}
+
+	title := session.Title
+	if title == "" {
+		title = "Untitled"
+	}
+
+	log.Log.Infof("[CoreHandler] ✅ Session changed | UserID: %s | AgentType: %s | SessionID: %s | Title: %s", userID, agentType, sessionID, title)
+
+	return fmt.Sprintf("Switched to session: %s (%s)", title, agentType), nil
 }
 
 // listSessionsTool returns the sessions summary
@@ -888,31 +973,6 @@ func (ch *CoreHandler) listSessionsTool(userID string) (string, error) {
 	}
 	log.Log.Infof("[CoreHandler] 📋 Returning %d sessions for user %s", len(sessions), userID)
 	return ch.sessionHandler.GetSessionsPrompt(userID)
-}
-
-// updateSessionMetadataTool updates session metadata
-func (ch *CoreHandler) updateSessionMetadataTool(args map[string]interface{}) (string, error) {
-	sessionID, ok := args["session_id"].(string)
-	if !ok || sessionID == "" {
-		return "", fmt.Errorf("session_id is required")
-	}
-
-	title, _ := args["title"].(string)
-
-	var tags []string
-	if tagsInterface, ok := args["tags"].([]interface{}); ok {
-		for _, t := range tagsInterface {
-			if tagStr, ok := t.(string); ok {
-				tags = append(tags, tagStr)
-			}
-		}
-	}
-
-	if err := ch.sessionHandler.UpdateSessionMetadata(sessionID, title, tags, ""); err != nil {
-		return "", fmt.Errorf("failed to update session: %w", err)
-	}
-
-	return fmt.Sprintf("Session %s updated", sessionID), nil
 }
 
 // registerCoreTools registers the Core's internal tools
@@ -963,6 +1023,69 @@ func (ch *CoreHandler) saveUser(user *model.User) error {
 	}
 
 	return fmt.Errorf("store does not support user management")
+}
+
+// getActiveSessionID returns the active session ID for a user and agent type
+// Returns empty string if no active session exists
+func (ch *CoreHandler) getActiveSessionID(userID string, agentType model.AgentType) string {
+	user, err := ch.getOrCreateUser(userID)
+	if err != nil || user == nil {
+		return ""
+	}
+	return user.GetActiveSessionID(agentType)
+}
+
+// setActiveSessionID sets the active session ID for a user and agent type
+// Persists to database via User model
+func (ch *CoreHandler) setActiveSessionID(userID string, agentType model.AgentType, sessionID string) error {
+	user, err := ch.getOrCreateUser(userID)
+	if err != nil {
+		return fmt.Errorf("failed to get user: %w", err)
+	}
+	if user == nil {
+		return fmt.Errorf("user not found and could not be created")
+	}
+
+	user.SetActiveSessionID(agentType, sessionID)
+	if err := ch.saveUser(user); err != nil {
+		return fmt.Errorf("failed to save user: %w", err)
+	}
+
+	log.Log.Infof("[CoreHandler] 📌 Active session set | UserID: %s | AgentType: %s | SessionID: %s",
+		userID, agentType, sessionID)
+	return nil
+}
+
+// getOrCreateActiveSession gets active session or creates one if not exists
+// Returns the session ID (either existing or newly created)
+func (ch *CoreHandler) getOrCreateActiveSession(userID string, agentType model.AgentType) (string, error) {
+	// Check if active session exists
+	sessionID := ch.getActiveSessionID(userID, agentType)
+	if sessionID != "" {
+		// Verify session still exists in database
+		session, err := ch.sessionHandler.GetSession(sessionID)
+		if err == nil && session != nil {
+			return sessionID, nil
+		}
+		// Session was deleted, clear the reference
+		log.Log.Warnf("[CoreHandler] ⚠️  Active session no longer exists, creating new | UserID: %s | AgentType: %s | OldSessionID: %s",
+			userID, agentType, sessionID)
+	}
+
+	// Create new session
+	session, err := ch.sessionHandler.CreateSession(userID, agentType)
+	if err != nil {
+		return "", fmt.Errorf("failed to create session: %w", err)
+	}
+
+	// Set as active session
+	if err := ch.setActiveSessionID(userID, agentType, session.SessionID); err != nil {
+		return "", fmt.Errorf("failed to set active session: %w", err)
+	}
+
+	log.Log.Infof("[CoreHandler] ✨ Auto-created active session | UserID: %s | AgentType: %s | SessionID: %s",
+		userID, agentType, session.SessionID)
+	return session.SessionID, nil
 }
 
 // banUserTool bans a user for a specified duration

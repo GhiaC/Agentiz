@@ -79,8 +79,6 @@ func DefaultSessionSchedulerConfig() SessionSchedulerConfig {
 		SubsequentTimeThreshold:         1 * time.Hour, // Plus at least 1 hour since last summarization
 		LastActivityThreshold:           1 * time.Hour, // Session must be active within last hour
 		ImmediateSummarizationThreshold: 50,            // Immediate summarization when messages exceed 50
-		SummaryModel:                    "gpt-4o-mini",
-		DisableLogs:                     true,
 		SummarizationPrompts:            DefaultSummarizationPrompts(),
 	}
 }
@@ -88,60 +86,84 @@ func DefaultSessionSchedulerConfig() SessionSchedulerConfig {
 // DefaultSummarizationPrompts returns default prompts for summarization
 func DefaultSummarizationPrompts() SummarizationPrompts {
 	return SummarizationPrompts{
-		SummarySystemPrompt: `You are a conversation summarizer.
-Generate a concise summary (2-3 sentences) that captures the main topics and outcomes of this conversation.
+		SummarySystemPrompt: `You are a conversation summarizer that extracts ONLY unique, specific, and personal information.
+
+WHAT TO INCLUDE (specific/unique information):
+- Names of people, places, or entities mentioned
+- Personal details: age, birthday, preferences, relationships
+- Specific decisions or commitments made
+- Important numbers that define something (age, dates, IDs, specific values the user defined)
+- Unique facts about the user or their situation
+- Custom configurations or settings discussed
+
+WHAT TO EXCLUDE (generic/common information):
+- Greetings, pleasantries, and small talk
+- General questions and answers (unit conversions, weather, time, etc.)
+- Temporary calculations or arithmetic results
+- Generic how-to questions
+- Common knowledge lookups
+- Filler content and acknowledgments
 
 Requirements:
-- Focus on key topics discussed and any decisions or conclusions reached
-- Be specific about what was accomplished or discussed
 - Maximum 200 characters
-- Use present or past tense appropriately
-- Do not include greetings or filler content
-- If a previous summary is provided, build upon it and improve it
+- Only include information that would be LOST if not summarized
+- If nothing specific/unique was discussed, return empty or minimal summary
+- If a previous summary is provided, preserve its specific information and add new specifics
 
-Example: "Debugged Kubernetes pod restart issue. Found memory limits too low. Applied fix and verified pod stability."`,
+Example GOOD summary: "User Ali, 28 years old, prefers dark mode. Works at TechCorp on Kubernetes projects."
+Example BAD summary: "Discussed unit conversions and weather. User asked about time zones."`,
 
-		SummaryUserPromptTemplate: `{{if .PreviousSummary}}Previous summary: {{.PreviousSummary}}
+		SummaryUserPromptTemplate: `{{if .PreviousSummary}}Previous summary (preserve specific info): {{.PreviousSummary}}
 
 New conversation to incorporate:
 {{end}}{{.ConversationText}}
 
-Generate an improved summary that incorporates all information:`,
+Extract ONLY specific/unique information (names, ages, personal details, important decisions). Ignore generic questions and small talk:`,
 
-		TagSystemPrompt: `You are a conversation tagger that maintains and evolves tags over time.
+		TagSystemPrompt: `You are a conversation tagger that identifies SPECIFIC topics only.
 
-Your task is to generate the FINAL list of tags for this conversation session.
+WHAT TO TAG (specific topics):
+- Named entities (people, companies, products)
+- Technical projects or systems being worked on
+- Personal topics (health, family, work)
+- Specific domains the user is interested in
+
+WHAT NOT TO TAG (generic topics):
+- "questions", "help", "conversation"
+- "math", "calculations", "conversions" (unless it's a recurring theme)
+- "greetings", "chat"
+- Any generic action words
 
 CRITICAL RULES:
-1. PRESERVE existing tags that are still relevant - do NOT remove tags unless they are completely irrelevant
-2. ADD new tags only if the conversation introduces genuinely new topics
-3. Tags represent the ENTIRE history of this conversation, not just the latest messages
-4. Be conservative: when in doubt, KEEP existing tags
-5. Maximum 7 tags total - if you need to drop tags, drop the least important NEW ones first
+1. PRESERVE existing tags that are still relevant
+2. ADD new tags only for genuinely specific new topics
+3. Maximum 7 tags total
+4. Be very selective - fewer specific tags are better than many generic ones
 
-Format requirements:
-- Tags should be short (1-3 words each)
-- Use lowercase, hyphenated format (e.g., "kubernetes", "api-design", "debugging")
-- Return only the final tag list, comma-separated, no quotes or extra text
-
-Example: If existing tags are "kubernetes, debugging" and new conversation discusses authentication,
-the output should be: kubernetes, debugging, authentication`,
+Format: lowercase, hyphenated (e.g., "kubernetes", "project-alpha", "user-preferences")
+Return only the final tag list, comma-separated, no quotes or extra text.`,
 
 		TagUserPromptTemplate: `{{if .ExistingTags}}EXISTING TAGS (preserve these unless completely irrelevant): {{.ExistingTags}}
 
 {{end}}NEW CONVERSATION CONTENT:
 {{.ConversationText}}
 
-Generate the FINAL tag list (preserving relevant existing tags + adding new ones if needed):`,
+Generate tags for SPECIFIC topics only (ignore generic questions and small talk):`,
 
 		TitleSystemPrompt: `Generate a short title (3-5 words) for this conversation.
-The title should capture the main topic or purpose.
-Return only the title, no quotes or extra text.
+Focus on the SPECIFIC topic or person discussed, not generic actions.
 
-Example outputs:
-- Kubernetes Pod Debugging
-- API Authentication Design
-- Database Migration Planning`,
+Good examples:
+- "Ali's Kubernetes Project"
+- "TechCorp API Design"
+- "User Profile Settings"
+
+Bad examples (too generic):
+- "Questions and Answers"
+- "Help with Calculations"
+- "General Discussion"
+
+Return only the title, no quotes or extra text.`,
 	}
 }
 
@@ -238,16 +260,21 @@ func (ss *SessionScheduler) GetConfig() SessionSchedulerConfig {
 func (ss *SessionScheduler) chatCompletion(ctx context.Context, request openai.ChatCompletionRequest) (openai.ChatCompletionResponse, error) {
 	// Try backup chain first (OSS 120B should be first in the chain for priority)
 	if ss.backups != nil {
+		log.Log.Infof("[SessionScheduler] 🔄 BACKUP CHAIN >> Attempting backup chain for summarization | BackupProviders: %d | RequestModel: %s",
+			len(ss.backups.providers), request.Model)
 		resp, ok := ss.backups.tryBackup(ctx, request.Messages, nil, "SessionScheduler")
 		if ok {
+			log.Log.Infof("[SessionScheduler] ✅ BACKUP CHAIN >> Success | UsedModel: %s | ResponseTokens: %d",
+				resp.Model, resp.Usage.TotalTokens)
 			return resp, nil
 		}
-		if !ss.config.DisableLogs {
-			log.Log.Infof("[SessionScheduler] ⚠️  All backup providers failed, falling back to main LLM: %s", ss.config.SummaryModel)
-		}
+		log.Log.Warnf("[SessionScheduler] ⚠️ BACKUP CHAIN >> All backup providers failed, falling back to main LLM: %s", ss.config.SummaryModel)
+	} else {
+		log.Log.Warnf("[SessionScheduler] ⚠️ BACKUP CHAIN >> No backup chain configured, using main LLM: %s", ss.config.SummaryModel)
 	}
 
 	// Fall back to main llmClient
+	log.Log.Infof("[SessionScheduler] 🔵 MAIN LLM >> Calling main LLM | Model: %s", ss.config.SummaryModel)
 	return ss.llmClient.CreateChatCompletion(ctx, request)
 }
 

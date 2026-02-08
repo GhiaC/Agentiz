@@ -646,6 +646,11 @@ func (s *SQLiteStore) GetUser(userID string) (*model.User, error) {
 	user.CreatedAt = time.Unix(createdAt, 0)
 	user.UpdatedAt = time.Unix(updatedAt, 0)
 
+	// Initialize ActiveSessionIDs if nil (backward compatibility for old users)
+	if user.ActiveSessionIDs == nil {
+		user.ActiveSessionIDs = make(map[model.AgentType]string)
+	}
+
 	return user, nil
 }
 

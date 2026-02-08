@@ -20,6 +20,11 @@ type User struct {
 	NonsenseCount    int       // Number of consecutive nonsense messages
 	LastNonsenseTime time.Time // Time of last nonsense message
 
+	// Active session IDs per agent type
+	// Key: AgentType (core, high, low), Value: SessionID
+	// This is persisted to database and loaded on startup
+	ActiveSessionIDs map[AgentType]string
+
 	// Metadata
 	CreatedAt time.Time
 	UpdatedAt time.Time
@@ -29,13 +34,14 @@ type User struct {
 func NewUser(userID string) *User {
 	now := time.Now()
 	return &User{
-		UserID:        userID,
-		IsBanned:      false,
-		BanUntil:      time.Time{},
-		BanMessage:    "",
-		NonsenseCount: 0,
-		CreatedAt:     now,
-		UpdatedAt:     now,
+		UserID:           userID,
+		IsBanned:         false,
+		BanUntil:         time.Time{},
+		BanMessage:       "",
+		NonsenseCount:    0,
+		ActiveSessionIDs: make(map[AgentType]string),
+		CreatedAt:        now,
+		UpdatedAt:        now,
 	}
 }
 
@@ -84,5 +90,23 @@ func (u *User) IncrementNonsenseCount() {
 // ResetNonsenseCount resets the nonsense message count
 func (u *User) ResetNonsenseCount() {
 	u.NonsenseCount = 0
+	u.UpdatedAt = time.Now()
+}
+
+// GetActiveSessionID returns the active session ID for a given agent type
+// Returns empty string if no active session exists
+func (u *User) GetActiveSessionID(agentType AgentType) string {
+	if u.ActiveSessionIDs == nil {
+		return ""
+	}
+	return u.ActiveSessionIDs[agentType]
+}
+
+// SetActiveSessionID sets the active session ID for a given agent type
+func (u *User) SetActiveSessionID(agentType AgentType, sessionID string) {
+	if u.ActiveSessionIDs == nil {
+		u.ActiveSessionIDs = make(map[AgentType]string)
+	}
+	u.ActiveSessionIDs[agentType] = sessionID
 	u.UpdatedAt = time.Now()
 }
