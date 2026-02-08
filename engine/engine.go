@@ -139,12 +139,10 @@ func (e *Engine) UseLLMConfig(config LLMConfig) error {
 	e.llmClient = client
 	e.llmConfig = config
 
-	// Initialize backup chain from configured providers (nil if disabled or empty)
-	if config.BackupDisabled {
-		e.backups = nil
-	} else {
-		e.backups = newBackupChain(config.BackupProviders)
-	}
+	// Initialize backup chain from configured providers
+	// Note: BackupDisabled only affects Engine's direct LLM calls (callLLM)
+	// Scheduler ALWAYS uses backup chain for cost-efficient summarization
+	e.backups = newBackupChain(config.BackupProviders)
 
 	// Automatically start scheduler if LLM is configured and scheduler is not already running
 	// Use sync.Once per session store to ensure scheduler starts only once
@@ -179,13 +177,15 @@ func (e *Engine) UseLLMConfig(config LLMConfig) error {
 
 const backupCooldownDuration = 10 * time.Minute
 
-// callLLM tries the backup LLM providers in order (if configured), then falls back
+// callLLM tries the backup LLM providers in order (if configured and not disabled), then falls back
 // to the default OpenAI client. This is the single entry point for all LLM calls
 // in the Engine, ensuring consistent fallback behaviour.
 func (e *Engine) callLLM(ctx context.Context, model string, messages []openai.ChatCompletionMessage, tools []openai.Tool) (openai.ChatCompletionResponse, error) {
-	// Try backup providers chain first
-	if resp, ok := e.backups.tryBackup(ctx, messages, tools, "Engine"); ok {
-		return resp, nil
+	// Try backup providers chain first (only if not disabled)
+	if !e.llmConfig.BackupDisabled {
+		if resp, ok := e.backups.tryBackup(ctx, messages, tools, "Engine"); ok {
+			return resp, nil
+		}
 	}
 
 	// Default: OpenAI client
@@ -222,14 +222,14 @@ func (e *Engine) startScheduler(ctx context.Context, llmClient *openai.Client) e
 		log.Log.Warnf("[Engine] ⚠️  Failed to load config, using defaults: %v", err)
 		// Use default config (enabled by default)
 		schedulerConfig = config.SchedulerConfig{
-			Enabled:               true, // Enabled by default
-			CheckInterval:         5 * time.Minute,
-			SummarizedAtThreshold: 1 * time.Hour,
-			LastActivityThreshold: 1 * time.Hour,
-			MessageThreshold:      5,
-			SummaryModel:          "gpt-4o-mini",
-			CleanerInterval:       30 * time.Minute, // Default cleaner interval
-			DisableLogs:           e.llmConfig.SchedulerDisableLogs,
+			Enabled:                     true, // Enabled by default
+			CheckInterval:               5 * time.Minute,
+			FirstSummarizationThreshold: 5,
+			SubsequentMessageThreshold:  25,
+			SubsequentTimeThreshold:     1 * time.Hour,
+			LastActivityThreshold:       1 * time.Hour,
+			SummaryModel:                "gpt-4o-mini",
+			DisableLogs:                 e.llmConfig.SchedulerDisableLogs,
 		}
 	} else {
 		schedulerConfig = cfg.Scheduler
@@ -255,35 +255,42 @@ func (e *Engine) startScheduler(ctx context.Context, llmClient *openai.Client) e
 	if schedulerConfig.CheckInterval > 0 {
 		schedulerConfigStruct.CheckInterval = schedulerConfig.CheckInterval
 	}
-	if schedulerConfig.SummarizedAtThreshold > 0 {
-		schedulerConfigStruct.SummarizedAtThreshold = schedulerConfig.SummarizedAtThreshold
+	if schedulerConfig.FirstSummarizationThreshold > 0 {
+		schedulerConfigStruct.FirstSummarizationThreshold = schedulerConfig.FirstSummarizationThreshold
+	}
+	if schedulerConfig.SubsequentMessageThreshold > 0 {
+		schedulerConfigStruct.SubsequentMessageThreshold = schedulerConfig.SubsequentMessageThreshold
+	}
+	if schedulerConfig.SubsequentTimeThreshold > 0 {
+		schedulerConfigStruct.SubsequentTimeThreshold = schedulerConfig.SubsequentTimeThreshold
 	}
 	if schedulerConfig.LastActivityThreshold > 0 {
 		schedulerConfigStruct.LastActivityThreshold = schedulerConfig.LastActivityThreshold
 	}
-	if schedulerConfig.MessageThreshold > 0 {
-		schedulerConfigStruct.MessageThreshold = schedulerConfig.MessageThreshold
-	}
 	if schedulerConfig.SummaryModel != "" {
 		schedulerConfigStruct.SummaryModel = schedulerConfig.SummaryModel
-	}
-	// CleanerInterval defaults to 30 minutes, but can be overridden from config
-	if schedulerConfig.CleanerInterval > 0 {
-		schedulerConfigStruct.CleanerInterval = schedulerConfig.CleanerInterval
 	}
 	// DisableLogs: from config (env) or from LLMConfig (programmatic, e.g. TradeAgent yaml)
 	schedulerConfigStruct.DisableLogs = schedulerConfig.DisableLogs || e.llmConfig.SchedulerDisableLogs
 
 	// Create and start scheduler
 	scheduler := NewSessionScheduler(sessionHandler, llmClient, schedulerConfigStruct)
+
+	// Set backup chain for scheduler - always enabled for scheduler (ignores BackupDisabled)
+	// This allows scheduler to use cheaper models (OSS 120B) for summarization
+	if e.backups != nil {
+		scheduler.SetBackupChain(e.backups)
+		log.Log.Infof("[Engine] 🔗 Scheduler using backup chain with %d providers", len(e.backups.providers))
+	}
+
 	e.schedulerMu.Lock()
 	e.scheduler = scheduler
 	e.schedulerMu.Unlock()
 	// Start scheduler in background goroutine to avoid blocking initialization
 	go scheduler.Start(ctx)
 
-	log.Log.Infof("[Engine] ✅ Session scheduler started | CheckInterval: %v | SummarizedAtThreshold: %v | LastActivityThreshold: %v | MessageThreshold: %d | SummaryModel: %s | CleanerInterval: %v",
-		schedulerConfigStruct.CheckInterval, schedulerConfigStruct.SummarizedAtThreshold, schedulerConfigStruct.LastActivityThreshold, schedulerConfigStruct.MessageThreshold, schedulerConfigStruct.SummaryModel, schedulerConfigStruct.CleanerInterval)
+	log.Log.Infof("[Engine] ✅ Session scheduler started | CheckInterval: %v | FirstThreshold: %d msgs | SubsequentThreshold: %d msgs + %v | SummaryModel: %s",
+		schedulerConfigStruct.CheckInterval, schedulerConfigStruct.FirstSummarizationThreshold, schedulerConfigStruct.SubsequentMessageThreshold, schedulerConfigStruct.SubsequentTimeThreshold, schedulerConfigStruct.SummaryModel)
 
 	return nil
 }
@@ -297,6 +304,18 @@ func (e *Engine) GetSchedulerMessageThreshold() int {
 	}
 	// Fallback to default (don't call config.Load() to avoid potential issues)
 	return 5
+}
+
+// GetSchedulerConfig returns the full scheduler configuration if available
+// Returns nil if scheduler is not initialized
+func (e *Engine) GetSchedulerConfig() *SessionSchedulerConfig {
+	e.schedulerMu.RLock()
+	defer e.schedulerMu.RUnlock()
+	if e.scheduler != nil {
+		config := e.scheduler.GetConfig()
+		return &config
+	}
+	return nil
 }
 
 // openAIClientWrapperForSessionHandler wraps openai.Client to implement model.LLMClient interface
@@ -595,8 +614,9 @@ func summarizeNode(node *model.Node) model.NodeDigest {
 
 // GetSystemPrompts returns an array of system prompts in the following order:
 // 1. Base prompt (engine.md) - Architecture overview and instructions
-// 2. File index - List of all knowledge files with metadata
-// 3. Opened files - Content of currently opened nodes
+// 2. Session context - Summary and tags from previous conversations (if summarized)
+// 3. File index - List of all knowledge files with metadata
+// 4. Opened files - Content of currently opened nodes
 //
 // The order is deterministic to enable AI prompt caching.
 func (e *Engine) GetSystemPrompts(session *model.Session) []string {
@@ -607,17 +627,52 @@ func (e *Engine) GetSystemPrompts(session *model.Session) []string {
 		prompts = append(prompts, basePrompt)
 	}
 
-	// 2. File index - all files with metadata
+	// 2. Session context - Summary and tags from previous conversations
+	// This provides context from archived messages that are no longer in the active conversation
+	sessionContext := e.buildSessionContext(session)
+	if sessionContext != "" {
+		prompts = append(prompts, sessionContext)
+	}
+
+	// 3. File index - all files with metadata
 	fileIndex := e.buildFileIndex(session)
 	if fileIndex != "" {
 		prompts = append(prompts, fileIndex)
 	}
 
-	// 3. Opened files content
+	// 4. Opened files content
 	openedPrompts := e.getOpenedNodePrompts(session)
 	prompts = append(prompts, openedPrompts...)
 
 	return prompts
+}
+
+// buildSessionContext generates a context prompt from session summary and tags
+// This is used to provide context from archived/summarized messages
+func (e *Engine) buildSessionContext(session *model.Session) string {
+	// Only include context if session has been summarized (has summary or tags)
+	if session.Summary == "" && len(session.Tags) == 0 {
+		return ""
+	}
+
+	var sb strings.Builder
+	sb.WriteString("# Session Context\n\n")
+	sb.WriteString("This is a continuation of a previous conversation. Here is the context from earlier messages:\n\n")
+
+	if session.Summary != "" {
+		sb.WriteString("## Summary of Previous Conversation\n")
+		sb.WriteString(session.Summary)
+		sb.WriteString("\n\n")
+	}
+
+	if len(session.Tags) > 0 {
+		sb.WriteString("## Topics Discussed\n")
+		sb.WriteString("Tags: ")
+		sb.WriteString(strings.Join(session.Tags, ", "))
+		sb.WriteString("\n")
+	}
+
+	return sb.String()
 }
 
 // buildFileIndex generates a compact file index for LLM context.
@@ -871,21 +926,34 @@ func (e *Engine) removeFunctionCalls(sessionID string) error {
 }
 
 // generateResultID generates a unique ID for tool results
-// Format: result_SESSION-ID_TIMESTAMP_RANDOM
+// Format: r_SHORT-SESSION_TIMESTAMP (compact, ~20 chars)
 func generateResultID(sessionID string) string {
-	return fmt.Sprintf("result_%s_%d_%s", sessionID, time.Now().UnixNano(), randomString(6))
+	// Extract first 8 chars of sessionID for brevity
+	shortSession := sessionID
+	if len(shortSession) > 8 {
+		shortSession = shortSession[:8]
+	}
+	// Use Unix seconds (10 digits) instead of nanoseconds (19 digits)
+	return fmt.Sprintf("r_%s_%d", shortSession, time.Now().Unix())
 }
 
 // parseResultID extracts sessionID from resultID
 // Returns sessionID and the original resultID
+// Supports both old format (result_SESSION-ID_TIMESTAMP_RANDOM) and new format (r_SHORT-SESSION_TIMESTAMP)
 func parseResultID(resultID string) (sessionID string, ok bool) {
-	// Format: result_SESSION-ID_TIMESTAMP_RANDOM
 	parts := strings.Split(resultID, "_")
-	if len(parts) < 4 || parts[0] != "result" {
-		return "", false
+
+	// New format: r_SHORT-SESSION_TIMESTAMP
+	if len(parts) >= 3 && parts[0] == "r" {
+		return parts[1], true
 	}
-	// SessionID is the second part
-	return parts[1], true
+
+	// Old format: result_SESSION-ID_TIMESTAMP_RANDOM
+	if len(parts) >= 4 && parts[0] == "result" {
+		return parts[1], true
+	}
+
+	return "", false
 }
 
 // randomString generates a random string of given length

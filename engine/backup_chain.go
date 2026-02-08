@@ -88,7 +88,8 @@ func (bc *backupChain) tryBackup(ctx context.Context, messages []openai.ChatComp
 
 		resp, err := backup.Provider.ChatCompletion(ctx, backup.Model, ifcMsgs, ifcTools)
 		if err == nil && (resp.Content != "" || len(resp.ToolCalls) > 0) {
-			// Success
+			// Success - set the model name in response so caller knows which model was used
+			resp.Model = backup.Model
 			log.Log.Infof("[%s] ✅ BACKUP LLM >> Success | %s | Model: %s | Response: %d chars | ToolCalls: %d | Tokens: prompt=%d completion=%d total=%d",
 				logPrefix, name, backup.Model, len(resp.Content), len(resp.ToolCalls),
 				resp.Usage.PromptTokens, resp.Usage.CompletionTokens, resp.Usage.TotalTokens)

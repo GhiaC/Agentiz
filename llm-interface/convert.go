@@ -75,6 +75,7 @@ func ToOpenAIResponse(r *Response) openai.ChatCompletionResponse {
 	}
 
 	return openai.ChatCompletionResponse{
+		Model: r.Model,
 		Choices: []openai.ChatCompletionChoice{
 			{
 				Index:        0,

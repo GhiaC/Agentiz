@@ -148,20 +148,34 @@ func (s *SQLiteStore) initSchema() error {
 		log_id TEXT PRIMARY KEY,
 		session_id TEXT NOT NULL,
 		user_id TEXT NOT NULL,
+		session_title TEXT,
+		previous_summary TEXT,
+		previous_tags TEXT,
+		messages_before_count INTEGER DEFAULT 0,
+		messages_after_count INTEGER DEFAULT 0,
+		archived_messages_count INTEGER DEFAULT 0,
 		prompt_sent TEXT NOT NULL,
 		response_received TEXT,
 		model_used TEXT NOT NULL,
+		requested_model TEXT,
+		generated_summary TEXT,
+		generated_tags TEXT,
+		generated_title TEXT,
 		prompt_tokens INTEGER DEFAULT 0,
 		completion_tokens INTEGER DEFAULT 0,
 		total_tokens INTEGER DEFAULT 0,
+		duration_ms INTEGER DEFAULT 0,
 		status TEXT NOT NULL,
 		error_message TEXT,
-		created_at INTEGER NOT NULL
+		summarization_type TEXT,
+		created_at INTEGER NOT NULL,
+		completed_at INTEGER
 	);
 	
 	CREATE INDEX IF NOT EXISTS idx_summarization_logs_session_id ON summarization_logs(session_id);
 	CREATE INDEX IF NOT EXISTS idx_summarization_logs_user_id ON summarization_logs(user_id);
 	CREATE INDEX IF NOT EXISTS idx_summarization_logs_created_at ON summarization_logs(created_at);
+	CREATE INDEX IF NOT EXISTS idx_summarization_logs_status ON summarization_logs(status);
 	`
 
 	_, err := s.db.Exec(schema)
@@ -173,6 +187,9 @@ func (s *SQLiteStore) initSchema() error {
 	// SQLite doesn't support IF NOT EXISTS for ALTER TABLE ADD COLUMN, so we ignore errors
 	_ = s.migrateAddIsNonsenseColumn()
 
+	// Migration: Add new columns to summarization_logs table for existing databases
+	_ = s.migrateSummarizationLogsColumns()
+
 	return nil
 }
 
@@ -180,6 +197,35 @@ func (s *SQLiteStore) initSchema() error {
 func (s *SQLiteStore) migrateAddIsNonsenseColumn() error {
 	_, _ = s.db.Exec(`ALTER TABLE messages ADD COLUMN is_nonsense INTEGER DEFAULT 0`)
 	// Ignore error if column already exists
+	return nil
+}
+
+// migrateSummarizationLogsColumns adds new columns to summarization_logs table for existing databases
+func (s *SQLiteStore) migrateSummarizationLogsColumns() error {
+	// Add new columns - ignore errors if columns already exist
+	columns := []string{
+		`ALTER TABLE summarization_logs ADD COLUMN session_title TEXT`,
+		`ALTER TABLE summarization_logs ADD COLUMN previous_summary TEXT`,
+		`ALTER TABLE summarization_logs ADD COLUMN previous_tags TEXT`,
+		`ALTER TABLE summarization_logs ADD COLUMN messages_before_count INTEGER DEFAULT 0`,
+		`ALTER TABLE summarization_logs ADD COLUMN messages_after_count INTEGER DEFAULT 0`,
+		`ALTER TABLE summarization_logs ADD COLUMN archived_messages_count INTEGER DEFAULT 0`,
+		`ALTER TABLE summarization_logs ADD COLUMN requested_model TEXT`,
+		`ALTER TABLE summarization_logs ADD COLUMN generated_summary TEXT`,
+		`ALTER TABLE summarization_logs ADD COLUMN generated_tags TEXT`,
+		`ALTER TABLE summarization_logs ADD COLUMN generated_title TEXT`,
+		`ALTER TABLE summarization_logs ADD COLUMN duration_ms INTEGER DEFAULT 0`,
+		`ALTER TABLE summarization_logs ADD COLUMN summarization_type TEXT`,
+		`ALTER TABLE summarization_logs ADD COLUMN completed_at INTEGER`,
+	}
+
+	for _, col := range columns {
+		_, _ = s.db.Exec(col)
+	}
+
+	// Add index for status
+	_, _ = s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_summarization_logs_status ON summarization_logs(status)`)
+
 	return nil
 }
 
@@ -1309,44 +1355,54 @@ func (s *SQLiteStore) PutSummarizationLog(log *model.SummarizationLog) error {
 
 	createdAt := log.CreatedAt.Unix()
 	if createdAt <= 0 {
-		// If CreatedAt is zero or invalid, use current time
 		createdAt = time.Now().Unix()
 		log.CreatedAt = time.Now()
 	}
 
-	// Debug: Log the attempt (using fmt.Printf to ensure it's always shown)
-	fmt.Printf("[SQLiteStore] 🔍 PutSummarizationLog called | LogID: %s | SessionID: %s | UserID: %s | Status: %s | PromptSent length: %d | CreatedAt: %v\n",
-		log.LogID, log.SessionID, log.UserID, log.Status, len(log.PromptSent), log.CreatedAt)
+	var completedAt *int64
+	if !log.CompletedAt.IsZero() {
+		ts := log.CompletedAt.Unix()
+		completedAt = &ts
+	}
 
-	result, err := s.db.Exec(
+	_, err := s.db.Exec(
 		`INSERT OR REPLACE INTO summarization_logs (
-			log_id, session_id, user_id, prompt_sent, response_received, model_used,
-			prompt_tokens, completion_tokens, total_tokens, status, error_message, created_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			log_id, session_id, user_id, session_title, previous_summary, previous_tags,
+			messages_before_count, messages_after_count, archived_messages_count,
+			prompt_sent, response_received, model_used, requested_model,
+			generated_summary, generated_tags, generated_title,
+			prompt_tokens, completion_tokens, total_tokens, duration_ms,
+			status, error_message, summarization_type, created_at, completed_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		log.LogID,
 		log.SessionID,
 		log.UserID,
+		log.SessionTitle,
+		log.PreviousSummary,
+		log.PreviousTags,
+		log.MessagesBeforeCount,
+		log.MessagesAfterCount,
+		log.ArchivedMessagesCount,
 		log.PromptSent,
 		log.ResponseReceived,
 		log.ModelUsed,
+		log.RequestedModel,
+		log.GeneratedSummary,
+		log.GeneratedTags,
+		log.GeneratedTitle,
 		log.PromptTokens,
 		log.CompletionTokens,
 		log.TotalTokens,
+		log.DurationMs,
 		log.Status,
 		log.ErrorMessage,
+		log.SummarizationType,
 		createdAt,
+		completedAt,
 	)
 
 	if err != nil {
-		fmt.Printf("[SQLiteStore] ❌ Failed to INSERT summarization log: %v | LogID: %s\n", err, log.LogID)
 		return fmt.Errorf("failed to store summarization log: %w", err)
-	}
-
-	rowsAffected, _ := result.RowsAffected()
-	if rowsAffected > 0 {
-		fmt.Printf("[SQLiteStore] ✅ Successfully INSERTED summarization log | LogID: %s | RowsAffected: %d\n", log.LogID, rowsAffected)
-	} else {
-		fmt.Printf("[SQLiteStore] ⚠️  INSERT completed but RowsAffected is 0 | LogID: %s\n", log.LogID)
 	}
 
 	return nil
@@ -1358,8 +1414,12 @@ func (s *SQLiteStore) GetSummarizationLogsBySession(sessionID string) ([]*model.
 	defer s.mu.RUnlock()
 
 	rows, err := s.db.Query(
-		`SELECT log_id, session_id, user_id, prompt_sent, response_received, model_used,
-			prompt_tokens, completion_tokens, total_tokens, status, error_message, created_at
+		`SELECT log_id, session_id, user_id, session_title, previous_summary, previous_tags,
+			messages_before_count, messages_after_count, archived_messages_count,
+			prompt_sent, response_received, model_used, requested_model,
+			generated_summary, generated_tags, generated_title,
+			prompt_tokens, completion_tokens, total_tokens, duration_ms,
+			status, error_message, summarization_type, created_at, completed_at
 		FROM summarization_logs WHERE session_id = ? ORDER BY created_at DESC`,
 		sessionID,
 	)
@@ -1368,38 +1428,7 @@ func (s *SQLiteStore) GetSummarizationLogsBySession(sessionID string) ([]*model.
 	}
 	defer rows.Close()
 
-	var logs []*model.SummarizationLog
-	for rows.Next() {
-		log := &model.SummarizationLog{}
-		var createdAt int64
-
-		err := rows.Scan(
-			&log.LogID,
-			&log.SessionID,
-			&log.UserID,
-			&log.PromptSent,
-			&log.ResponseReceived,
-			&log.ModelUsed,
-			&log.PromptTokens,
-			&log.CompletionTokens,
-			&log.TotalTokens,
-			&log.Status,
-			&log.ErrorMessage,
-			&createdAt,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("failed to scan summarization log: %w", err)
-		}
-
-		log.CreatedAt = time.Unix(createdAt, 0)
-		logs = append(logs, log)
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating summarization logs: %w", err)
-	}
-
-	return logs, nil
+	return s.scanSummarizationLogs(rows)
 }
 
 // GetAllSummarizationLogs returns all summarization logs
@@ -1408,8 +1437,12 @@ func (s *SQLiteStore) GetAllSummarizationLogs() ([]*model.SummarizationLog, erro
 	defer s.mu.RUnlock()
 
 	rows, err := s.db.Query(
-		`SELECT log_id, session_id, user_id, prompt_sent, response_received, model_used,
-			prompt_tokens, completion_tokens, total_tokens, status, error_message, created_at
+		`SELECT log_id, session_id, user_id, session_title, previous_summary, previous_tags,
+			messages_before_count, messages_after_count, archived_messages_count,
+			prompt_sent, response_received, model_used, requested_model,
+			generated_summary, generated_tags, generated_title,
+			prompt_tokens, completion_tokens, total_tokens, duration_ms,
+			status, error_message, summarization_type, created_at, completed_at
 		FROM summarization_logs ORDER BY created_at DESC`,
 	)
 	if err != nil {
@@ -1417,30 +1450,80 @@ func (s *SQLiteStore) GetAllSummarizationLogs() ([]*model.SummarizationLog, erro
 	}
 	defer rows.Close()
 
+	return s.scanSummarizationLogs(rows)
+}
+
+// scanSummarizationLogs scans rows into SummarizationLog objects
+func (s *SQLiteStore) scanSummarizationLogs(rows *sql.Rows) ([]*model.SummarizationLog, error) {
 	var logs []*model.SummarizationLog
 	for rows.Next() {
 		log := &model.SummarizationLog{}
 		var createdAt int64
+		var completedAt sql.NullInt64
+		var sessionTitle, previousSummary, previousTags sql.NullString
+		var requestedModel, generatedSummary, generatedTags, generatedTitle sql.NullString
+		var summarizationType sql.NullString
 
 		err := rows.Scan(
 			&log.LogID,
 			&log.SessionID,
 			&log.UserID,
+			&sessionTitle,
+			&previousSummary,
+			&previousTags,
+			&log.MessagesBeforeCount,
+			&log.MessagesAfterCount,
+			&log.ArchivedMessagesCount,
 			&log.PromptSent,
 			&log.ResponseReceived,
 			&log.ModelUsed,
+			&requestedModel,
+			&generatedSummary,
+			&generatedTags,
+			&generatedTitle,
 			&log.PromptTokens,
 			&log.CompletionTokens,
 			&log.TotalTokens,
+			&log.DurationMs,
 			&log.Status,
 			&log.ErrorMessage,
+			&summarizationType,
 			&createdAt,
+			&completedAt,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan summarization log: %w", err)
 		}
 
 		log.CreatedAt = time.Unix(createdAt, 0)
+		if completedAt.Valid {
+			log.CompletedAt = time.Unix(completedAt.Int64, 0)
+		}
+		if sessionTitle.Valid {
+			log.SessionTitle = sessionTitle.String
+		}
+		if previousSummary.Valid {
+			log.PreviousSummary = previousSummary.String
+		}
+		if previousTags.Valid {
+			log.PreviousTags = previousTags.String
+		}
+		if requestedModel.Valid {
+			log.RequestedModel = requestedModel.String
+		}
+		if generatedSummary.Valid {
+			log.GeneratedSummary = generatedSummary.String
+		}
+		if generatedTags.Valid {
+			log.GeneratedTags = generatedTags.String
+		}
+		if generatedTitle.Valid {
+			log.GeneratedTitle = generatedTitle.String
+		}
+		if summarizationType.Valid {
+			log.SummarizationType = summarizationType.String
+		}
+
 		logs = append(logs, log)
 	}
 
@@ -1454,5 +1537,5 @@ func (s *SQLiteStore) GetAllSummarizationLogs() ([]*model.SummarizationLog, erro
 // Ensure SQLiteStore implements model.SessionStore
 var _ model.SessionStore = (*SQLiteStore)(nil)
 
-// Ensure SQLiteStore implements DebugStore
-var _ DebugStore = (*SQLiteStore)(nil)
+// Ensure SQLiteStore implements debuger.DebugStore
+// This is verified at compile time in agentize.go where debuger package is imported

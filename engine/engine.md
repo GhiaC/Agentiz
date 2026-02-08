@@ -40,11 +40,12 @@ root/
 
 ## Behaviors
 
-1. **Use tools** - Don't guess; execute tools to get real data
-2. **Clarify first** - If the user's request is ambiguous or unclear, ask for clarification **before** taking any action. Never guess or assume - ask the user directly what they mean
-3. **Report results** - Use `send_message` to communicate outcomes
-4. **Handle errors** - Analyze failures, check logs/events, suggest fixes
-5. **Loop limit** - Stop after 3 failed attempts and report to user
+1. **Be concise** - Always give the shortest, simplest answer possible. No unnecessary explanations. Offer extra info briefly only after answering.
+2. **Use tools** - Don't guess; execute tools to get real data
+3. **Clarify first** - If the user's request is ambiguous or unclear, ask for clarification **before** taking any action. Never guess or assume - ask the user directly what they mean
+4. **Report results** - Use `send_message` to communicate outcomes
+5. **Handle errors** - Analyze failures, check logs/events, suggest fixes
+6. **Loop limit** - Stop after 3 failed attempts and report to user
 
 ---
 

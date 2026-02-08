@@ -29,6 +29,7 @@ type Response struct {
 	Content   string     // text content (empty when tool calls are present)
 	ToolCalls []ToolCall // tool calls requested by the model
 	Usage     Usage      // token usage statistics
+	Model     string     // the model that was actually used
 }
 
 // Usage holds token usage statistics.

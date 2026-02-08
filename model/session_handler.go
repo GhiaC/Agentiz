@@ -52,6 +52,10 @@ type SessionHandler struct {
 	// In-memory index for quick lookups
 	userIndex map[string][]string // userID -> []sessionID
 	mu        sync.RWMutex
+
+	// Per-session locks to prevent race conditions during summarization
+	sessionLocks   map[string]*sync.Mutex
+	sessionLocksMu sync.Mutex
 }
 
 // GetStore returns the underlying SessionStore for direct access
@@ -72,10 +76,35 @@ func NewSessionHandler(store SessionStore, config SessionHandlerConfig) *Session
 	}
 
 	return &SessionHandler{
-		store:     store,
-		config:    config,
-		userIndex: make(map[string][]string),
+		store:        store,
+		config:       config,
+		userIndex:    make(map[string][]string),
+		sessionLocks: make(map[string]*sync.Mutex),
 	}
+}
+
+// getSessionLock returns the mutex for a specific session (creates one if not exists)
+func (sh *SessionHandler) getSessionLock(sessionID string) *sync.Mutex {
+	sh.sessionLocksMu.Lock()
+	defer sh.sessionLocksMu.Unlock()
+
+	if lock, exists := sh.sessionLocks[sessionID]; exists {
+		return lock
+	}
+
+	lock := &sync.Mutex{}
+	sh.sessionLocks[sessionID] = lock
+	return lock
+}
+
+// LockSession locks a session for exclusive access (used during summarization)
+func (sh *SessionHandler) LockSession(sessionID string) {
+	sh.getSessionLock(sessionID).Lock()
+}
+
+// UnlockSession unlocks a session after exclusive access
+func (sh *SessionHandler) UnlockSession(sessionID string) {
+	sh.getSessionLock(sessionID).Unlock()
 }
 
 // SetLLMClient sets the LLM client for summarization
@@ -249,6 +278,10 @@ func (sh *SessionHandler) UpdateSessionMetadata(sessionID string, title string, 
 
 // AddMessage adds a message to a session and checks for auto-summarization
 func (sh *SessionHandler) AddMessage(ctx context.Context, sessionID string, msg openai.ChatCompletionMessage) error {
+	// Lock the session to prevent race conditions with summarization
+	sh.LockSession(sessionID)
+	defer sh.UnlockSession(sessionID)
+
 	session, err := sh.store.Get(sessionID)
 	if err != nil {
 		return err
@@ -262,7 +295,7 @@ func (sh *SessionHandler) AddMessage(ctx context.Context, sessionID string, msg 
 		return err
 	}
 
-	// Check for auto-summarization
+	// Check for auto-summarization (runs in background but will acquire lock)
 	if len(session.ConversationState.Msgs) >= sh.config.AutoSummarizeThreshold {
 		go func() {
 			if err := sh.SummarizeSession(ctx, sessionID); err != nil {
@@ -280,6 +313,10 @@ func (sh *SessionHandler) SummarizeSession(ctx context.Context, sessionID string
 	if sh.llmClient == nil {
 		return fmt.Errorf("LLM client not configured")
 	}
+
+	// Lock the session to prevent race conditions
+	sh.LockSession(sessionID)
+	defer sh.UnlockSession(sessionID)
 
 	session, err := sh.store.Get(sessionID)
 	if err != nil {

@@ -13,6 +13,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ghiac/agentize/debuger"
+	"github.com/ghiac/agentize/debuger/pages"
 	"github.com/ghiac/agentize/documents"
 	"github.com/ghiac/agentize/engine"
 	"github.com/ghiac/agentize/fsrepo"
@@ -342,9 +344,9 @@ func (ag *Agentize) StartScheduler(ctx context.Context) error {
 			schedulerConfig.CheckInterval = time.Duration(minutes) * time.Minute
 		}
 	}
-	if thresholdStr := os.Getenv("AGENTIZE_SCHEDULER_SUMMARIZED_AT_THRESHOLD_MINUTES"); thresholdStr != "" {
+	if thresholdStr := os.Getenv("AGENTIZE_SCHEDULER_SUBSEQUENT_TIME_THRESHOLD_MINUTES"); thresholdStr != "" {
 		if minutes, err := strconv.Atoi(thresholdStr); err == nil {
-			schedulerConfig.SummarizedAtThreshold = time.Duration(minutes) * time.Minute
+			schedulerConfig.SubsequentTimeThreshold = time.Duration(minutes) * time.Minute
 		}
 	}
 	if activityStr := os.Getenv("AGENTIZE_SCHEDULER_LAST_ACTIVITY_THRESHOLD_MINUTES"); activityStr != "" {
@@ -352,9 +354,14 @@ func (ag *Agentize) StartScheduler(ctx context.Context) error {
 			schedulerConfig.LastActivityThreshold = time.Duration(minutes) * time.Minute
 		}
 	}
-	if msgThresholdStr := os.Getenv("AGENTIZE_SCHEDULER_MESSAGE_THRESHOLD"); msgThresholdStr != "" {
-		if threshold, err := strconv.Atoi(msgThresholdStr); err == nil {
-			schedulerConfig.MessageThreshold = threshold
+	if firstThresholdStr := os.Getenv("AGENTIZE_SCHEDULER_FIRST_THRESHOLD"); firstThresholdStr != "" {
+		if threshold, err := strconv.Atoi(firstThresholdStr); err == nil {
+			schedulerConfig.FirstSummarizationThreshold = threshold
+		}
+	}
+	if subsequentThresholdStr := os.Getenv("AGENTIZE_SCHEDULER_SUBSEQUENT_MESSAGE_THRESHOLD"); subsequentThresholdStr != "" {
+		if threshold, err := strconv.Atoi(subsequentThresholdStr); err == nil {
+			schedulerConfig.SubsequentMessageThreshold = threshold
 		}
 	}
 	if modelStr := os.Getenv("AGENTIZE_SCHEDULER_SUMMARY_MODEL"); modelStr != "" {
@@ -377,8 +384,8 @@ func (ag *Agentize) StartScheduler(ctx context.Context) error {
 	// Start scheduler
 	scheduler.Start(ctx)
 
-	log.Log.Infof("[Agentize] ✅ Session scheduler started | CheckInterval: %v | SummarizedAtThreshold: %v | LastActivityThreshold: %v | MessageThreshold: %d | SummaryModel: %s",
-		schedulerConfig.CheckInterval, schedulerConfig.SummarizedAtThreshold, schedulerConfig.LastActivityThreshold, schedulerConfig.MessageThreshold, schedulerConfig.SummaryModel)
+	log.Log.Infof("[Agentize] ✅ Session scheduler started | CheckInterval: %v | FirstThreshold: %d msgs | SubsequentThreshold: %d msgs + %v | SummaryModel: %s",
+		schedulerConfig.CheckInterval, schedulerConfig.FirstSummarizationThreshold, schedulerConfig.SubsequentMessageThreshold, schedulerConfig.SubsequentTimeThreshold, schedulerConfig.SummaryModel)
 
 	return nil
 }
@@ -400,6 +407,26 @@ func (ag *Agentize) GetScheduler() *engine.SessionScheduler {
 	ag.schedulerMu.RLock()
 	defer ag.schedulerMu.RUnlock()
 	return ag.scheduler
+}
+
+// GetSchedulerConfig returns the full scheduler configuration if available
+// Returns nil if scheduler is not initialized
+func (ag *Agentize) GetSchedulerConfig() *engine.SessionSchedulerConfig {
+	// Try Agentize's scheduler first
+	ag.schedulerMu.RLock()
+	if ag.scheduler != nil {
+		config := ag.scheduler.GetConfig()
+		ag.schedulerMu.RUnlock()
+		return &config
+	}
+	ag.schedulerMu.RUnlock()
+
+	// Try engine's scheduler
+	if ag.engine != nil {
+		return ag.engine.GetSchedulerConfig()
+	}
+
+	return nil
 }
 
 // WaitForShutdown waits for shutdown signals and performs graceful shutdown
@@ -514,6 +541,7 @@ func (ag *Agentize) RegisterRoutes(router *gin.Engine) {
 	router.GET("/agentize/debug/files", ag.handleDebugFiles)
 	router.GET("/agentize/debug/tool-calls", ag.handleDebugToolCalls)
 	router.GET("/agentize/debug/summarized", ag.handleDebugSummarized)
+	router.GET("/agentize/debug/summarized/:logID", ag.handleDebugSummarizationLogDetail)
 }
 
 // handleIndex handles the main index page with links to graph and docs
@@ -782,21 +810,39 @@ func (ag *Agentize) GetRegisteredTools() []string {
 	return nil
 }
 
-// handleDebug handles debug page requests for dashboard
-func (ag *Agentize) handleDebug(c *gin.Context) {
+// createDebugHandler creates a new debug handler with scheduler configuration
+func (ag *Agentize) createDebugHandler() (*debuger.DebugHandler, error) {
 	sessionStore := ag.GetSessionStore()
 	if sessionStore == nil {
-		c.JSON(500, gin.H{"error": "Session store not available"})
-		return
+		return nil, fmt.Errorf("session store not available")
 	}
 
-	debugHandler, err := store.NewDebugHandler(sessionStore)
+	// Get scheduler configuration
+	var schedulerConfig *debuger.SchedulerConfig
+	if engineConfig := ag.GetSchedulerConfig(); engineConfig != nil {
+		schedulerConfig = &debuger.SchedulerConfig{
+			CheckInterval:                   engineConfig.CheckInterval,
+			FirstSummarizationThreshold:     engineConfig.FirstSummarizationThreshold,
+			SubsequentMessageThreshold:      engineConfig.SubsequentMessageThreshold,
+			SubsequentTimeThreshold:         engineConfig.SubsequentTimeThreshold,
+			LastActivityThreshold:           engineConfig.LastActivityThreshold,
+			ImmediateSummarizationThreshold: engineConfig.ImmediateSummarizationThreshold,
+			SummaryModel:                    engineConfig.SummaryModel,
+		}
+	}
+
+	return debuger.NewDebugHandlerWithConfig(sessionStore, schedulerConfig)
+}
+
+// handleDebug handles debug page requests for dashboard
+func (ag *Agentize) handleDebug(c *gin.Context) {
+	handler, err := ag.createDebugHandler()
 	if err != nil {
-		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to create debug handler: %v", err)})
+		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
 
-	html, err := debugHandler.GenerateDashboardHTML()
+	html, err := pages.RenderDashboard(handler)
 	if err != nil {
 		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to generate debug page: %v", err)})
 		return
@@ -808,19 +854,14 @@ func (ag *Agentize) handleDebug(c *gin.Context) {
 
 // handleDebugUsers handles users list page requests
 func (ag *Agentize) handleDebugUsers(c *gin.Context) {
-	sessionStore := ag.GetSessionStore()
-	if sessionStore == nil {
-		c.JSON(500, gin.H{"error": "Session store not available"})
-		return
-	}
-
-	debugHandler, err := store.NewDebugHandler(sessionStore)
+	handler, err := ag.createDebugHandler()
 	if err != nil {
-		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to create debug handler: %v", err)})
+		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
 
-	html, err := debugHandler.GenerateUsersHTML()
+	page := getPageParam(c)
+	html, err := pages.RenderUsers(handler, page)
 	if err != nil {
 		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to generate users page: %v", err)})
 		return
@@ -828,6 +869,19 @@ func (ag *Agentize) handleDebugUsers(c *gin.Context) {
 
 	c.Header("Content-Type", "text/html; charset=utf-8")
 	c.String(200, html)
+}
+
+// getPageParam extracts page number from query params (defaults to 1)
+func getPageParam(c *gin.Context) int {
+	pageStr := c.Query("page")
+	if pageStr == "" {
+		return 1
+	}
+	page, err := strconv.Atoi(pageStr)
+	if err != nil || page < 1 {
+		return 1
+	}
+	return page
 }
 
 // handleDebugUserDetail handles user detail page requests
@@ -838,19 +892,13 @@ func (ag *Agentize) handleDebugUserDetail(c *gin.Context) {
 		return
 	}
 
-	sessionStore := ag.GetSessionStore()
-	if sessionStore == nil {
-		c.JSON(500, gin.H{"error": "Session store not available"})
-		return
-	}
-
-	debugHandler, err := store.NewDebugHandler(sessionStore)
+	handler, err := ag.createDebugHandler()
 	if err != nil {
-		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to create debug handler: %v", err)})
+		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
 
-	html, err := debugHandler.GenerateUserDetailHTML(userID)
+	html, err := pages.RenderUserDetail(handler, userID)
 	if err != nil {
 		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to generate user detail page: %v", err)})
 		return
@@ -862,19 +910,14 @@ func (ag *Agentize) handleDebugUserDetail(c *gin.Context) {
 
 // handleDebugSessions handles sessions list page requests
 func (ag *Agentize) handleDebugSessions(c *gin.Context) {
-	sessionStore := ag.GetSessionStore()
-	if sessionStore == nil {
-		c.JSON(500, gin.H{"error": "Session store not available"})
-		return
-	}
-
-	debugHandler, err := store.NewDebugHandler(sessionStore)
+	handler, err := ag.createDebugHandler()
 	if err != nil {
-		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to create debug handler: %v", err)})
+		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
 
-	html, err := debugHandler.GenerateSessionsHTML()
+	page := getPageParam(c)
+	html, err := pages.RenderSessions(handler, page)
 	if err != nil {
 		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to generate sessions page: %v", err)})
 		return
@@ -892,19 +935,13 @@ func (ag *Agentize) handleDebugSessionDetail(c *gin.Context) {
 		return
 	}
 
-	sessionStore := ag.GetSessionStore()
-	if sessionStore == nil {
-		c.JSON(500, gin.H{"error": "Session store not available"})
-		return
-	}
-
-	debugHandler, err := store.NewDebugHandler(sessionStore)
+	handler, err := ag.createDebugHandler()
 	if err != nil {
-		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to create debug handler: %v", err)})
+		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
 
-	html, err := debugHandler.GenerateSessionDetailHTML(sessionID)
+	html, err := pages.RenderSessionDetail(handler, sessionID)
 	if err != nil {
 		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to generate session detail page: %v", err)})
 		return
@@ -916,19 +953,14 @@ func (ag *Agentize) handleDebugSessionDetail(c *gin.Context) {
 
 // handleDebugMessages handles messages list page requests
 func (ag *Agentize) handleDebugMessages(c *gin.Context) {
-	sessionStore := ag.GetSessionStore()
-	if sessionStore == nil {
-		c.JSON(500, gin.H{"error": "Session store not available"})
-		return
-	}
-
-	debugHandler, err := store.NewDebugHandler(sessionStore)
+	handler, err := ag.createDebugHandler()
 	if err != nil {
-		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to create debug handler: %v", err)})
+		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
 
-	html, err := debugHandler.GenerateMessagesHTML()
+	page := getPageParam(c)
+	html, err := pages.RenderMessages(handler, page)
 	if err != nil {
 		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to generate messages page: %v", err)})
 		return
@@ -940,19 +972,14 @@ func (ag *Agentize) handleDebugMessages(c *gin.Context) {
 
 // handleDebugFiles handles opened files list page requests
 func (ag *Agentize) handleDebugFiles(c *gin.Context) {
-	sessionStore := ag.GetSessionStore()
-	if sessionStore == nil {
-		c.JSON(500, gin.H{"error": "Session store not available"})
-		return
-	}
-
-	debugHandler, err := store.NewDebugHandler(sessionStore)
+	handler, err := ag.createDebugHandler()
 	if err != nil {
-		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to create debug handler: %v", err)})
+		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
 
-	html, err := debugHandler.GenerateFilesHTML()
+	page := getPageParam(c)
+	html, err := pages.RenderFiles(handler, page)
 	if err != nil {
 		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to generate files page: %v", err)})
 		return
@@ -964,19 +991,14 @@ func (ag *Agentize) handleDebugFiles(c *gin.Context) {
 
 // handleDebugToolCalls handles tool calls list page requests
 func (ag *Agentize) handleDebugToolCalls(c *gin.Context) {
-	sessionStore := ag.GetSessionStore()
-	if sessionStore == nil {
-		c.JSON(500, gin.H{"error": "Session store not available"})
-		return
-	}
-
-	debugHandler, err := store.NewDebugHandler(sessionStore)
+	handler, err := ag.createDebugHandler()
 	if err != nil {
-		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to create debug handler: %v", err)})
+		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
 
-	html, err := debugHandler.GenerateToolCallsHTML()
+	page := getPageParam(c)
+	html, err := pages.RenderToolCalls(handler, page)
 	if err != nil {
 		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to generate tool calls page: %v", err)})
 		return
@@ -988,24 +1010,35 @@ func (ag *Agentize) handleDebugToolCalls(c *gin.Context) {
 
 // handleDebugSummarized handles summarization logs list page requests
 func (ag *Agentize) handleDebugSummarized(c *gin.Context) {
-	sessionStore := ag.GetSessionStore()
-	if sessionStore == nil {
-		c.JSON(500, gin.H{"error": "Session store not available"})
-		return
-	}
-
-	debugHandler, err := store.NewDebugHandler(sessionStore)
+	handler, err := ag.createDebugHandler()
 	if err != nil {
-		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to create debug handler: %v", err)})
+		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
 
-	// Get message threshold from engine's scheduler (which is used by TradeAgent)
-	messageThreshold := ag.GetSchedulerMessageThreshold()
-
-	html, err := debugHandler.GenerateSummarizationLogsHTML(messageThreshold)
+	page := getPageParam(c)
+	html, err := pages.RenderSummarized(handler, page)
 	if err != nil {
 		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to generate summarization logs page: %v", err)})
+		return
+	}
+
+	c.Header("Content-Type", "text/html; charset=utf-8")
+	c.String(200, html)
+}
+
+// handleDebugSummarizationLogDetail handles summarization log detail page requests
+func (ag *Agentize) handleDebugSummarizationLogDetail(c *gin.Context) {
+	handler, err := ag.createDebugHandler()
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+
+	logID := c.Param("logID")
+	html, err := pages.RenderSummarizationLogDetail(handler, logID)
+	if err != nil {
+		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to generate summarization log detail page: %v", err)})
 		return
 	}
 
