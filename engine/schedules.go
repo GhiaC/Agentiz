@@ -33,6 +33,9 @@ type SessionSchedulerConfig struct {
 
 	// CleanerInterval is how often to run the cleaner goroutine to remove duplicate messages (default: 30 minutes)
 	CleanerInterval time.Duration
+
+	// DisableLogs if true, SessionScheduler does not emit any logs
+	DisableLogs bool
 }
 
 // DefaultSessionSchedulerConfig returns default configuration
@@ -44,6 +47,7 @@ func DefaultSessionSchedulerConfig() SessionSchedulerConfig {
 		MessageThreshold:      5, // Reduced from 20 to trigger summarization more frequently
 		SummaryModel:          "gpt-4o-mini",
 		CleanerInterval:       30 * time.Minute,
+		DisableLogs:           true,
 	}
 }
 
@@ -78,14 +82,18 @@ func (ss *SessionScheduler) Start(ctx context.Context) {
 	defer ss.mu.Unlock()
 
 	if ss.running {
-		log.Log.Warnf("[SessionScheduler] ⚠️  Scheduler is already running")
+		if !ss.config.DisableLogs {
+			log.Log.Warnf("[SessionScheduler] ⚠️  Scheduler is already running")
+		}
 		return
 	}
 
 	ss.running = true
 	ss.stopChan = make(chan struct{}) // Recreate stopChan in case it was closed
-	log.Log.Infof("[SessionScheduler] 🚀 Starting session scheduler | CheckInterval: %v | SummarizedAtThreshold: %v | LastActivityThreshold: %v | MessageThreshold: %d | CleanerInterval: %v",
-		ss.config.CheckInterval, ss.config.SummarizedAtThreshold, ss.config.LastActivityThreshold, ss.config.MessageThreshold, ss.config.CleanerInterval)
+	if !ss.config.DisableLogs {
+		log.Log.Infof("[SessionScheduler] 🚀 Starting session scheduler | CheckInterval: %v | SummarizedAtThreshold: %v | LastActivityThreshold: %v | MessageThreshold: %d | CleanerInterval: %v",
+			ss.config.CheckInterval, ss.config.SummarizedAtThreshold, ss.config.LastActivityThreshold, ss.config.MessageThreshold, ss.config.CleanerInterval)
+	}
 
 	go ss.run(ctx)
 	go ss.runCleaner(ctx)
@@ -100,7 +108,9 @@ func (ss *SessionScheduler) Stop() {
 		return
 	}
 
-	log.Log.Infof("[SessionScheduler] 🛑 Stopping session scheduler")
+	if !ss.config.DisableLogs {
+		log.Log.Infof("[SessionScheduler] 🛑 Stopping session scheduler")
+	}
 	close(ss.stopChan)
 	ss.running = false
 }
@@ -114,10 +124,13 @@ func (ss *SessionScheduler) GetMessageThreshold() int {
 
 // run runs the scheduler loop
 func (ss *SessionScheduler) run(ctx context.Context) {
-	// Run immediately on start - check all sessions right away
-	log.Log.Infof("[SessionScheduler] 🔍 Starting initial session check (checking all sessions immediately)...")
+	if !ss.config.DisableLogs {
+		log.Log.Infof("[SessionScheduler] 🔍 Starting initial session check (checking all sessions immediately)...")
+	}
 	ss.checkAndSummarizeSessions(ctx)
-	log.Log.Infof("[SessionScheduler] ✅ Initial session check completed, starting periodic checks...")
+	if !ss.config.DisableLogs {
+		log.Log.Infof("[SessionScheduler] ✅ Initial session check completed, starting periodic checks...")
+	}
 
 	ticker := time.NewTicker(ss.config.CheckInterval)
 	defer ticker.Stop()
@@ -127,10 +140,14 @@ func (ss *SessionScheduler) run(ctx context.Context) {
 		case <-ticker.C:
 			ss.checkAndSummarizeSessions(ctx)
 		case <-ss.stopChan:
-			log.Log.Infof("[SessionScheduler] ✅ Scheduler stopped")
+			if !ss.config.DisableLogs {
+				log.Log.Infof("[SessionScheduler] ✅ Scheduler stopped")
+			}
 			return
 		case <-ctx.Done():
-			log.Log.Infof("[SessionScheduler] ✅ Scheduler stopped (context cancelled)")
+			if !ss.config.DisableLogs {
+				log.Log.Infof("[SessionScheduler] ✅ Scheduler stopped (context cancelled)")
+			}
 			return
 		}
 	}
@@ -138,19 +155,25 @@ func (ss *SessionScheduler) run(ctx context.Context) {
 
 // checkAndSummarizeSessions checks all sessions and summarizes eligible ones
 func (ss *SessionScheduler) checkAndSummarizeSessions(ctx context.Context) {
-	log.Log.Infof("[SessionScheduler] 🔍 Checking sessions for summarization...")
+	if !ss.config.DisableLogs {
+		log.Log.Infof("[SessionScheduler] 🔍 Checking sessions for summarization...")
+	}
 
 	// Get all sessions from store
 	sessionStore := ss.sessionHandler.GetStore()
 	debugStore, ok := sessionStore.(store.DebugStore)
 	if !ok {
-		log.Log.Errorf("[SessionScheduler] ❌ Store does not implement DebugStore interface")
+		if !ss.config.DisableLogs {
+			log.Log.Errorf("[SessionScheduler] ❌ Store does not implement DebugStore interface")
+		}
 		return
 	}
 
 	sessionsByUser, err := debugStore.GetAllSessions()
 	if err != nil {
-		log.Log.Errorf("[SessionScheduler] ❌ Failed to get all sessions: %v", err)
+		if !ss.config.DisableLogs {
+			log.Log.Errorf("[SessionScheduler] ❌ Failed to get all sessions: %v", err)
+		}
 		return
 	}
 
@@ -211,29 +234,38 @@ func (ss *SessionScheduler) checkAndSummarizeSessions(ctx context.Context) {
 						}
 					}
 				}
-				if len(reasons) > 0 {
+				if len(reasons) > 0 && !ss.config.DisableLogs {
 					log.Log.Debugf("[SessionScheduler] ⏭️  Session %s not eligible: %s | Messages: %d", session.SessionID, strings.Join(reasons, ", "), msgCount)
 				}
 			}
 			if isEligible {
 				eligibleSessions++
-				log.Log.Infof("[SessionScheduler] 🎯 Session eligible for summarization | SessionID: %s | UserID: %s | Messages: %d", session.SessionID, userID, msgCount)
+				if !ss.config.DisableLogs {
+					log.Log.Infof("[SessionScheduler] 🎯 Session eligible for summarization | SessionID: %s | UserID: %s | Messages: %d", session.SessionID, userID, msgCount)
+				}
 				if err := ss.summarizeSession(ctx, session); err != nil {
-					log.Log.Errorf("[SessionScheduler] ❌ Failed to summarize session %s: %v", session.SessionID, err)
+					if !ss.config.DisableLogs {
+						log.Log.Errorf("[SessionScheduler] ❌ Failed to summarize session %s: %v", session.SessionID, err)
+					}
 				} else {
 					summarizedSessions++
-					log.Log.Infof("[SessionScheduler] ✅ Summarized session %s (UserID: %s)", session.SessionID, userID)
+					if !ss.config.DisableLogs {
+						log.Log.Infof("[SessionScheduler] ✅ Summarized session %s (UserID: %s)", session.SessionID, userID)
+					}
 				}
-				// Sleep 10 seconds between each summarization to avoid overwhelming the system
-				log.Log.Infof("[SessionScheduler] ⏸️  Sleeping 10 seconds before next summarization...")
+				if !ss.config.DisableLogs {
+					log.Log.Infof("[SessionScheduler] ⏸️  Sleeping 10 seconds before next summarization...")
+				}
 				time.Sleep(10 * time.Second)
 			}
 		}
 	}
 
-	log.Log.Infof("[SessionScheduler] 📊 Summary check completed | Total: %d | Users: %d | Messages: %d | WithMsgs: %d | NoMsgs: %d | AlreadySummarized: %d | NotEligible: %d | Eligible: %d | Summarized: %d | Threshold: %d msgs, %v old, %v activity",
-		totalSessions, totalUsers, totalMessages, sessionsWithMessages, sessionsWithoutMessages, alreadySummarizedSessions, sessionsNotEligible, eligibleSessions, summarizedSessions,
-		ss.config.MessageThreshold, ss.config.SummarizedAtThreshold, ss.config.LastActivityThreshold)
+	if !ss.config.DisableLogs {
+		log.Log.Infof("[SessionScheduler] 📊 Summary check completed | Total: %d | Users: %d | Messages: %d | WithMsgs: %d | NoMsgs: %d | AlreadySummarized: %d | NotEligible: %d | Eligible: %d | Summarized: %d | Threshold: %d msgs, %v old, %v activity",
+			totalSessions, totalUsers, totalMessages, sessionsWithMessages, sessionsWithoutMessages, alreadySummarizedSessions, sessionsNotEligible, eligibleSessions, summarizedSessions,
+			ss.config.MessageThreshold, ss.config.SummarizedAtThreshold, ss.config.LastActivityThreshold)
+	}
 }
 
 // isEligibleForSummarization checks if a session is eligible for summarization
@@ -273,7 +305,9 @@ func (ss *SessionScheduler) isEligibleForSummarization(session *model.Session, n
 
 // summarizeSession summarizes a session and moves messages to ExMsgs
 func (ss *SessionScheduler) summarizeSession(ctx context.Context, session *model.Session) error {
-	log.Log.Infof("[SessionScheduler] 📝 Summarizing session %s | Messages: %d", session.SessionID, len(session.ConversationState.Msgs))
+	if !ss.config.DisableLogs {
+		log.Log.Infof("[SessionScheduler] 📝 Summarizing session %s | Messages: %d", session.SessionID, len(session.ConversationState.Msgs))
+	}
 
 	// Ensure user_id is in context
 	ctx = model.WithUserID(ctx, session.UserID)
@@ -292,7 +326,9 @@ func (ss *SessionScheduler) summarizeSession(ctx context.Context, session *model
 	summaryWasEmpty := session.Summary == ""
 	if session.Title == "" || session.Summary == "" || len(session.Tags) == 0 {
 		if err := session.PopulateFields(ctx, llmClientWrapper, ss.config.SummaryModel); err != nil {
-			log.Log.Warnf("[SessionScheduler] ⚠️  Failed to populate fields for session %s: %v", session.SessionID, err)
+			if !ss.config.DisableLogs {
+				log.Log.Warnf("[SessionScheduler] ⚠️  Failed to populate fields for session %s: %v", session.SessionID, err)
+			}
 			// Continue anyway
 		}
 	}
@@ -302,7 +338,9 @@ func (ss *SessionScheduler) summarizeSession(ctx context.Context, session *model
 	conversationText := formatMessagesForSummary(session.ConversationState.Msgs)
 	summary, err := ss.generateSummary(ctx, session.SessionID, session.UserID, conversationText)
 	if err != nil {
-		log.Log.Warnf("[SessionScheduler] ⚠️  Failed to generate summary for session %s: %v", session.SessionID, err)
+		if !ss.config.DisableLogs {
+			log.Log.Warnf("[SessionScheduler] ⚠️  Failed to generate summary for session %s: %v", session.SessionID, err)
+		}
 		// Only set summary if it was empty and we got a new one
 		if summaryWasEmpty && summary != "" {
 			session.Summary = summary
@@ -345,25 +383,33 @@ func (ss *SessionScheduler) summarizeSession(ctx context.Context, session *model
 
 	// After successful save, ensure Msgs is empty (defensive check)
 	if len(session.ConversationState.Msgs) > 0 {
-		log.Log.Warnf("[SessionScheduler] ⚠️  Msgs not empty after save, clearing... | SessionID: %s | Msgs count: %d", session.SessionID, len(session.ConversationState.Msgs))
+		if !ss.config.DisableLogs {
+			log.Log.Warnf("[SessionScheduler] ⚠️  Msgs not empty after save, clearing... | SessionID: %s | Msgs count: %d", session.SessionID, len(session.ConversationState.Msgs))
+		}
 		session.ConversationState.Msgs = []openai.ChatCompletionMessage{}
 		// Save again to ensure consistency
 		if err := store.Put(session); err != nil {
-			log.Log.Errorf("[SessionScheduler] ❌ Failed to save session after clearing Msgs: %v", err)
+			if !ss.config.DisableLogs {
+				log.Log.Errorf("[SessionScheduler] ❌ Failed to save session after clearing Msgs: %v", err)
+			}
 			return fmt.Errorf("failed to save session after clearing Msgs: %w", err)
 		}
 	}
 
-	log.Log.Infof("[SessionScheduler] ✅ Session %s summarized | ExMsgs: %d | Summary: %s",
-		session.SessionID, len(session.ExMsgs), session.Summary)
+	if !ss.config.DisableLogs {
+		log.Log.Infof("[SessionScheduler] ✅ Session %s summarized | ExMsgs: %d | Summary: %s",
+			session.SessionID, len(session.ExMsgs), session.Summary)
+	}
 
 	return nil
 }
 
 // generateSummary generates a summary for the conversation
 func (ss *SessionScheduler) generateSummary(ctx context.Context, sessionID string, userID string, conversationText string) (string, error) {
-	fmt.Printf("[SessionScheduler] 🔍 generateSummary called | SessionID: %s | UserID: %s | ConversationText length: %d\n",
-		sessionID, userID, len(conversationText))
+	if !ss.config.DisableLogs {
+		fmt.Printf("[SessionScheduler] 🔍 generateSummary called | SessionID: %s | UserID: %s | ConversationText length: %d\n",
+			sessionID, userID, len(conversationText))
+	}
 
 	systemPrompt := `You are a conversation summarizer.
 Generate a concise summary (2-3 sentences) that captures the main topics and outcomes of this conversation.
@@ -396,45 +442,65 @@ Example: "Debugged Kubernetes pod restart issue. Found memory limits too low. Ap
 	summLog.ModelUsed = ss.config.SummaryModel
 	summLog.Status = "pending"
 
-	fmt.Printf("[SessionScheduler] 🔍 Created summarization log | LogID: %s | SessionID: %s | UserID: %s | Status: %s\n",
-		summLog.LogID, summLog.SessionID, summLog.UserID, summLog.Status)
+	if !ss.config.DisableLogs {
+		fmt.Printf("[SessionScheduler] 🔍 Created summarization log | LogID: %s | SessionID: %s | UserID: %s | Status: %s\n",
+			summLog.LogID, summLog.SessionID, summLog.UserID, summLog.Status)
+	}
 
 	// Validate required fields
-	if summLog.PromptSent == "" {
-		log.Log.Warnf("[SessionScheduler] ⚠️  PromptSent is empty for log | LogID: %s", summLog.LogID)
-	}
-	if summLog.ModelUsed == "" {
-		log.Log.Warnf("[SessionScheduler] ⚠️  ModelUsed is empty for log | LogID: %s", summLog.LogID)
-	}
-	if summLog.LogID == "" {
-		log.Log.Errorf("[SessionScheduler] ❌ LogID is empty!")
-	}
-	if summLog.SessionID == "" {
-		log.Log.Errorf("[SessionScheduler] ❌ SessionID is empty!")
-	}
-	if summLog.UserID == "" {
-		log.Log.Errorf("[SessionScheduler] ❌ UserID is empty!")
+	if !ss.config.DisableLogs {
+		if summLog.PromptSent == "" {
+			log.Log.Warnf("[SessionScheduler] ⚠️  PromptSent is empty for log | LogID: %s", summLog.LogID)
+		}
+		if summLog.ModelUsed == "" {
+			log.Log.Warnf("[SessionScheduler] ⚠️  ModelUsed is empty for log | LogID: %s", summLog.LogID)
+		}
+		if summLog.LogID == "" {
+			log.Log.Errorf("[SessionScheduler] ❌ LogID is empty!")
+		}
+		if summLog.SessionID == "" {
+			log.Log.Errorf("[SessionScheduler] ❌ SessionID is empty!")
+		}
+		if summLog.UserID == "" {
+			log.Log.Errorf("[SessionScheduler] ❌ UserID is empty!")
+		}
 	}
 
 	// Get store to save log
 	sessionStore := ss.sessionHandler.GetStore()
-	fmt.Printf("[SessionScheduler] 🔍 Store type: %T | LogID: %s\n", sessionStore, summLog.LogID)
+	if !ss.config.DisableLogs {
+		fmt.Printf("[SessionScheduler] 🔍 Store type: %T | LogID: %s\n", sessionStore, summLog.LogID)
+	}
 	debugStore, ok := sessionStore.(store.DebugStore)
 	if !ok {
-		fmt.Printf("[SessionScheduler] ⚠️  Store does not implement DebugStore interface, skipping summarization log | Store type: %T | LogID: %s\n", sessionStore, summLog.LogID)
-		log.Log.Warnf("[SessionScheduler] ⚠️  Store does not implement DebugStore interface, skipping summarization log | Store type: %T | LogID: %s", sessionStore, summLog.LogID)
+		if !ss.config.DisableLogs {
+			fmt.Printf("[SessionScheduler] ⚠️  Store does not implement DebugStore interface, skipping summarization log | Store type: %T | LogID: %s\n", sessionStore, summLog.LogID)
+			log.Log.Warnf("[SessionScheduler] ⚠️  Store does not implement DebugStore interface, skipping summarization log | Store type: %T | LogID: %s", sessionStore, summLog.LogID)
+		}
 	} else {
-		fmt.Printf("[SessionScheduler] ✅ Store implements DebugStore, attempting to save summarization log | LogID: %s | SessionID: %s | Status: %s | PromptSent length: %d\n",
-			summLog.LogID, sessionID, summLog.Status, len(summLog.PromptSent))
-		log.Log.Infof("[SessionScheduler] 🔍 Store implements DebugStore, attempting to save summarization log | LogID: %s | SessionID: %s | Status: %s | PromptSent length: %d", summLog.LogID, sessionID, summLog.Status, len(summLog.PromptSent))
+		if !ss.config.DisableLogs {
+			fmt.Printf("[SessionScheduler] ✅ Store implements DebugStore, attempting to save summarization log | LogID: %s | SessionID: %s | Status: %s | PromptSent length: %d\n",
+				summLog.LogID, sessionID, summLog.Status, len(summLog.PromptSent))
+			log.Log.Infof("[SessionScheduler] 🔍 Store implements DebugStore, attempting to save summarization log | LogID: %s | SessionID: %s | Status: %s | PromptSent length: %d", summLog.LogID, sessionID, summLog.Status, len(summLog.PromptSent))
+		}
 		if err := debugStore.PutSummarizationLog(summLog); err != nil {
-			fmt.Printf("[SessionScheduler] ❌ Failed to save summarization log: %v | LogID: %s | SessionID: %s\n", err, summLog.LogID, sessionID)
-			log.Log.Errorf("[SessionScheduler] ❌ Failed to save summarization log: %v | LogID: %s | SessionID: %s | Error details: %+v", err, summLog.LogID, sessionID, err)
-		} else {
+			if !ss.config.DisableLogs {
+				fmt.Printf("[SessionScheduler] ❌ Failed to save summarization log: %v | LogID: %s | SessionID: %s\n", err, summLog.LogID, sessionID)
+				log.Log.Errorf("[SessionScheduler] ❌ Failed to save summarization log: %v | LogID: %s | SessionID: %s | Error details: %+v", err, summLog.LogID, sessionID, err)
+			}
+		} else if !ss.config.DisableLogs {
 			fmt.Printf("[SessionScheduler] ✅ Saved summarization log (pending) | LogID: %s | SessionID: %s\n", summLog.LogID, sessionID)
 			log.Log.Infof("[SessionScheduler] ✅ Saved summarization log (pending) | LogID: %s | SessionID: %s", summLog.LogID, sessionID)
 		}
 	}
+
+	systemPromptLen := 0
+	for _, m := range request.Messages {
+		if m.Role == openai.ChatMessageRoleSystem {
+			systemPromptLen += len(m.Content)
+		}
+	}
+	log.Log.Infof("[SessionScheduler] 🔵 LLM >> Model: %s | Messages: %d | system_prompt_len=%d (summarization)", request.Model, len(request.Messages), systemPromptLen)
 
 	resp, err := ss.llmClient.CreateChatCompletion(ctx, request)
 	if err != nil {
@@ -449,6 +515,14 @@ Example: "Debugged Kubernetes pod restart issue. Found memory limits too low. Ap
 			}
 		}
 		return "", err
+	}
+	if resp.Usage.TotalTokens > 0 {
+		cacheTokens := 0
+		if resp.Usage.PromptTokensDetails != nil {
+			cacheTokens = resp.Usage.PromptTokensDetails.CachedTokens
+		}
+		log.Log.Infof("[SessionScheduler] 📊 TOKEN USAGE >> Model: %s | prompt=%d | completion=%d | total=%d | cache=%d (summarization)",
+			request.Model, resp.Usage.PromptTokens, resp.Usage.CompletionTokens, resp.Usage.TotalTokens, cacheTokens)
 	}
 
 	if len(resp.Choices) == 0 {

@@ -44,6 +44,7 @@ type SchedulerConfig struct {
 	MessageThreshold      int
 	SummaryModel          string
 	CleanerInterval       time.Duration // Interval for cleaner goroutine to remove duplicate messages
+	DisableLogs           bool          // If true, SessionScheduler does not emit any logs
 }
 
 // Load loads configuration from environment variables
@@ -95,6 +96,7 @@ func loadSchedulerConfig() SchedulerConfig {
 		MessageThreshold:      getEnvInt("AGENTIZE_SCHEDULER_MESSAGE_THRESHOLD", 5), // Default matches DefaultSessionSchedulerConfig
 		SummaryModel:          getEnvString("AGENTIZE_SCHEDULER_SUMMARY_MODEL", "gpt-4o-mini"),
 		CleanerInterval:       time.Duration(cleanerIntervalMinutes) * time.Minute,
+		DisableLogs:           getEnvBool("AGENTIZE_SCHEDULER_DISABLE_LOGS", false),
 	}
 }
 

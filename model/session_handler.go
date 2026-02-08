@@ -30,6 +30,7 @@ type SessionHandlerConfig struct {
 	AutoSummarizeThreshold int    // Number of messages before auto-summarize (default: 20)
 	SummaryModel           string // LLM model for summarization (default: gpt-4o-mini)
 	SummaryMaxTokens       int    // Max tokens for summary (default: 200)
+	DisableLogs            bool   // If true, SessionHandler does not emit any logs
 }
 
 // DefaultSessionHandlerConfig returns default configuration
@@ -38,6 +39,7 @@ func DefaultSessionHandlerConfig() SessionHandlerConfig {
 		AutoSummarizeThreshold: 20,
 		SummaryModel:           "gpt-4o-mini",
 		SummaryMaxTokens:       200,
+		DisableLogs:            true,
 	}
 }
 
@@ -99,12 +101,11 @@ func (sh *SessionHandler) CreateSession(userID string, agentType AgentType) (*Se
 	sh.userIndex[userID] = append(sh.userIndex[userID], session.SessionID)
 	sh.mu.Unlock()
 
-	// Log session creation
-	log.Log.Infof("[SessionHandler] ✅ Created new session | UserID: %s | SessionID: %s | AgentType: %s", userID, session.SessionID, agentType)
-
-	// Log total sessions for this user
-	allSessions, _ := sh.store.List(userID)
-	log.Log.Infof("[SessionHandler] 📊 Total sessions for user %s: %d", userID, len(allSessions))
+	if !sh.config.DisableLogs {
+		log.Log.Infof("[SessionHandler] ✅ Created new session | UserID: %s | SessionID: %s | AgentType: %s", userID, session.SessionID, agentType)
+		allSessions, _ := sh.store.List(userID)
+		log.Log.Infof("[SessionHandler] 📊 Total sessions for user %s: %d", userID, len(allSessions))
+	}
 
 	return session, nil
 }
@@ -113,11 +114,15 @@ func (sh *SessionHandler) CreateSession(userID string, agentType AgentType) (*Se
 func (sh *SessionHandler) GetSession(sessionID string) (*Session, error) {
 	session, err := sh.store.Get(sessionID)
 	if err != nil {
-		log.Log.Warnf("[SessionHandler] ⚠️  Session not found | SessionID: %s | Error: %v", sessionID, err)
+		if !sh.config.DisableLogs {
+			log.Log.Warnf("[SessionHandler] ⚠️  Session not found | SessionID: %s | Error: %v", sessionID, err)
+		}
 		return nil, err
 	}
-	log.Log.Infof("[SessionHandler] 🔍 Retrieved session | SessionID: %s | UserID: %s | AgentType: %s | Title: %s",
-		sessionID, session.UserID, session.AgentType, getSessionTitle(session))
+	if !sh.config.DisableLogs {
+		log.Log.Infof("[SessionHandler] 🔍 Retrieved session | SessionID: %s | UserID: %s | AgentType: %s | Title: %s",
+			sessionID, session.UserID, session.AgentType, getSessionTitle(session))
+	}
 	return session, nil
 }
 
@@ -133,11 +138,15 @@ func getSessionTitle(s *Session) string {
 func (sh *SessionHandler) ListUserSessions(userID string) ([]*Session, error) {
 	sessions, err := sh.store.List(userID)
 	if err != nil {
-		log.Log.Errorf("[SessionHandler] ❌ Failed to list sessions | UserID: %s | Error: %v", userID, err)
+		if !sh.config.DisableLogs {
+			log.Log.Errorf("[SessionHandler] ❌ Failed to list sessions | UserID: %s | Error: %v", userID, err)
+		}
 		return nil, err
 	}
 
-	log.Log.Infof("[SessionHandler] 📋 Listing sessions | UserID: %s | Total: %d", userID, len(sessions))
+	if !sh.config.DisableLogs {
+		log.Log.Infof("[SessionHandler] 📋 Listing sessions | UserID: %s | Total: %d", userID, len(sessions))
+	}
 
 	// Group by agent type for better visibility
 	byType := make(map[AgentType]int)
@@ -151,25 +160,24 @@ func (sh *SessionHandler) ListUserSessions(userID string) ([]*Session, error) {
 		totalActiveMessages += activeMsgs
 		totalArchivedMessages += archivedMsgs
 
-		// Log detailed session info
-		title := s.Title
-		if title == "" {
-			title = "Untitled"
+		if !sh.config.DisableLogs {
+			title := s.Title
+			if title == "" {
+				title = "Untitled"
+			}
+			timeAgo := formatTimeAgo(s.UpdatedAt)
+			log.Log.Infof("[SessionHandler]   ├─ [%s] %s | Title: \"%s\" | Active: %d msgs | Archived: %d msgs | Last: %s",
+				s.SessionID, agentTypeDisplayName(s.AgentType), title, activeMsgs, archivedMsgs, timeAgo)
 		}
-		timeAgo := formatTimeAgo(s.UpdatedAt)
-
-		log.Log.Infof("[SessionHandler]   ├─ [%s] %s | Title: \"%s\" | Active: %d msgs | Archived: %d msgs | Last: %s",
-			s.SessionID, agentTypeDisplayName(s.AgentType), title, activeMsgs, archivedMsgs, timeAgo)
 	}
 
-	// Summary by type
-	for agentType, count := range byType {
-		log.Log.Infof("[SessionHandler]   └─ %s sessions: %d", agentTypeDisplayName(agentType), count)
+	if !sh.config.DisableLogs {
+		for agentType, count := range byType {
+			log.Log.Infof("[SessionHandler]   └─ %s sessions: %d", agentTypeDisplayName(agentType), count)
+		}
+		log.Log.Infof("[SessionHandler] 📊 Sessions Summary | Total: %d | Active messages: %d | Archived messages: %d",
+			len(sessions), totalActiveMessages, totalArchivedMessages)
 	}
-
-	// Overall summary
-	log.Log.Infof("[SessionHandler] 📊 Sessions Summary | Total: %d | Active messages: %d | Archived messages: %d",
-		len(sessions), totalActiveMessages, totalArchivedMessages)
 
 	return sessions, nil
 }
@@ -188,8 +196,10 @@ func (sh *SessionHandler) ListUserSessionsByType(userID string, agentType AgentT
 		}
 	}
 
-	log.Log.Infof("[SessionHandler] 🔎 Filtered sessions | UserID: %s | AgentType: %s | Found: %d (out of %d total)",
-		userID, agentType, len(filtered), len(allSessions))
+	if !sh.config.DisableLogs {
+		log.Log.Infof("[SessionHandler] 🔎 Filtered sessions | UserID: %s | AgentType: %s | Found: %d (out of %d total)",
+			userID, agentType, len(filtered), len(allSessions))
+	}
 
 	return filtered, nil
 }
@@ -295,16 +305,17 @@ func (sh *SessionHandler) SummarizeSession(ctx context.Context, sessionID string
 	summLog.Status = "pending"
 	// PromptSent will be set in generateConversationSummary with full prompt
 
-	// Try to save log if store supports it
 	if debugStore, ok := sh.store.(interface {
 		PutSummarizationLog(log *SummarizationLog) error
 	}); ok {
 		if err := debugStore.PutSummarizationLog(summLog); err != nil {
-			log.Log.Warnf("[SessionHandler] ⚠️  Failed to save summarization log: %v", err)
-		} else {
+			if !sh.config.DisableLogs {
+				log.Log.Warnf("[SessionHandler] ⚠️  Failed to save summarization log: %v", err)
+			}
+		} else if !sh.config.DisableLogs {
 			log.Log.Infof("[SessionHandler] ✅ Saved summarization log (pending) | LogID: %s | SessionID: %s", summLog.LogID, sessionID)
 		}
-	} else {
+	} else if !sh.config.DisableLogs {
 		log.Log.Warnf("[SessionHandler] ⚠️  Store does not implement PutSummarizationLog, skipping log")
 	}
 
@@ -481,8 +492,10 @@ Example: "Debugged Kubernetes pod restart issue. Found memory limits too low. Ap
 		PutSummarizationLog(log *SummarizationLog) error
 	}); ok {
 		if err := debugStore.PutSummarizationLog(summLog); err != nil {
-			log.Log.Warnf("[SessionHandler] ⚠️  Failed to update summarization log: %v", err)
-		} else {
+			if !sh.config.DisableLogs {
+				log.Log.Warnf("[SessionHandler] ⚠️  Failed to update summarization log: %v", err)
+			}
+		} else if !sh.config.DisableLogs {
 			log.Log.Infof("[SessionHandler] ✅ Updated summarization log (success) | LogID: %s | SessionID: %s | Tokens: %d", summLog.LogID, summLog.SessionID, summLog.TotalTokens)
 		}
 	}

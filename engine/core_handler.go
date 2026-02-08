@@ -68,6 +68,9 @@ type CoreHandler struct {
 
 	// User moderation helper
 	userModeration *UserModeration
+
+	// Backup LLM chain (initialized from LLMConfig.BackupProviders)
+	backups *backupChain
 }
 
 // NewCoreHandler creates a new CoreHandler with the given UserAgents
@@ -105,6 +108,9 @@ func (ch *CoreHandler) UseLLMConfig(config LLMConfig) error {
 	ch.llmClient = openai.NewClientWithConfig(openaiConfig)
 	ch.llmConfig = config
 
+	// Initialize backup chain from configured providers
+	ch.backups = newBackupChain(config.BackupProviders)
+
 	// Initialize user moderation helper
 	ch.userModeration = NewUserModeration(
 		IsNonsenseMessageFast,
@@ -116,6 +122,40 @@ func (ch *CoreHandler) UseLLMConfig(config LLMConfig) error {
 	)
 
 	return nil
+}
+
+// callLLM tries the backup LLM providers in order (if configured), then falls back
+// to the default OpenAI client. This is the single entry point for all LLM calls
+// in the CoreHandler, ensuring consistent fallback behaviour.
+func (ch *CoreHandler) callLLM(ctx context.Context, model string, messages []openai.ChatCompletionMessage, tools []openai.Tool) (openai.ChatCompletionResponse, error) {
+	// Try backup providers chain first
+	if resp, ok := ch.backups.tryBackup(ctx, messages, tools, "CoreHandler"); ok {
+		return resp, nil
+	}
+
+	// Default: OpenAI client
+	systemPromptLen := 0
+	for _, m := range messages {
+		if m.Role == openai.ChatMessageRoleSystem {
+			systemPromptLen += len(m.Content)
+		}
+	}
+	log.Log.Infof("[CoreHandler] 🔵 DEFAULT LLM >> Using OpenAI | Model: %s | Messages: %d | Tools: %d | system_prompt_len=%d", model, len(messages), len(tools), systemPromptLen)
+	request := openai.ChatCompletionRequest{
+		Model:    model,
+		Messages: messages,
+		Tools:    tools,
+	}
+	resp, err := ch.llmClient.CreateChatCompletion(ctx, request)
+	if err == nil && resp.Usage.TotalTokens > 0 {
+		cacheTokens := 0
+		if resp.Usage.PromptTokensDetails != nil {
+			cacheTokens = resp.Usage.PromptTokensDetails.CachedTokens
+		}
+		log.Log.Infof("[CoreHandler] 📊 TOKEN USAGE >> Model: %s | prompt=%d | completion=%d | total=%d | cache=%d (ورودی=prompt، خروجی=completion، مجموع=total، کش‌پرامپت=cache)",
+			model, resp.Usage.PromptTokens, resp.Usage.CompletionTokens, resp.Usage.TotalTokens, cacheTokens)
+	}
+	return resp, err
 }
 
 // SetHTTPClient sets a custom HTTP client (e.g., for proxy support)
@@ -595,12 +635,8 @@ func (ch *CoreHandler) processWithTools(
 	}
 
 	for i := 0; i < maxIterations; i++ {
-		request := openai.ChatCompletionRequest{
-			Model:    modelName,
-			Messages: currentMessages,
-			Tools:    tools,
-		}
-		resp, err := ch.llmClient.CreateChatCompletion(ctx, request)
+		// Make LLM call (tries backup provider first, then falls back to OpenAI)
+		resp, err := ch.callLLM(ctx, modelName, currentMessages, tools)
 		if err != nil {
 			return "", formatLLMError(err)
 		}
@@ -612,6 +648,11 @@ func (ch *CoreHandler) processWithTools(
 		choice := resp.Choices[0]
 
 		// Save message to database
+		request := openai.ChatCompletionRequest{
+			Model:    modelName,
+			Messages: currentMessages,
+			Tools:    tools,
+		}
 		messageID := ch.saveCoreMessage(userID, request, resp, choice)
 
 		// If no tool calls, return the response

@@ -107,7 +107,7 @@ func IsNonsenseMessageFast(message string) bool {
 
 // Search model names for web search capability
 const (
-	DefaultSearchModel            = "gpt-4o-search-preview"
+	DefaultSearchModel            = "openai/gpt-4o-mini-search-preview"
 	SearchModelTongyiDeepResearch = "alibaba/tongyi-deepresearch-30b-a3b"
 )
 

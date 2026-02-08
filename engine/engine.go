@@ -38,6 +38,15 @@ type LLMConfig struct {
 	// Tool result truncation settings
 	MaxToolResultLength int    // Max chars before truncating (default: 250)
 	CollectResultModel  string // LLM model for collect_result tool (default: same as Model)
+
+	// BackupProviders is a chain of backup LLM providers tried in order BEFORE the
+	// default OpenAI client. Each entry pairs a Provider with a Model name.
+	// On error or empty response from one provider, the next is tried.
+	// After all backups fail, falls back to the default OpenAI client transparently.
+	BackupProviders []BackupLLM
+
+	// SchedulerDisableLogs if true, SessionScheduler does not emit any logs (overrides config from env)
+	SchedulerDisableLogs bool
 }
 
 // ToolExecutor executes a tool call and returns the result
@@ -60,6 +69,9 @@ type Engine struct {
 	// Scheduler for session summarization
 	scheduler   *SessionScheduler
 	schedulerMu sync.RWMutex
+
+	// Backup LLM chain (initialized from LLMConfig.BackupProviders)
+	backups *backupChain
 }
 
 // Init initializes the engine by loading the root node and verifying Sessions store is ready.
@@ -124,6 +136,9 @@ func (e *Engine) UseLLMConfig(config LLMConfig) error {
 	e.llmClient = client
 	e.llmConfig = config
 
+	// Initialize backup chain from configured providers
+	e.backups = newBackupChain(config.BackupProviders)
+
 	// Automatically start scheduler if LLM is configured and scheduler is not already running
 	// Use sync.Once per session store to ensure scheduler starts only once
 	if config.APIKey != "" && e.Sessions != nil {
@@ -155,6 +170,42 @@ func (e *Engine) UseLLMConfig(config LLMConfig) error {
 	return nil
 }
 
+const backupCooldownDuration = 10 * time.Minute
+
+// callLLM tries the backup LLM providers in order (if configured), then falls back
+// to the default OpenAI client. This is the single entry point for all LLM calls
+// in the Engine, ensuring consistent fallback behaviour.
+func (e *Engine) callLLM(ctx context.Context, model string, messages []openai.ChatCompletionMessage, tools []openai.Tool) (openai.ChatCompletionResponse, error) {
+	// Try backup providers chain first
+	if resp, ok := e.backups.tryBackup(ctx, messages, tools, "Engine"); ok {
+		return resp, nil
+	}
+
+	// Default: OpenAI client
+	systemPromptLen := 0
+	for _, m := range messages {
+		if m.Role == openai.ChatMessageRoleSystem {
+			systemPromptLen += len(m.Content)
+		}
+	}
+	log.Log.Infof("[Engine] 🔵 DEFAULT LLM >> Using OpenAI | Model: %s | Messages: %d | Tools: %d | system_prompt_len=%d", model, len(messages), len(tools), systemPromptLen)
+	request := openai.ChatCompletionRequest{
+		Model:    model,
+		Messages: messages,
+		Tools:    tools,
+	}
+	resp, err := e.llmClient.CreateChatCompletion(ctx, request)
+	if err == nil && resp.Usage.TotalTokens > 0 {
+		cacheTokens := 0
+		if resp.Usage.PromptTokensDetails != nil {
+			cacheTokens = resp.Usage.PromptTokensDetails.CachedTokens
+		}
+		log.Log.Infof("[Engine] 📊 TOKEN USAGE >> Model: %s | prompt=%d | completion=%d | total=%d | cache=%d (ورودی=prompt، خروجی=completion، مجموع=total، کش‌پرامپت=cache)",
+			model, resp.Usage.PromptTokens, resp.Usage.CompletionTokens, resp.Usage.TotalTokens, cacheTokens)
+	}
+	return resp, err
+}
+
 // startScheduler starts the session scheduler
 func (e *Engine) startScheduler(ctx context.Context, llmClient *openai.Client) error {
 	// Load scheduler config from environment
@@ -171,6 +222,7 @@ func (e *Engine) startScheduler(ctx context.Context, llmClient *openai.Client) e
 			MessageThreshold:      5,
 			SummaryModel:          "gpt-4o-mini",
 			CleanerInterval:       30 * time.Minute, // Default cleaner interval
+			DisableLogs:           e.llmConfig.SchedulerDisableLogs,
 		}
 	} else {
 		schedulerConfig = cfg.Scheduler
@@ -212,6 +264,8 @@ func (e *Engine) startScheduler(ctx context.Context, llmClient *openai.Client) e
 	if schedulerConfig.CleanerInterval > 0 {
 		schedulerConfigStruct.CleanerInterval = schedulerConfig.CleanerInterval
 	}
+	// DisableLogs: from config (env) or from LLMConfig (programmatic, e.g. TradeAgent yaml)
+	schedulerConfigStruct.DisableLogs = schedulerConfig.DisableLogs || e.llmConfig.SchedulerDisableLogs
 
 	// Create and start scheduler
 	scheduler := NewSessionScheduler(sessionHandler, llmClient, schedulerConfigStruct)
@@ -949,17 +1003,12 @@ Your response must not exceed %d characters.`, maxLen)
 		log.Log.Warnf("[Engine] ⚠️  Session has no UserID | SessionID: %s", sessionID)
 	}
 
-	// Make LLM call
-	resp, err := e.llmClient.CreateChatCompletion(
-		ctx,
-		openai.ChatCompletionRequest{
-			Model: modelName,
-			Messages: []openai.ChatCompletionMessage{
-				{Role: openai.ChatMessageRoleSystem, Content: systemPrompt},
-				{Role: openai.ChatMessageRoleUser, Content: userPrompt},
-			},
-		},
-	)
+	// Make LLM call (tries backup provider first, then falls back to OpenAI)
+	msgs := []openai.ChatCompletionMessage{
+		{Role: openai.ChatMessageRoleSystem, Content: systemPrompt},
+		{Role: openai.ChatMessageRoleUser, Content: userPrompt},
+	}
+	resp, err := e.callLLM(ctx, modelName, msgs, nil)
 
 	if err != nil {
 		return "", formatLLMError(err)
@@ -1061,13 +1110,8 @@ func (e *Engine) processChatRequest(
 	log.Log.Infof("LLM request: system_prompts=%d, tools=%d, messages=%d",
 		len(systemPrompts), len(openaiTools), len(reqMessages))
 
-	// Make OpenAI API call
-	request := openai.ChatCompletionRequest{
-		Model:    modelName,
-		Messages: reqMessages,
-		Tools:    openaiTools,
-	}
-	resp, err := e.llmClient.CreateChatCompletion(ctx, request)
+	// Make LLM call (tries backup provider first, then falls back to OpenAI)
+	resp, err := e.callLLM(ctx, modelName, reqMessages, openaiTools)
 
 	if err != nil {
 		return "", 0, formatLLMError(err)
@@ -1081,6 +1125,11 @@ func (e *Engine) processChatRequest(
 	tokenUsage := resp.Usage.TotalTokens
 
 	// Save message to database
+	request := openai.ChatCompletionRequest{
+		Model:    modelName,
+		Messages: reqMessages,
+		Tools:    openaiTools,
+	}
 	e.saveMessage(session, request, resp, choice)
 
 	// Handle tool calls
