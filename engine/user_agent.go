@@ -175,7 +175,7 @@ func (e *Engine) UseLLMConfig(config LLMConfig) error {
 	return nil
 }
 
-const backupCooldownDuration = 10 * time.Minute
+const backupCooldownDuration = 5 * time.Second
 
 // callLLM tries the backup LLM providers in order (if configured and not disabled), then falls back
 // to the default OpenAI client. This is the single entry point for all LLM calls

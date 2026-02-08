@@ -255,6 +255,26 @@ func (ss *SessionScheduler) GetConfig() SessionSchedulerConfig {
 	return ss.config
 }
 
+// isStopping checks if shutdown has been requested
+func (ss *SessionScheduler) isStopping() bool {
+	select {
+	case <-ss.stopChan:
+		return true
+	default:
+		return false
+	}
+}
+
+// sleepWithCancel sleeps for the given duration but can be interrupted by stop signal
+func (ss *SessionScheduler) sleepWithCancel(d time.Duration) bool {
+	select {
+	case <-time.After(d):
+		return false // completed normally
+	case <-ss.stopChan:
+		return true // interrupted
+	}
+}
+
 // chatCompletion tries backup providers first (OSS 120B priority), then falls back to main llmClient
 // This optimizes for cost by using cheaper models for summarization tasks
 func (ss *SessionScheduler) chatCompletion(ctx context.Context, request openai.ChatCompletionRequest) (openai.ChatCompletionResponse, error) {
@@ -280,10 +300,27 @@ func (ss *SessionScheduler) chatCompletion(ctx context.Context, request openai.C
 
 // run runs the scheduler loop
 func (ss *SessionScheduler) run(ctx context.Context) {
+	// Check for early shutdown before initial check
+	if ss.isStopping() || ctx.Err() != nil {
+		if !ss.config.DisableLogs {
+			log.Log.Infof("[SessionScheduler] ✅ Scheduler stopped before initial check")
+		}
+		return
+	}
+
 	if !ss.config.DisableLogs {
 		log.Log.Infof("[SessionScheduler] 🔍 Starting initial session check (checking all sessions immediately)...")
 	}
 	ss.checkAndSummarizeSessions(ctx)
+
+	// Check for shutdown after initial check
+	if ss.isStopping() || ctx.Err() != nil {
+		if !ss.config.DisableLogs {
+			log.Log.Infof("[SessionScheduler] ✅ Scheduler stopped after initial check")
+		}
+		return
+	}
+
 	if !ss.config.DisableLogs {
 		log.Log.Infof("[SessionScheduler] ✅ Initial session check completed, starting periodic checks...")
 	}
@@ -311,6 +348,11 @@ func (ss *SessionScheduler) run(ctx context.Context) {
 
 // checkAndSummarizeSessions checks all sessions and summarizes eligible ones
 func (ss *SessionScheduler) checkAndSummarizeSessions(ctx context.Context) {
+	// Check for early shutdown
+	if ss.isStopping() || ctx.Err() != nil {
+		return
+	}
+
 	if !ss.config.DisableLogs {
 		log.Log.Infof("[SessionScheduler] 🔍 Checking sessions for summarization...")
 	}
@@ -342,13 +384,24 @@ func (ss *SessionScheduler) checkAndSummarizeSessions(ctx context.Context) {
 	sessionsNotEligible := 0
 	totalUsers := len(sessionsByUser)
 	totalMessages := 0
+	stoppedEarly := false
 
 	now := time.Now()
 
 	// Iterate through all sessions
+sessionLoop:
 	for userID, sessions := range sessionsByUser {
 		totalSessions += len(sessions)
 		for _, session := range sessions {
+			// Check for shutdown before processing each session
+			if ss.isStopping() || ctx.Err() != nil {
+				if !ss.config.DisableLogs {
+					log.Log.Infof("[SessionScheduler] 🛑 Shutdown requested, stopping session check early")
+				}
+				stoppedEarly = true
+				break sessionLoop
+			}
+
 			msgCount := 0
 			if session.ConversationState != nil {
 				msgCount = len(session.ConversationState.Msgs)
@@ -408,6 +461,14 @@ func (ss *SessionScheduler) checkAndSummarizeSessions(ctx context.Context) {
 					log.Log.Infof("[SessionScheduler] 🎯 Session eligible for summarization | SessionID: %s | UserID: %s | Messages: %d", session.SessionID, userID, msgCount)
 				}
 				if err := ss.summarizeSession(ctx, session); err != nil {
+					// Check if error is due to context cancellation
+					if ctx.Err() != nil {
+						if !ss.config.DisableLogs {
+							log.Log.Infof("[SessionScheduler] 🛑 Summarization cancelled due to shutdown")
+						}
+						stoppedEarly = true
+						break sessionLoop
+					}
 					if !ss.config.DisableLogs {
 						log.Log.Errorf("[SessionScheduler] ❌ Failed to summarize session %s: %v", session.SessionID, err)
 					}
@@ -417,17 +478,29 @@ func (ss *SessionScheduler) checkAndSummarizeSessions(ctx context.Context) {
 						log.Log.Infof("[SessionScheduler] ✅ Summarized session %s (UserID: %s)", session.SessionID, userID)
 					}
 				}
+
+				// Sleep with cancellation support
 				if !ss.config.DisableLogs {
 					log.Log.Infof("[SessionScheduler] ⏸️  Sleeping 10 seconds before next summarization...")
 				}
-				time.Sleep(10 * time.Second)
+				if ss.sleepWithCancel(10 * time.Second) {
+					if !ss.config.DisableLogs {
+						log.Log.Infof("[SessionScheduler] 🛑 Sleep interrupted by shutdown")
+					}
+					stoppedEarly = true
+					break sessionLoop
+				}
 			}
 		}
 	}
 
 	if !ss.config.DisableLogs {
-		log.Log.Infof("[SessionScheduler] 📊 Summary check completed | Total: %d | Users: %d | Messages: %d | WithMsgs: %d | NoMsgs: %d | AlreadySummarized: %d | NotEligible: %d | Eligible: %d | Summarized: %d | FirstThreshold: %d msgs | SubsequentThreshold: %d msgs + %v time",
-			totalSessions, totalUsers, totalMessages, sessionsWithMessages, sessionsWithoutMessages, alreadySummarizedSessions, sessionsNotEligible, eligibleSessions, summarizedSessions,
+		status := "completed"
+		if stoppedEarly {
+			status = "interrupted by shutdown"
+		}
+		log.Log.Infof("[SessionScheduler] 📊 Summary check %s | Total: %d | Users: %d | Messages: %d | WithMsgs: %d | NoMsgs: %d | AlreadySummarized: %d | NotEligible: %d | Eligible: %d | Summarized: %d | FirstThreshold: %d msgs | SubsequentThreshold: %d msgs + %v time",
+			status, totalSessions, totalUsers, totalMessages, sessionsWithMessages, sessionsWithoutMessages, alreadySummarizedSessions, sessionsNotEligible, eligibleSessions, summarizedSessions,
 			ss.config.FirstSummarizationThreshold, ss.config.SubsequentMessageThreshold, ss.config.SubsequentTimeThreshold)
 	}
 }
