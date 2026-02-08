@@ -20,7 +20,7 @@ import (
 	"github.com/sashabaranov/go-openai"
 )
 
-//go:embed engine.md
+//go:embed user_agent.md
 var basePrompt string
 
 // Global scheduler once to ensure scheduler starts only once per session store
@@ -1205,7 +1205,7 @@ func (e *Engine) processChatRequest(
 		Messages: reqMessages,
 		Tools:    openaiTools,
 	}
-	e.saveMessage(session, request, resp, choice)
+	messageID := e.saveMessage(session, request, resp, choice)
 
 	// Handle tool calls
 	if choice.FinishReason == openai.FinishReasonToolCalls {
@@ -1224,6 +1224,9 @@ func (e *Engine) processChatRequest(
 		// Execute tools and collect results
 		toolResults := make([]openai.ChatCompletionMessage, 0, len(choice.Message.ToolCalls))
 		for _, toolCall := range choice.Message.ToolCalls {
+			// Save tool call to database (before execution)
+			e.saveToolCall(session.UserID, sessionID, messageID, toolCall)
+
 			// Parse arguments
 			var args map[string]interface{}
 			if err := json.Unmarshal([]byte(toolCall.Function.Arguments), &args); err != nil {
@@ -1255,6 +1258,9 @@ func (e *Engine) processChatRequest(
 			} else {
 				processedResult = e.processToolResult(sessionID, result)
 			}
+
+			// Update tool call response in database
+			e.updateToolCallResponse(toolCall.ID, processedResult)
 
 			// Add tool result to memory
 			e.appendMessages(sessionID, []openai.ChatCompletionMessage{
@@ -1301,13 +1307,13 @@ func (e *Engine) processChatRequest(
 	return textResponse, tokenUsage, nil
 }
 
-// saveMessage saves a message to the database
+// saveMessage saves a message to the database and returns the messageID
 func (e *Engine) saveMessage(
 	session *model.Session,
 	request openai.ChatCompletionRequest,
 	response openai.ChatCompletionResponse,
 	choice openai.ChatCompletionChoice,
-) {
+) string {
 	// Get user message content
 	content := choice.Message.Content
 	if content == "" && len(choice.Message.ToolCalls) > 0 {
@@ -1333,6 +1339,45 @@ func (e *Engine) saveMessage(
 			log.Log.Warnf("[Engine] ⚠️  Failed to save message | SessionID: %s | Error: %v", session.SessionID, err)
 		} else {
 			log.Log.Infof("[Engine] 💾 Message saved | MessageID: %s | Model: %s | Tokens: %d", msg.MessageID, msg.Model, msg.TotalTokens)
+		}
+	}
+	return msg.MessageID
+}
+
+// saveToolCall saves a tool call to the database
+func (e *Engine) saveToolCall(userID string, sessionID string, messageID string, toolCall openai.ToolCall) {
+	if sqliteStore, ok := e.Sessions.(interface {
+		PutToolCall(*model.ToolCall) error
+	}); ok {
+		now := time.Now()
+		tc := &model.ToolCall{
+			ToolCallID:   toolCall.ID,
+			MessageID:    messageID,
+			SessionID:    sessionID,
+			UserID:       userID,
+			FunctionName: toolCall.Function.Name,
+			Arguments:    toolCall.Function.Arguments,
+			Response:     "", // Will be updated after execution
+			CreatedAt:    now,
+			UpdatedAt:    now,
+		}
+		if err := sqliteStore.PutToolCall(tc); err != nil {
+			log.Log.Warnf("[Engine] ⚠️  Failed to save tool call | ToolCallID: %s | Error: %v", toolCall.ID, err)
+		} else {
+			log.Log.Infof("[Engine] 🔧 Tool call saved | ToolCallID: %s | Function: %s", toolCall.ID, toolCall.Function.Name)
+		}
+	}
+}
+
+// updateToolCallResponse updates the response for a tool call
+func (e *Engine) updateToolCallResponse(toolCallID string, response string) {
+	if sqliteStore, ok := e.Sessions.(interface {
+		UpdateToolCallResponse(string, string) error
+	}); ok {
+		if err := sqliteStore.UpdateToolCallResponse(toolCallID, response); err != nil {
+			log.Log.Warnf("[Engine] ⚠️  Failed to update tool call response | ToolCallID: %s | Error: %v", toolCallID, err)
+		} else {
+			log.Log.Infof("[Engine] ✅ Tool call response updated | ToolCallID: %s", toolCallID)
 		}
 	}
 }
