@@ -108,8 +108,12 @@ func (ch *CoreHandler) UseLLMConfig(config LLMConfig) error {
 	ch.llmClient = openai.NewClientWithConfig(openaiConfig)
 	ch.llmConfig = config
 
-	// Initialize backup chain from configured providers
-	ch.backups = newBackupChain(config.BackupProviders)
+	// Initialize backup chain from configured providers (nil if disabled or empty)
+	if config.BackupDisabled {
+		ch.backups = nil
+	} else {
+		ch.backups = newBackupChain(config.BackupProviders)
+	}
 
 	// Initialize user moderation helper
 	ch.userModeration = NewUserModeration(

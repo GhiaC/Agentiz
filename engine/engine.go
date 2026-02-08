@@ -45,6 +45,9 @@ type LLMConfig struct {
 	// After all backups fail, falls back to the default OpenAI client transparently.
 	BackupProviders []BackupLLM
 
+	// BackupDisabled if true, skips all backup providers and goes straight to the default LLM.
+	BackupDisabled bool
+
 	// SchedulerDisableLogs if true, SessionScheduler does not emit any logs (overrides config from env)
 	SchedulerDisableLogs bool
 }
@@ -136,8 +139,12 @@ func (e *Engine) UseLLMConfig(config LLMConfig) error {
 	e.llmClient = client
 	e.llmConfig = config
 
-	// Initialize backup chain from configured providers
-	e.backups = newBackupChain(config.BackupProviders)
+	// Initialize backup chain from configured providers (nil if disabled or empty)
+	if config.BackupDisabled {
+		e.backups = nil
+	} else {
+		e.backups = newBackupChain(config.BackupProviders)
+	}
 
 	// Automatically start scheduler if LLM is configured and scheduler is not already running
 	// Use sync.Once per session store to ensure scheduler starts only once
