@@ -628,14 +628,10 @@ func (ch *CoreHandler) getCoreToolsForLLM() []openai.Tool {
 			Type: openai.ToolTypeFunction,
 			Function: &openai.FunctionDefinition{
 				Name:        "ban_user",
-				Description: "Ban a user for a specified duration. Use this when a user repeatedly sends nonsense messages or violates rules. Duration is in hours (0 means permanent ban). Note: Once banned, the user's messages will not be processed, so this action should be used carefully.",
+				Description: "Ban the current user for a specified duration. Use this when a user repeatedly sends nonsense messages or violates rules. Duration is in hours (0 means permanent ban). Note: Once banned, the user's messages will not be processed, so this action should be used carefully.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
-						"user_id": map[string]interface{}{
-							"type":        "string",
-							"description": "The user ID to ban",
-						},
 						"duration_hours": map[string]interface{}{
 							"type":        "number",
 							"description": "Ban duration in hours (0 for permanent ban)",
@@ -645,7 +641,7 @@ func (ch *CoreHandler) getCoreToolsForLLM() []openai.Tool {
 							"description": "Optional custom ban message to show to the user",
 						},
 					},
-					"required": []string{"user_id", "duration_hours"},
+					"required": []string{"duration_hours"},
 				},
 			},
 		},
@@ -816,7 +812,7 @@ func (ch *CoreHandler) executeCoreTool(
 		return ch.listSessionsTool(userID)
 
 	case "ban_user":
-		return ch.banUserTool(ctx, args)
+		return ch.banUserTool(ctx, userID, args)
 
 	case "web_search":
 		return ch.webSearchWithModelTool(ctx, userID, args, "")
@@ -1090,11 +1086,11 @@ func (ch *CoreHandler) getOrCreateActiveSession(userID string, agentType model.A
 	return session.SessionID, nil
 }
 
-// banUserTool bans a user for a specified duration
-func (ch *CoreHandler) banUserTool(_ context.Context, args map[string]interface{}) (string, error) {
-	userID, ok := args["user_id"].(string)
-	if !ok || userID == "" {
-		return "", fmt.Errorf("user_id is required")
+// banUserTool bans the current user for a specified duration
+// userID is passed directly from executeCoreTool (from the current conversation context)
+func (ch *CoreHandler) banUserTool(_ context.Context, userID string, args map[string]interface{}) (string, error) {
+	if userID == "" {
+		return "", fmt.Errorf("user_id is required but not available in context")
 	}
 
 	durationHours, ok := args["duration_hours"].(float64)
