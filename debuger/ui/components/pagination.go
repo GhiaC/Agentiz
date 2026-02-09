@@ -58,7 +58,26 @@ func Pagination(config PaginationConfig) string {
 
 	// Build query string helper
 	buildURL := func(page int) string {
-		params := url.Values{}
+		// Parse existing URL to handle query params properly
+		parsedURL, err := url.Parse(config.BaseURL)
+		if err != nil {
+			// Fallback to simple append
+			params := url.Values{}
+			if config.QueryParams != nil {
+				for k, v := range config.QueryParams {
+					for _, val := range v {
+						params.Add(k, val)
+					}
+				}
+			}
+			params.Set("page", fmt.Sprintf("%d", page))
+			return config.BaseURL + "?" + params.Encode()
+		}
+
+		// Get existing query params from URL
+		params := parsedURL.Query()
+
+		// Add any additional query params from config
 		if config.QueryParams != nil {
 			for k, v := range config.QueryParams {
 				for _, val := range v {
@@ -66,8 +85,11 @@ func Pagination(config PaginationConfig) string {
 				}
 			}
 		}
+
+		// Set page param
 		params.Set("page", fmt.Sprintf("%d", page))
-		return config.BaseURL + "?" + params.Encode()
+		parsedURL.RawQuery = params.Encode()
+		return parsedURL.String()
 	}
 
 	html := `<nav aria-label="Page navigation" class="mt-4">

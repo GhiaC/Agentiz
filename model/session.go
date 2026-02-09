@@ -30,6 +30,7 @@ const (
 	AgentTypeCore AgentType = "core"
 	AgentTypeHigh AgentType = "high"
 	AgentTypeLow  AgentType = "low"
+	AgentTypeUser AgentType = "user"
 )
 
 // Session represents a user session in the agent system

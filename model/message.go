@@ -7,10 +7,25 @@ import (
 	"github.com/sashabaranov/go-openai"
 )
 
+// ContentType represents the type of content in the message
+type ContentType string
+
+const (
+	ContentTypeText  ContentType = "text"
+	ContentTypeAudio ContentType = "audio"
+	ContentTypeImage ContentType = "image"
+)
+
 // Message represents a stored message with LLM usage information
 type Message struct {
 	// MessageID is a unique identifier for this message
 	MessageID string
+
+	// AgentType indicates which type of agent created this message (core, low, high)
+	AgentType AgentType
+
+	// ContentType indicates the type of content (text, audio, image)
+	ContentType ContentType
 
 	// UserID identifies the user who sent/received this message
 	UserID string
@@ -54,6 +69,8 @@ func NewMessage(
 	sessionID string,
 	role string,
 	content string,
+	agentType AgentType,
+	contentType ContentType,
 	request openai.ChatCompletionRequest,
 	response openai.ChatCompletionResponse,
 	choice openai.ChatCompletionChoice,
@@ -66,6 +83,8 @@ func NewMessage(
 
 	msg := &Message{
 		MessageID:        generateMessageID(userID, sessionID, now),
+		AgentType:        agentType,
+		ContentType:      contentType,
 		UserID:           userID,
 		SessionID:        sessionID,
 		Role:             role,
@@ -86,15 +105,17 @@ func NewMessage(
 }
 
 // NewUserMessage creates a message for a user input (no LLM response)
-func NewUserMessage(userID string, sessionID string, content string) *Message {
+func NewUserMessage(userID string, sessionID string, content string, contentType ContentType) *Message {
 	now := time.Now()
 	return &Message{
-		MessageID: generateMessageID(userID, sessionID, now),
-		UserID:    userID,
-		SessionID: sessionID,
-		Role:      openai.ChatMessageRoleUser,
-		Content:   content,
-		CreatedAt: now,
+		MessageID:   generateMessageID(userID, sessionID, now),
+		AgentType:   AgentTypeUser,
+		ContentType: contentType,
+		UserID:      userID,
+		SessionID:   sessionID,
+		Role:        openai.ChatMessageRoleUser,
+		Content:     content,
+		CreatedAt:   now,
 	}
 }
 

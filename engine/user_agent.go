@@ -571,11 +571,8 @@ func (e *Engine) ProcessMessage(
 		}
 
 		// Save user message to database
-		userMsg := model.NewUserMessage(session.UserID, sessionID, userMessage)
-		// Set model from session if available
-		if session.Model != "" {
-			userMsg.Model = session.Model
-		}
+		// Note: User messages don't have a model - the model field stays empty for user messages
+		userMsg := model.NewUserMessage(session.UserID, sessionID, userMessage, model.ContentTypeText)
 		if sqliteStore, ok := e.Sessions.(interface {
 			PutMessage(*model.Message) error
 		}); ok {
@@ -1326,6 +1323,8 @@ func (e *Engine) saveMessage(
 		session.SessionID,
 		openai.ChatMessageRoleAssistant,
 		content,
+		model.AgentTypeLow,
+		model.ContentTypeText,
 		request,
 		response,
 		choice,
@@ -1355,6 +1354,7 @@ func (e *Engine) saveToolCall(userID string, sessionID string, messageID string,
 			MessageID:    messageID,
 			SessionID:    sessionID,
 			UserID:       userID,
+			AgentType:    model.AgentTypeLow,
 			FunctionName: toolCall.Function.Name,
 			Arguments:    toolCall.Function.Arguments,
 			Response:     "", // Will be updated after execution

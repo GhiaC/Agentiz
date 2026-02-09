@@ -235,6 +235,9 @@ type ToolCall struct {
 	// UserID identifies the user who triggered this tool call
 	UserID string
 
+	// AgentType indicates which type of agent made this tool call (core, low, high)
+	AgentType AgentType
+
 	// FunctionName is the name of the function/tool that was called
 	FunctionName string
 

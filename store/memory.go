@@ -355,6 +355,21 @@ func (s *DBStore) GetSession(sessionID string) (*model.Session, error) {
 	return s.Get(sessionID)
 }
 
+// GetAllToolCalls returns all tool calls (delegates to SQLiteStore)
+func (s *DBStore) GetAllToolCalls() ([]*model.ToolCall, error) {
+	return s.sqliteStore.GetAllToolCalls()
+}
+
+// GetToolCallsBySession returns all tool calls for a session (delegates to SQLiteStore)
+func (s *DBStore) GetToolCallsBySession(sessionID string) ([]*model.ToolCall, error) {
+	return s.sqliteStore.GetToolCallsBySession(sessionID)
+}
+
+// GetToolCallByID returns a tool call by its ID (delegates to SQLiteStore)
+func (s *DBStore) GetToolCallByID(toolCallID string) (*model.ToolCall, error) {
+	return s.sqliteStore.GetToolCallByID(toolCallID)
+}
+
 // SessionStore is an alias for model.SessionStore for backward compatibility
 type SessionStore = model.SessionStore
 

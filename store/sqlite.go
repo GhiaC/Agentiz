@@ -95,6 +95,8 @@ func (s *SQLiteStore) initSchema() error {
 		role TEXT NOT NULL,
 		content TEXT NOT NULL,
 		model TEXT,
+		agent_type TEXT DEFAULT '',
+		content_type TEXT DEFAULT '',
 		prompt_tokens INTEGER DEFAULT 0,
 		completion_tokens INTEGER DEFAULT 0,
 		total_tokens INTEGER DEFAULT 0,
@@ -132,6 +134,7 @@ func (s *SQLiteStore) initSchema() error {
 		message_id TEXT NOT NULL,
 		session_id TEXT NOT NULL,
 		user_id TEXT NOT NULL,
+		agent_type TEXT DEFAULT '',
 		function_name TEXT NOT NULL,
 		arguments TEXT NOT NULL,
 		response TEXT DEFAULT '',
@@ -190,6 +193,9 @@ func (s *SQLiteStore) initSchema() error {
 	// Migration: Add new columns to summarization_logs table for existing databases
 	_ = s.migrateSummarizationLogsColumns()
 
+	// Migration: Add agent_type and content_type columns to messages table
+	_ = s.migrateAddMessageTypeColumns()
+
 	return nil
 }
 
@@ -197,6 +203,16 @@ func (s *SQLiteStore) initSchema() error {
 func (s *SQLiteStore) migrateAddIsNonsenseColumn() error {
 	_, _ = s.db.Exec(`ALTER TABLE messages ADD COLUMN is_nonsense INTEGER DEFAULT 0`)
 	// Ignore error if column already exists
+	return nil
+}
+
+// migrateAddMessageTypeColumns adds agent_type and content_type columns to messages table
+func (s *SQLiteStore) migrateAddMessageTypeColumns() error {
+	_, _ = s.db.Exec(`ALTER TABLE messages ADD COLUMN agent_type TEXT DEFAULT ''`)
+	_, _ = s.db.Exec(`ALTER TABLE messages ADD COLUMN content_type TEXT DEFAULT ''`)
+	// Also add agent_type to tool_calls table
+	_, _ = s.db.Exec(`ALTER TABLE tool_calls ADD COLUMN agent_type TEXT DEFAULT ''`)
+	// Ignore errors if columns already exist
 	return nil
 }
 
@@ -735,15 +751,18 @@ func (s *SQLiteStore) PutMessage(message *model.Message) error {
 	_, err := s.db.Exec(
 		`INSERT OR REPLACE INTO messages (
 			message_id, user_id, session_id, role, content, model,
+			agent_type, content_type,
 			prompt_tokens, completion_tokens, total_tokens,
 			request_model, max_tokens, temperature, has_tool_calls, finish_reason, is_nonsense, created_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		message.MessageID,
 		message.UserID,
 		message.SessionID,
 		message.Role,
 		message.Content,
 		message.Model,
+		string(message.AgentType),
+		string(message.ContentType),
 		message.PromptTokens,
 		message.CompletionTokens,
 		message.TotalTokens,
@@ -770,6 +789,7 @@ func (s *SQLiteStore) GetMessagesBySession(sessionID string) ([]*model.Message, 
 
 	rows, err := s.db.Query(
 		`SELECT message_id, user_id, session_id, role, content, model,
+			agent_type, content_type,
 			prompt_tokens, completion_tokens, total_tokens,
 			request_model, max_tokens, temperature, has_tool_calls, finish_reason, is_nonsense, created_at
 		FROM messages WHERE session_id = ? ORDER BY created_at ASC`,
@@ -786,6 +806,7 @@ func (s *SQLiteStore) GetMessagesBySession(sessionID string) ([]*model.Message, 
 		var createdAt int64
 		var hasToolCallsInt int
 		var isNonsenseInt int
+		var agentType, contentType string
 
 		err := rows.Scan(
 			&msg.MessageID,
@@ -794,6 +815,8 @@ func (s *SQLiteStore) GetMessagesBySession(sessionID string) ([]*model.Message, 
 			&msg.Role,
 			&msg.Content,
 			&msg.Model,
+			&agentType,
+			&contentType,
 			&msg.PromptTokens,
 			&msg.CompletionTokens,
 			&msg.TotalTokens,
@@ -809,6 +832,8 @@ func (s *SQLiteStore) GetMessagesBySession(sessionID string) ([]*model.Message, 
 			return nil, fmt.Errorf("failed to scan message: %w", err)
 		}
 
+		msg.AgentType = model.AgentType(agentType)
+		msg.ContentType = model.ContentType(contentType)
 		msg.HasToolCalls = hasToolCallsInt != 0
 		msg.IsNonsense = isNonsenseInt != 0
 		msg.CreatedAt = time.Unix(createdAt, 0)
@@ -829,6 +854,7 @@ func (s *SQLiteStore) GetMessagesByUser(userID string) ([]*model.Message, error)
 
 	rows, err := s.db.Query(
 		`SELECT message_id, user_id, session_id, role, content, model,
+			agent_type, content_type,
 			prompt_tokens, completion_tokens, total_tokens,
 			request_model, max_tokens, temperature, has_tool_calls, finish_reason, is_nonsense, created_at
 		FROM messages WHERE user_id = ? ORDER BY created_at ASC`,
@@ -845,6 +871,7 @@ func (s *SQLiteStore) GetMessagesByUser(userID string) ([]*model.Message, error)
 		var createdAt int64
 		var hasToolCallsInt int
 		var isNonsenseInt int
+		var agentType, contentType string
 
 		err := rows.Scan(
 			&msg.MessageID,
@@ -853,6 +880,8 @@ func (s *SQLiteStore) GetMessagesByUser(userID string) ([]*model.Message, error)
 			&msg.Role,
 			&msg.Content,
 			&msg.Model,
+			&agentType,
+			&contentType,
 			&msg.PromptTokens,
 			&msg.CompletionTokens,
 			&msg.TotalTokens,
@@ -868,6 +897,8 @@ func (s *SQLiteStore) GetMessagesByUser(userID string) ([]*model.Message, error)
 			return nil, fmt.Errorf("failed to scan message: %w", err)
 		}
 
+		msg.AgentType = model.AgentType(agentType)
+		msg.ContentType = model.ContentType(contentType)
 		msg.HasToolCalls = hasToolCallsInt != 0
 		msg.IsNonsense = isNonsenseInt != 0
 		msg.CreatedAt = time.Unix(createdAt, 0)
@@ -1093,6 +1124,7 @@ func (s *SQLiteStore) GetAllMessages() ([]*model.Message, error) {
 
 	rows, err := s.db.Query(
 		`SELECT message_id, user_id, session_id, role, content, model,
+			agent_type, content_type,
 			prompt_tokens, completion_tokens, total_tokens,
 			request_model, max_tokens, temperature, has_tool_calls, finish_reason, is_nonsense, created_at
 		FROM messages ORDER BY created_at DESC`,
@@ -1108,6 +1140,7 @@ func (s *SQLiteStore) GetAllMessages() ([]*model.Message, error) {
 		var createdAt int64
 		var hasToolCallsInt int
 		var isNonsenseInt int
+		var agentType, contentType string
 
 		err := rows.Scan(
 			&msg.MessageID,
@@ -1116,6 +1149,8 @@ func (s *SQLiteStore) GetAllMessages() ([]*model.Message, error) {
 			&msg.Role,
 			&msg.Content,
 			&msg.Model,
+			&agentType,
+			&contentType,
 			&msg.PromptTokens,
 			&msg.CompletionTokens,
 			&msg.TotalTokens,
@@ -1131,6 +1166,8 @@ func (s *SQLiteStore) GetAllMessages() ([]*model.Message, error) {
 			return nil, fmt.Errorf("failed to scan message: %w", err)
 		}
 
+		msg.AgentType = model.AgentType(agentType)
+		msg.ContentType = model.ContentType(contentType)
 		msg.HasToolCalls = hasToolCallsInt != 0
 		msg.IsNonsense = isNonsenseInt != 0
 		msg.CreatedAt = time.Unix(createdAt, 0)
@@ -1213,12 +1250,13 @@ func (s *SQLiteStore) PutToolCall(toolCall *model.ToolCall) error {
 	// Use INSERT OR REPLACE for upsert behavior
 	_, err := s.db.Exec(
 		`INSERT OR REPLACE INTO tool_calls (
-			tool_call_id, message_id, session_id, user_id, function_name, arguments, response, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			tool_call_id, message_id, session_id, user_id, agent_type, function_name, arguments, response, created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		toolCall.ToolCallID,
 		toolCall.MessageID,
 		toolCall.SessionID,
 		toolCall.UserID,
+		string(toolCall.AgentType),
 		toolCall.FunctionName,
 		toolCall.Arguments,
 		toolCall.Response,
@@ -1262,7 +1300,7 @@ func (s *SQLiteStore) GetToolCallsBySession(sessionID string) ([]*model.ToolCall
 	defer s.mu.RUnlock()
 
 	rows, err := s.db.Query(
-		`SELECT tool_call_id, message_id, session_id, user_id, function_name, arguments, response, created_at, updated_at
+		`SELECT tool_call_id, message_id, session_id, user_id, agent_type, function_name, arguments, response, created_at, updated_at
 		FROM tool_calls WHERE session_id = ? ORDER BY created_at ASC`,
 		sessionID,
 	)
@@ -1275,12 +1313,14 @@ func (s *SQLiteStore) GetToolCallsBySession(sessionID string) ([]*model.ToolCall
 	for rows.Next() {
 		tc := &model.ToolCall{}
 		var createdAt, updatedAt int64
+		var agentType string
 
 		err := rows.Scan(
 			&tc.ToolCallID,
 			&tc.MessageID,
 			&tc.SessionID,
 			&tc.UserID,
+			&agentType,
 			&tc.FunctionName,
 			&tc.Arguments,
 			&tc.Response,
@@ -1291,6 +1331,7 @@ func (s *SQLiteStore) GetToolCallsBySession(sessionID string) ([]*model.ToolCall
 			return nil, fmt.Errorf("failed to scan tool call: %w", err)
 		}
 
+		tc.AgentType = model.AgentType(agentType)
 		tc.CreatedAt = time.Unix(createdAt, 0)
 		tc.UpdatedAt = time.Unix(updatedAt, 0)
 		toolCalls = append(toolCalls, tc)
@@ -1309,7 +1350,7 @@ func (s *SQLiteStore) GetAllToolCalls() ([]*model.ToolCall, error) {
 	defer s.mu.RUnlock()
 
 	rows, err := s.db.Query(
-		`SELECT tool_call_id, message_id, session_id, user_id, function_name, arguments, response, created_at, updated_at
+		`SELECT tool_call_id, message_id, session_id, user_id, agent_type, function_name, arguments, response, created_at, updated_at
 		FROM tool_calls ORDER BY created_at DESC`,
 	)
 	if err != nil {
@@ -1321,12 +1362,14 @@ func (s *SQLiteStore) GetAllToolCalls() ([]*model.ToolCall, error) {
 	for rows.Next() {
 		tc := &model.ToolCall{}
 		var createdAt, updatedAt int64
+		var agentType string
 
 		err := rows.Scan(
 			&tc.ToolCallID,
 			&tc.MessageID,
 			&tc.SessionID,
 			&tc.UserID,
+			&agentType,
 			&tc.FunctionName,
 			&tc.Arguments,
 			&tc.Response,
@@ -1337,6 +1380,7 @@ func (s *SQLiteStore) GetAllToolCalls() ([]*model.ToolCall, error) {
 			return nil, fmt.Errorf("failed to scan tool call: %w", err)
 		}
 
+		tc.AgentType = model.AgentType(agentType)
 		tc.CreatedAt = time.Unix(createdAt, 0)
 		tc.UpdatedAt = time.Unix(updatedAt, 0)
 		toolCalls = append(toolCalls, tc)
@@ -1347,6 +1391,44 @@ func (s *SQLiteStore) GetAllToolCalls() ([]*model.ToolCall, error) {
 	}
 
 	return toolCalls, nil
+}
+
+// GetToolCallByID returns a tool call by its ID
+func (s *SQLiteStore) GetToolCallByID(toolCallID string) (*model.ToolCall, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	row := s.db.QueryRow(
+		`SELECT tool_call_id, message_id, session_id, user_id, agent_type, function_name, arguments, response, created_at, updated_at
+		FROM tool_calls WHERE tool_call_id = ?`,
+		toolCallID,
+	)
+
+	tc := &model.ToolCall{}
+	var createdAt, updatedAt int64
+	var agentType string
+
+	err := row.Scan(
+		&tc.ToolCallID,
+		&tc.MessageID,
+		&tc.SessionID,
+		&tc.UserID,
+		&agentType,
+		&tc.FunctionName,
+		&tc.Arguments,
+		&tc.Response,
+		&createdAt,
+		&updatedAt,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get tool call: %w", err)
+	}
+
+	tc.AgentType = model.AgentType(agentType)
+	tc.CreatedAt = time.Unix(createdAt, 0)
+	tc.UpdatedAt = time.Unix(updatedAt, 0)
+
+	return tc, nil
 }
 
 // PutSummarizationLog stores a summarization log entry in the database

@@ -20,6 +20,7 @@ type DebugStore interface {
 	GetSession(sessionID string) (*model.Session, error)
 	GetAllToolCalls() ([]*model.ToolCall, error)
 	GetToolCallsBySession(sessionID string) ([]*model.ToolCall, error)
+	GetToolCallByID(toolCallID string) (*model.ToolCall, error)
 	PutSummarizationLog(log *model.SummarizationLog) error
 	GetSummarizationLogsBySession(sessionID string) ([]*model.SummarizationLog, error)
 	GetAllSummarizationLogs() ([]*model.SummarizationLog, error)
@@ -42,6 +43,7 @@ type ToolCallInfo struct {
 	UserID       string
 	MessageID    string
 	ToolCallID   string
+	AgentType    string
 	FunctionName string
 	Arguments    string
 	Result       string

@@ -132,6 +132,8 @@ func PerformWebSearchWithModel(
 	userID string,
 	searchModel string,
 ) (string, error) {
+	return "", fmt.Errorf("web search is disabled")
+
 	if searchModel == "" {
 		searchModel = DefaultSearchModel
 	}

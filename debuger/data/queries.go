@@ -237,6 +237,11 @@ func (dp *DataProvider) GetToolCallsBySession(sessionID string) ([]*model.ToolCa
 	return toolCalls, nil
 }
 
+// GetToolCallByID returns a tool call by its ID
+func (dp *DataProvider) GetToolCallByID(toolCallID string) (*model.ToolCall, error) {
+	return dp.store.GetToolCallByID(toolCallID)
+}
+
 // GetAllSummarizationLogs returns all summarization logs
 func (dp *DataProvider) GetAllSummarizationLogs() ([]*model.SummarizationLog, error) {
 	logs, err := dp.store.GetAllSummarizationLogs()
@@ -377,6 +382,7 @@ func ConvertToolCallsToInfo(toolCalls []*model.ToolCall) []debuger.ToolCallInfo 
 			UserID:       tc.UserID,
 			MessageID:    tc.MessageID,
 			ToolCallID:   tc.ToolCallID,
+			AgentType:    string(tc.AgentType),
 			FunctionName: tc.FunctionName,
 			Arguments:    tc.Arguments,
 			Result:       tc.Response,

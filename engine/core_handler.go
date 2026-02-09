@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	_ "embed"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -59,6 +60,10 @@ type CoreHandler struct {
 	// LLM client for Core's orchestration decisions
 	llmClient *openai.Client
 	llmConfig LLMConfig
+
+	// Vision LLM client (separate from main LLM for cost optimization on image processing)
+	visionLLMClient *openai.Client
+	visionLLMConfig *LLMConfig
 
 	// Core's own sessions per user (for orchestration context)
 	coreSessions   map[string]*model.Session
@@ -247,11 +252,8 @@ func (ch *CoreHandler) ProcessMessage(
 	)
 
 	// Save user message to database
-	userMsg := model.NewUserMessage(userID, coreSession.SessionID, userMessage)
-	// Set model from session if available
-	if coreSession.Model != "" {
-		userMsg.Model = coreSession.Model
-	}
+	// Note: User messages don't have a model - the model field stays empty for user messages
+	userMsg := model.NewUserMessage(userID, coreSession.SessionID, userMessage, model.ContentTypeText)
 	// Set nonsense flag if detected
 	userMsg.IsNonsense = isNonsense
 	ch.saveMessage(userMsg)
@@ -1170,6 +1172,8 @@ func (ch *CoreHandler) saveCoreMessage(
 		coreSession.SessionID,
 		openai.ChatMessageRoleAssistant,
 		content,
+		model.AgentTypeCore,
+		model.ContentTypeText,
 		request,
 		response,
 		choice,
@@ -1205,6 +1209,7 @@ func (ch *CoreHandler) saveToolCall(userID string, sessionID string, messageID s
 			MessageID:    messageID,
 			SessionID:    sessionID,
 			UserID:       userID,
+			AgentType:    model.AgentTypeCore,
 			FunctionName: toolCall.Function.Name,
 			Arguments:    toolCall.Function.Arguments,
 			Response:     "", // Will be updated after execution
@@ -1231,4 +1236,220 @@ func (ch *CoreHandler) updateToolCallResponse(toolCallID string, response string
 			log.Log.Infof("[CoreHandler] ✅ Tool call response updated | ToolCallID: %s", toolCallID)
 		}
 	}
+}
+
+// ============================================================================
+// Vision LLM Support (for image processing with cost-optimized model)
+// ============================================================================
+
+// UseVisionLLMConfig configures a separate LLM client for image processing
+// This allows using a cheaper vision-capable model (e.g., gpt-5-nano) for images
+// while keeping the main LLM for text-only orchestration
+func (ch *CoreHandler) UseVisionLLMConfig(config LLMConfig) error {
+	openaiConfig := openai.DefaultConfig(config.APIKey)
+	if config.BaseURL != "" {
+		openaiConfig.BaseURL = config.BaseURL
+	}
+	if config.HTTPClient != nil {
+		openaiConfig.HTTPClient = config.HTTPClient
+	}
+
+	ch.visionLLMClient = openai.NewClientWithConfig(openaiConfig)
+	ch.visionLLMConfig = &config
+
+	log.Log.Infof("[CoreHandler] ✅ Vision LLM configured | Model: %s | BaseURL: %s", config.Model, config.BaseURL)
+	return nil
+}
+
+// ProcessMessageWithImage handles messages that include an image
+// It uses the Vision LLM (if configured) or falls back to the main LLM
+// The image is processed directly by the LLM, not sent to UserAgents
+func (ch *CoreHandler) ProcessMessageWithImage(
+	ctx context.Context,
+	userID string,
+	userMessage string,
+	imageData []byte,
+	imageMimeType string,
+) (string, error) {
+	log.Log.Infof("[CoreHandler] 🖼️  Processing image message | UserID: %s | Message length: %d chars | Image size: %d bytes | MimeType: %s",
+		userID, len(userMessage), len(imageData), imageMimeType)
+
+	// Check if database is ready
+	if !ch.userAgentHigh.IsDBReady() || !ch.userAgentLow.IsDBReady() {
+		return "", fmt.Errorf("database is not ready. Call Init() on UserAgents first")
+	}
+
+	// Determine which LLM client to use
+	llmClient := ch.visionLLMClient
+	llmModel := ""
+	if ch.visionLLMConfig != nil {
+		llmModel = ch.visionLLMConfig.Model
+	}
+
+	// Fall back to main LLM if Vision LLM not configured
+	if llmClient == nil {
+		log.Log.Warnf("[CoreHandler] ⚠️  Vision LLM not configured, falling back to main LLM")
+		llmClient = ch.llmClient
+		llmModel = ch.llmConfig.Model
+	}
+
+	if llmClient == nil {
+		return "", fmt.Errorf("LLM client not configured. Call UseLLMConfig first")
+	}
+
+	if llmModel == "" {
+		llmModel = "gpt-4o-mini" // Default fallback
+	}
+
+	// Check user ban status
+	if ch.userModeration != nil {
+		if isBanned, banMessage := ch.userModeration.CheckBanStatus(userID); isBanned {
+			return banMessage, nil
+		}
+	}
+
+	// Get or create Core session
+	coreSession, err := ch.getOrCreateCoreSession(userID)
+	if err != nil {
+		return "", fmt.Errorf("failed to get or create core session: %w", err)
+	}
+
+	// Build base64 data URL for image
+	base64Image := base64.StdEncoding.EncodeToString(imageData)
+	dataURL := fmt.Sprintf("data:%s;base64,%s", imageMimeType, base64Image)
+
+	// Create multimodal message with image
+	userMsg := openai.ChatCompletionMessage{
+		Role: openai.ChatMessageRoleUser,
+		MultiContent: []openai.ChatMessagePart{
+			{
+				Type: openai.ChatMessagePartTypeText,
+				Text: userMessage,
+			},
+			{
+				Type: openai.ChatMessagePartTypeImageURL,
+				ImageURL: &openai.ChatMessageImageURL{
+					URL:    dataURL,
+					Detail: openai.ImageURLDetailAuto,
+				},
+			},
+		},
+	}
+
+	// Add to session (store text representation for history)
+	// Use a user-friendly message instead of technical MIME type
+	historyContent := userMessage
+	if historyContent == "" {
+		historyContent = "(کاربر یک تصویر ارسال کرد)"
+	} else {
+		historyContent = fmt.Sprintf("(کاربر یک تصویر ارسال کرد) %s", userMessage)
+	}
+	coreSession.ConversationState.Msgs = append(
+		coreSession.ConversationState.Msgs,
+		openai.ChatCompletionMessage{
+			Role:    openai.ChatMessageRoleUser,
+			Content: historyContent,
+		},
+	)
+
+	// Update session model to vision model for proper tracking
+	coreSession.Model = llmModel
+
+	// Save user message to database
+	// Note: User messages don't have a model - the model field stays empty for user messages
+	userMsgRecord := model.NewUserMessage(userID, coreSession.SessionID, historyContent, model.ContentTypeImage)
+	ch.saveMessage(userMsgRecord)
+
+	// Build system prompts (simplified for vision - no tools needed)
+	systemPrompts, err := ch.buildSystemPrompts(userID)
+	if err != nil {
+		return "", fmt.Errorf("failed to build system prompts: %w", err)
+	}
+
+	// Build messages for LLM call
+	messages := []openai.ChatCompletionMessage{}
+
+	// Add system prompts
+	for _, prompt := range systemPrompts {
+		messages = append(messages, openai.ChatCompletionMessage{
+			Role:    openai.ChatMessageRoleSystem,
+			Content: prompt,
+		})
+	}
+
+	// Add conversation history (without the current message)
+	historyMsgs := coreSession.ConversationState.Msgs
+	if len(historyMsgs) > 1 {
+		messages = append(messages, historyMsgs[:len(historyMsgs)-1]...)
+	}
+
+	// Add the multimodal message (with actual image)
+	messages = append(messages, userMsg)
+
+	// Add user_id to context
+	ctx = model.WithUserID(ctx, userID)
+
+	// Make LLM call (no tools for vision messages - direct response)
+	log.Log.Infof("[CoreHandler] 🔵 VISION LLM >> Model: %s | Messages: %d | Image included", llmModel, len(messages))
+
+	request := openai.ChatCompletionRequest{
+		Model:    llmModel,
+		Messages: messages,
+	}
+
+	resp, err := llmClient.CreateChatCompletion(ctx, request)
+	if err != nil {
+		log.Log.Errorf("[CoreHandler] ❌ Vision LLM call failed | Error: %v", err)
+		return "", fmt.Errorf("vision LLM call failed: %w", err)
+	}
+
+	if len(resp.Choices) == 0 {
+		return "", fmt.Errorf("no response from vision LLM")
+	}
+
+	response := resp.Choices[0].Message.Content
+
+	// Log token usage
+	if resp.Usage.TotalTokens > 0 {
+		log.Log.Infof("[CoreHandler] 📊 VISION TOKEN USAGE >> Model: %s | prompt=%d | completion=%d | total=%d",
+			llmModel, resp.Usage.PromptTokens, resp.Usage.CompletionTokens, resp.Usage.TotalTokens)
+	}
+
+	// Add assistant response to session
+	coreSession.ConversationState.Msgs = append(
+		coreSession.ConversationState.Msgs,
+		openai.ChatCompletionMessage{
+			Role:    openai.ChatMessageRoleAssistant,
+			Content: response,
+		},
+	)
+	coreSession.ConversationState.LastActivity = time.Now()
+
+	// Save session
+	if err := ch.saveCoreSession(coreSession); err != nil {
+		return "", fmt.Errorf("failed to save core session: %w", err)
+	}
+
+	// Save assistant message to database
+	assistantMsg := model.NewMessage(
+		userID,
+		coreSession.SessionID,
+		openai.ChatMessageRoleAssistant,
+		response,
+		model.AgentTypeCore,
+		model.ContentTypeImage,
+		request,
+		resp,
+		resp.Choices[0],
+	)
+	ch.saveMessage(assistantMsg)
+
+	log.Log.Infof("[CoreHandler] ✅ Image message processed | UserID: %s | Response length: %d chars | Model: %s", userID, len(response), llmModel)
+
+	return response, nil
+}
+
+// HasVisionLLM returns true if a Vision LLM is configured
+func (ch *CoreHandler) HasVisionLLM() bool {
+	return ch.visionLLMClient != nil && ch.visionLLMConfig != nil
 }

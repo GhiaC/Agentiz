@@ -343,42 +343,14 @@ func RenderSessionDetail(handler *debuger.DebugHandler, sessionID string) (strin
 	if len(messages) == 0 {
 		html += components.InfoAlert("No messages found for this session.")
 	} else {
-		html += components.ListGroupStart()
+		msgConfig := components.DefaultMessageDisplayConfig()
+		msgConfig.SessionID = sessionID
+
+		html += components.MessageListStart()
 		for _, msg := range messages {
-			contentDisplay := components.ExpandableWithPreview(msg.Content, 200)
-
-			toolCallBadge := ""
-			if msg.HasToolCalls {
-				toolCallBadge = " " + components.Badge("Has Tool Calls", "danger")
-			}
-
-			nonsenseBadge := ""
-			if msg.IsNonsense {
-				nonsenseBadge = " " + components.BadgeWithIcon("Nonsense", "⚠️", "warning text-dark")
-			}
-
-			html += fmt.Sprintf(`
-<div class="list-group-item">
-    <div class="d-flex w-100 justify-content-between align-items-start mb-2">
-        <div>
-            %s%s%s
-            %s
-        </div>
-        <small class="text-muted">%s</small>
-    </div>
-    <p class="mb-2 text-justify">%s</p>
-    <small class="text-muted">Message ID: %s</small>
-</div>`,
-				components.RoleBadge(msg.Role),
-				toolCallBadge,
-				nonsenseBadge,
-				components.Badge("Model: "+debuger.GetModelDisplay(msg.Model), "secondary"),
-				debuger.FormatTime(msg.CreatedAt),
-				contentDisplay,
-				components.InlineCode(msg.MessageID),
-			)
+			html += components.MessageCard(msg, msgConfig)
 		}
-		html += components.ListGroupEnd()
+		html += components.MessageListEnd()
 	}
 
 	html += ui.CardEnd()
@@ -497,10 +469,12 @@ func RenderSessionDetail(handler *debuger.DebugHandler, sessionID string) (strin
 		html += components.InfoAlert("No tool calls found for this session.")
 	} else {
 		columns := []components.ColumnConfig{
+			{Header: "Agent", Center: true, NoWrap: true},
 			{Header: "Function", NoWrap: true},
 			{Header: "Arguments"},
 			{Header: "Result"},
 			{Header: "Time", NoWrap: true},
+			{Header: "", Center: true, NoWrap: true},
 		}
 		html += components.TableStartWithConfig(columns, components.TableConfig{
 			Striped:     false,
@@ -513,17 +487,22 @@ func RenderSessionDetail(handler *debuger.DebugHandler, sessionID string) (strin
 		for _, tc := range toolCalls {
 			argsDisplay := components.ExpandableWithPreview(tc.Arguments, 150)
 			resultDisplay := components.ExpandableWithPreview(tc.Result, 150)
+			agentBadge := components.AgentTypeBadgeFromString(tc.AgentType)
 
 			html += fmt.Sprintf(`<tr>
+                <td class="text-center">%s</td>
                 <td class="text-nowrap">%s</td>
                 <td><div class="mb-0" style="max-width: 300px; white-space: pre-wrap; word-wrap: break-word;">%s</div></td>
                 <td><div class="mb-0" style="max-width: 300px; white-space: pre-wrap; word-wrap: break-word;">%s</div></td>
                 <td class="text-nowrap">%s</td>
+                <td class="text-center">%s</td>
             </tr>`,
+				agentBadge,
 				components.InlineCode(tc.FunctionName),
 				argsDisplay,
 				resultDisplay,
 				debuger.FormatTime(tc.CreatedAt),
+				components.OpenButton("/agentize/debug/tool-calls/"+template.URLQueryEscaper(tc.ToolCallID)),
 			)
 		}
 
