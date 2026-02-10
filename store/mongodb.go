@@ -156,6 +156,27 @@ func (s *MongoDBStore) initIndexes(ctx context.Context) error {
 	// Messages Collection Indexes
 	// ============================================================================
 
+	// Index for getMaxSeqIDForSessionUnsafe and other session_id queries: session_id
+	// This is a simple index for efficient filtering by session_id
+	_, err = s.messagesCollection.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{{Key: "session_id", Value: 1}},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create messages session_id index: %w", err)
+	}
+
+	// Index for efficient MAX(seq_id) queries: session_id + seq_id
+	// This compound index optimizes aggregation pipeline in getMaxSeqIDForSessionUnsafe
+	_, err = s.messagesCollection.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{
+			{Key: "session_id", Value: 1},
+			{Key: "seq_id", Value: -1}, // Descending for MAX queries
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create messages session_id+seq_id index: %w", err)
+	}
+
 	// Index for GetMessagesBySession: session_id + created_at DESC
 	_, err = s.messagesCollection.Indexes().CreateOne(ctx, mongo.IndexModel{
 		Keys: bson.D{
@@ -321,7 +342,83 @@ func (s *MongoDBStore) Get(sessionID string) (*model.Session, error) {
 	session.CreatedAt = doc.CreatedAt
 	session.UpdatedAt = doc.UpdatedAt
 
+	// Restore MessageSeq from database to ensure it's correct
+	// Use MAX(seq_id) from messages collection to get the highest sequence number
+	maxSeqID := s.getMaxSeqIDForSessionUnsafe(ctx, sessionID)
+	if maxSeqID > session.MessageSeq {
+		// Ensure MessageSeq is at least as high as the highest seq_id in the database
+		session.MessageSeq = maxSeqID
+	}
+
 	return session, nil
+}
+
+// getMaxSeqIDForSessionUnsafe returns the maximum seq_id for a session without locking
+// Used to restore MessageSeq counter correctly from database
+// Uses aggregation pipeline for efficient querying (seq_id is stored as separate field)
+func (s *MongoDBStore) getMaxSeqIDForSessionUnsafe(ctx context.Context, sessionID string) int {
+	// Use aggregation pipeline to find MAX(seq_id) efficiently
+	pipeline := mongo.Pipeline{
+		{{Key: "$match", Value: bson.M{"session_id": sessionID}}},
+		{{Key: "$group", Value: bson.M{
+			"_id":      nil,
+			"maxSeqID": bson.M{"$max": "$seq_id"},
+		}}},
+	}
+
+	cursor, err := s.messagesCollection.Aggregate(ctx, pipeline)
+	if err != nil {
+		// Fallback: if aggregation fails (e.g., old data without seq_id field), use old method
+		return s.getMaxSeqIDForSessionUnsafeFallback(ctx, sessionID)
+	}
+	defer cursor.Close(ctx)
+
+	if cursor.Next(ctx) {
+		var result struct {
+			MaxSeqID int `bson:"maxSeqID"`
+		}
+		if err := cursor.Decode(&result); err == nil {
+			return result.MaxSeqID
+		}
+	}
+
+	return 0
+}
+
+// getMaxSeqIDForSessionUnsafeFallback is a fallback method for old data without seq_id field
+// Reads all messages and unmarshals JSON to find max SeqID
+func (s *MongoDBStore) getMaxSeqIDForSessionUnsafeFallback(ctx context.Context, sessionID string) int {
+	cursor, err := s.messagesCollection.Find(ctx, bson.M{"session_id": sessionID})
+	if err != nil {
+		return 0
+	}
+	defer cursor.Close(ctx)
+
+	maxSeqID := 0
+	for cursor.Next(ctx) {
+		var doc messageDocument
+		if err := cursor.Decode(&doc); err != nil {
+			continue
+		}
+
+		// If seq_id is already in document (new format), use it directly
+		if doc.SeqID > maxSeqID {
+			maxSeqID = doc.SeqID
+			continue
+		}
+
+		// Fallback: unmarshal JSON to get SeqID (for old data)
+		message := &model.Message{}
+		if err := unmarshalJSONOrBSON(doc.Data, message); err != nil {
+			continue
+		}
+
+		if message.SeqID > maxSeqID {
+			maxSeqID = message.SeqID
+		}
+	}
+
+	return maxSeqID
 }
 
 // Put stores or updates a session
@@ -446,6 +543,14 @@ func (s *MongoDBStore) GetCoreSession(userID string) (*model.Session, error) {
 	// Restore timestamps
 	session.CreatedAt = doc.CreatedAt
 	session.UpdatedAt = doc.UpdatedAt
+
+	// Restore MessageSeq from database to ensure it's correct
+	// Use MAX(seq_id) from messages collection to get the highest sequence number
+	maxSeqID := s.getMaxSeqIDForSessionUnsafe(ctx, session.SessionID)
+	if maxSeqID > session.MessageSeq {
+		// Ensure MessageSeq is at least as high as the highest seq_id in the database
+		session.MessageSeq = maxSeqID
+	}
 
 	return session, nil
 }
@@ -851,7 +956,8 @@ type messageDocument struct {
 	MessageID string    `bson:"_id"`
 	SessionID string    `bson:"session_id"`
 	UserID    string    `bson:"user_id"`
-	Data      string    `bson:"data"` // JSON serialized Message
+	SeqID     int       `bson:"seq_id,omitempty"` // Sequence ID for efficient querying (added for optimization)
+	Data      string    `bson:"data"`             // JSON serialized Message
 	CreatedAt time.Time `bson:"created_at"`
 }
 
@@ -873,6 +979,7 @@ func (s *MongoDBStore) PutMessage(message *model.Message) error {
 		MessageID: message.MessageID,
 		SessionID: message.SessionID,
 		UserID:    message.UserID,
+		SeqID:     message.SeqID, // Store seq_id separately for efficient querying
 		Data:      string(data),
 		CreatedAt: message.CreatedAt,
 	}

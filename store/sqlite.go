@@ -325,29 +325,29 @@ func (s *SQLiteStore) Get(sessionID string) (*model.Session, error) {
 	session.CreatedAt = time.Unix(createdAt, 0)
 	session.UpdatedAt = time.Unix(updatedAt, 0)
 
-	// Compute MessageSeq from existing messages if zero (backward compatibility)
-	if session.MessageSeq == 0 {
-		msgCount := s.getMessageCountForSessionUnsafe(sessionID)
-		if msgCount > 0 {
-			session.MessageSeq = msgCount
-		}
+	// Restore MessageSeq from database to ensure it's correct
+	// Use MAX(seq_id) to get the highest sequence number, not COUNT(*) which doesn't reflect actual sequences
+	maxSeqID := s.getMaxSeqIDForSessionUnsafe(sessionID)
+	if maxSeqID > session.MessageSeq {
+		// Ensure MessageSeq is at least as high as the highest seq_id in the database
+		session.MessageSeq = maxSeqID
 	}
 
 	return session, nil
 }
 
-// getMessageCountForSessionUnsafe returns message count for a session without locking
-// Used internally for backward compatibility computation
-func (s *SQLiteStore) getMessageCountForSessionUnsafe(sessionID string) int {
-	var count int
+// getMaxSeqIDForSessionUnsafe returns the maximum seq_id for a session without locking
+// Used to restore MessageSeq counter correctly from database
+func (s *SQLiteStore) getMaxSeqIDForSessionUnsafe(sessionID string) int {
+	var maxSeqID sql.NullInt64
 	err := s.db.QueryRow(
-		"SELECT COUNT(*) FROM messages WHERE session_id = ?",
+		"SELECT MAX(seq_id) FROM messages WHERE session_id = ?",
 		sessionID,
-	).Scan(&count)
-	if err != nil {
+	).Scan(&maxSeqID)
+	if err != nil || !maxSeqID.Valid {
 		return 0
 	}
-	return count
+	return int(maxSeqID.Int64)
 }
 
 // Put stores or updates a session

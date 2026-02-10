@@ -186,18 +186,12 @@ func RenderUserDetail(handler *debuger.DebugHandler, userID string) (string, err
 		}
 	}
 
-	// Build Session Sequences display
-	sessionSeqsHTML := "-"
-	if len(user.SessionSeqs) > 0 {
-		var seqParts []string
-		for agentType, seq := range user.SessionSeqs {
-			seqParts = append(seqParts, fmt.Sprintf("%s: %d",
-				template.HTMLEscapeString(string(agentType)),
-				seq))
-		}
-		if len(seqParts) > 0 {
-			sessionSeqsHTML = strings.Join(seqParts, "<br>")
-		}
+	// Calculate total MessageSeq and ToolSeq from all user sessions
+	totalMessageSeq := 0
+	totalToolSeq := 0
+	for _, session := range userSessions {
+		totalMessageSeq += session.MessageSeq
+		totalToolSeq += session.ToolSeq
 	}
 
 	// Build ban details display
@@ -261,15 +255,7 @@ func RenderUserDetail(handler *debuger.DebugHandler, userID string) (string, err
                 <table class="table table-sm table-borderless mb-0">
                     <tbody>
                         <tr>
-                            <td class="text-end fw-bold" style="width: 140px; padding: 0.5rem 1rem;">Nonsense Count:</td>
-                            <td style="padding: 0.5rem 1rem;">%s</td>
-                        </tr>
-                        <tr>
-                            <td class="text-end fw-bold" style="padding: 0.5rem 1rem;">Last Nonsense:</td>
-                            <td style="padding: 0.5rem 1rem;" class="text-muted">%s</td>
-                        </tr>
-                        <tr>
-                            <td class="text-end fw-bold" style="padding: 0.5rem 1rem;">Created At:</td>
+                            <td class="text-end fw-bold" style="width: 140px; padding: 0.5rem 1rem;">Created At:</td>
                             <td style="padding: 0.5rem 1rem;" class="text-muted">%s</td>
                         </tr>
                         <tr>
@@ -277,11 +263,23 @@ func RenderUserDetail(handler *debuger.DebugHandler, userID string) (string, err
                             <td style="padding: 0.5rem 1rem;" class="text-muted">%s</td>
                         </tr>
                         <tr>
-                            <td class="text-end fw-bold align-top" style="padding: 0.5rem 1rem;">Active Sessions:</td>
+                            <td class="text-end fw-bold" style="padding: 0.5rem 1rem;">Total Message Seq:</td>
                             <td style="padding: 0.5rem 1rem;">%s</td>
                         </tr>
                         <tr>
-                            <td class="text-end fw-bold align-top" style="padding: 0.5rem 1rem;">Session Sequences:</td>
+                            <td class="text-end fw-bold" style="padding: 0.5rem 1rem;">Total Tool Seq:</td>
+                            <td style="padding: 0.5rem 1rem;">%s</td>
+                        </tr>
+                        <tr>
+                            <td class="text-end fw-bold" style="padding: 0.5rem 1rem;">Nonsense Count:</td>
+                            <td style="padding: 0.5rem 1rem;">%s</td>
+                        </tr>
+                        <tr>
+                            <td class="text-end fw-bold" style="padding: 0.5rem 1rem;">Last Nonsense:</td>
+                            <td style="padding: 0.5rem 1rem;" class="text-muted">%s</td>
+                        </tr>
+                        <tr>
+                            <td class="text-end fw-bold align-top" style="padding: 0.5rem 1rem;">Active Sessions:</td>
                             <td style="padding: 0.5rem 1rem;">%s</td>
                         </tr>
                     </tbody>
@@ -297,12 +295,13 @@ func RenderUserDetail(handler *debuger.DebugHandler, userID string) (string, err
 		isBannedDisplay,
 		banUntilDisplay,
 		banMessageDisplay,
-		components.CountBadge(user.NonsenseCount, "warning text-dark"),
-		debuger.FormatTime(user.LastNonsenseTime),
 		debuger.FormatTime(user.CreatedAt),
 		debuger.FormatTime(user.UpdatedAt),
+		components.CountBadge(totalMessageSeq, "info"),
+		components.CountBadge(totalToolSeq, "info"),
+		components.CountBadge(user.NonsenseCount, "warning text-dark"),
+		debuger.FormatTime(user.LastNonsenseTime),
 		activeSessionsHTML,
-		sessionSeqsHTML,
 	)
 
 	// Sessions card
