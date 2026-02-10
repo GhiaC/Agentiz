@@ -23,7 +23,7 @@ func RenderMessages(handler *debuger.DebugHandler, page int, userID, sessionID s
 
 	// Apply filters based on query params
 	if sessionID != "" {
-		messages, err = dp.GetMessagesBySession(sessionID)
+		messages, err = dp.GetMessagesBySessionDesc(sessionID)
 		title = "Messages for Session: " + sessionID
 		baseURL = "/agentize/debug/messages?session=" + template.URLQueryEscaper(sessionID)
 	} else if userID != "" {

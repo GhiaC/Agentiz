@@ -31,6 +31,11 @@ func (ag *Agentize) RegisterRoutes(router *gin.Engine) {
 	router.GET("/agentize/debug/tool-calls/:toolCallID", ag.handleDebugToolCallDetail)
 	router.GET("/agentize/debug/summarized", ag.handleDebugSummarized)
 	router.GET("/agentize/debug/summarized/:logID", ag.handleDebugSummarizationLogDetail)
+
+	// Register extra debug pages from applications
+	for _, p := range ag.extraDebugPages {
+		router.GET(p.Path, p.Handler)
+	}
 }
 
 // handleIndex handles the main index page with links to graph and docs

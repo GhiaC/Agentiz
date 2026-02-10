@@ -75,6 +75,9 @@ type Engine struct {
 
 	// Backup LLM chain (initialized from LLMConfig.BackupProviders)
 	backups *backupChain
+
+	// Callback for billing/usage metering (optional, set by application)
+	Callback Callback
 }
 
 // Init initializes the engine by loading the root node and verifying Sessions store is ready.
@@ -175,7 +178,7 @@ func (e *Engine) UseLLMConfig(config LLMConfig) error {
 	return nil
 }
 
-const backupCooldownDuration = 5 * time.Second
+const backupCooldownDuration = 1 * time.Second
 
 // callLLM tries the backup LLM providers in order (if configured and not disabled), then falls back
 // to the default OpenAI client. This is the single entry point for all LLM calls
@@ -228,7 +231,7 @@ func (e *Engine) startScheduler(ctx context.Context, llmClient *openai.Client) e
 			SubsequentMessageThreshold:  25,
 			SubsequentTimeThreshold:     1 * time.Hour,
 			LastActivityThreshold:       1 * time.Hour,
-			SummaryModel:                "gpt-4o-mini",
+			SummaryModel:                "openai/gpt-5-nano",
 			DisableLogs:                 e.llmConfig.SchedulerDisableLogs,
 		}
 	} else {
@@ -572,7 +575,8 @@ func (e *Engine) ProcessMessage(
 
 		// Save user message to database
 		// Note: User messages don't have a model - the model field stays empty for user messages
-		userMsg := model.NewUserMessage(session.UserID, sessionID, userMessage, model.ContentTypeText)
+		userMsgID := session.GenerateMessageID()
+		userMsg := model.NewUserMessage(userMsgID, session.UserID, sessionID, userMessage, model.ContentTypeText)
 		if sqliteStore, ok := e.Sessions.(interface {
 			PutMessage(*model.Message) error
 		}); ok {
@@ -1042,7 +1046,7 @@ func (e *Engine) CollectResult(ctx context.Context, sessionID string, resultID s
 		modelName = e.llmConfig.Model
 	}
 	if modelName == "" {
-		modelName = "gpt-4o-mini"
+		modelName = "openai/gpt-5-nano"
 	}
 
 	// Determine max response length
@@ -1148,7 +1152,7 @@ func (e *Engine) processChatRequest(
 	// Set default model
 	modelName := e.llmConfig.Model
 	if modelName == "" {
-		modelName = "gpt-4o-mini"
+		modelName = "openai/gpt-5-nano"
 	}
 
 	// Update session model if different from stored model
@@ -1182,8 +1186,13 @@ func (e *Engine) processChatRequest(
 	log.Log.Infof("LLM request: system_prompts=%d, tools=%d, messages=%d",
 		len(systemPrompts), len(openaiTools), len(reqMessages))
 
+	// Notify status: thinking (model name only in metadata, not exposed to user)
+	notifyStatus(ctx, session.UserID, sessionID, StatusThinking, "")
+
 	// Make LLM call (tries backup provider first, then falls back to OpenAI)
+	llmStart := time.Now()
 	resp, err := e.callLLM(ctx, modelName, reqMessages, openaiTools)
+	llmDuration := time.Since(llmStart)
 
 	if err != nil {
 		return "", 0, formatLLMError(err)
@@ -1195,6 +1204,18 @@ func (e *Engine) processChatRequest(
 
 	choice := resp.Choices[0]
 	tokenUsage := resp.Usage.TotalTokens
+
+	// Callback: record LLM usage
+	if e.Callback != nil {
+		e.Callback.AfterAction(ctx, &UsageEvent{
+			UserID:    session.UserID,
+			SessionID: sessionID,
+			EventType: EventLLMCall,
+			Name:      modelName,
+			Tokens:    tokenUsage,
+			Duration:  llmDuration,
+		})
+	}
 
 	// Save message to database
 	request := openai.ChatCompletionRequest{
@@ -1238,14 +1259,65 @@ func (e *Engine) processChatRequest(
 			// Log tool call from LLM
 			log.Log.Infof("LLM tool call: name=%s, args=%s", toolCall.Function.Name, toolCall.Function.Arguments)
 
+			// Notify status: tool executing
+			notifyStatus(ctx, session.UserID, sessionID, StatusToolExecuting, toolCall.Function.Name)
+
+			// Callback: check limit before tool execution
+			if e.Callback != nil {
+				if cbErr := e.Callback.BeforeAction(ctx, &UsageEvent{
+					UserID:    session.UserID,
+					SessionID: sessionID,
+					EventType: EventToolCall,
+					Name:      toolCall.Function.Name,
+				}); cbErr != nil {
+					// Limit exceeded — return error as tool result so LLM can inform user
+					result := fmt.Sprintf("Tool %s blocked: %v", toolCall.Function.Name, cbErr)
+					log.Log.Infof("Tool blocked by callback: name=%s, error=%v", toolCall.Function.Name, cbErr)
+
+					e.updateToolCallResponse(toolCall.ID, result)
+					e.appendMessages(sessionID, []openai.ChatCompletionMessage{
+						{
+							Role:       openai.ChatMessageRoleTool,
+							Content:    result,
+							Name:       toolCall.Function.Name,
+							ToolCallID: toolCall.ID,
+						},
+					})
+					toolResults = append(toolResults, openai.ChatCompletionMessage{
+						Role:       openai.ChatMessageRoleTool,
+						Content:    result,
+						Name:       toolCall.Function.Name,
+						ToolCallID: toolCall.ID,
+					})
+					continue
+				}
+			}
+
 			// Execute tool
+			toolStart := time.Now()
 			result, err := e.Executor(toolCall.Function.Name, args)
+			toolDuration := time.Since(toolStart)
 			if err != nil {
 				result = fmt.Sprintf("Error executing tool %s: %v", toolCall.Function.Name, err)
 				log.Log.Infof("Tool execution error: name=%s, error=%v", toolCall.Function.Name, err)
 			} else {
 				log.Log.Infof("Tool execution result: name=%s, result_len=%d, result=%s", toolCall.Function.Name, len(result), truncateForLog(result, 500))
 			}
+
+			// Callback: record tool usage
+			if e.Callback != nil {
+				e.Callback.AfterAction(ctx, &UsageEvent{
+					UserID:    session.UserID,
+					SessionID: sessionID,
+					EventType: EventToolCall,
+					Name:      toolCall.Function.Name,
+					Duration:  toolDuration,
+					Error:     err,
+				})
+			}
+
+			// Notify status: tool done
+			notifyStatus(ctx, session.UserID, sessionID, StatusToolDone, toolCall.Function.Name)
 
 			// Process tool result (truncate if too long)
 			// Skip truncation for collect_result to avoid infinite loop
@@ -1318,7 +1390,9 @@ func (e *Engine) saveMessage(
 	}
 
 	// Create message record
+	messageID := session.GenerateMessageID()
 	msg := model.NewMessage(
+		messageID,
 		session.UserID,
 		session.SessionID,
 		openai.ChatMessageRoleAssistant,

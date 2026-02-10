@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"sync"
 )
 
 // NavItem represents a navigation item
@@ -9,6 +10,25 @@ type NavItem struct {
 	URL  string
 	Icon string
 	Text string
+}
+
+var (
+	extraNavItems []NavItem
+	navMu         sync.RWMutex
+)
+
+// RegisterNavItem adds a navigation item that will appear on all debugger pages.
+// Call this during initialization (e.g. from AddDebugPage).
+func RegisterNavItem(item NavItem) {
+	navMu.Lock()
+	defer navMu.Unlock()
+	// avoid duplicates
+	for _, existing := range extraNavItems {
+		if existing.URL == item.URL {
+			return
+		}
+	}
+	extraNavItems = append(extraNavItems, item)
 }
 
 // DefaultNavItems returns the default navigation items
@@ -24,9 +44,18 @@ func DefaultNavItems() []NavItem {
 	}
 }
 
-// Navbar generates the Bootstrap navigation bar
+// AllNavItems returns default items plus any registered extra items.
+func AllNavItems() []NavItem {
+	navMu.RLock()
+	defer navMu.RUnlock()
+	items := DefaultNavItems()
+	items = append(items, extraNavItems...)
+	return items
+}
+
+// Navbar generates the Bootstrap navigation bar including any registered extra items.
 func Navbar(currentPage string) string {
-	return NavbarWithItems(currentPage, DefaultNavItems())
+	return NavbarWithItems(currentPage, AllNavItems())
 }
 
 // NavbarWithItems generates the navigation bar with custom items

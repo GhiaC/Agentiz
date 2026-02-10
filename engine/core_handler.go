@@ -26,8 +26,11 @@ type CoreHandlerConfig struct {
 	CoreLLMConfig LLMConfig
 
 	// Model configurations for UserAgents
-	UserAgentHighModel string // e.g., "gpt-5.2" or "gpt-4o"
-	UserAgentLowModel  string // e.g., "gpt-4o-mini"
+	UserAgentHighModel string // e.g., "openai/gpt-5-nano" or "gpt-4o"
+	UserAgentLowModel  string // e.g., "openai/gpt-5-nano"
+
+	// CoreModel is the model used for Core's orchestration decisions
+	CoreModel string // e.g., "openai/gpt-5-nano"
 
 	// Session configuration
 	AutoSummarizeThreshold int // Default: 20 messages
@@ -39,9 +42,9 @@ type CoreHandlerConfig struct {
 // DefaultCoreHandlerConfig returns default configuration
 func DefaultCoreHandlerConfig() CoreHandlerConfig {
 	return CoreHandlerConfig{
-		//UserAgentHighModel:     "gpt-4o", FOR TESTING
-		UserAgentHighModel:     "gpt-4o-mini",
-		UserAgentLowModel:      "gpt-4o-mini",
+		UserAgentHighModel:     "openai/gpt-5-nano",
+		UserAgentLowModel:      "openai/gpt-5-nano",
+		CoreModel:              "openai/gpt-5-nano",
 		AutoSummarizeThreshold: 5,
 		WebSearchDisabled:      true, // Web search disabled by default
 	}
@@ -80,6 +83,9 @@ type CoreHandler struct {
 
 	// Backup LLM chain (initialized from LLMConfig.BackupProviders)
 	backups *backupChain
+
+	// Callback for billing/usage metering (optional, set by application)
+	Callback Callback
 }
 
 // NewCoreHandler creates a new CoreHandler with the given UserAgents
@@ -102,6 +108,17 @@ func NewCoreHandler(
 	ch.registerCoreTools()
 
 	return ch
+}
+
+// SetCallback sets the billing/usage callback on the CoreHandler and propagates it to child engines.
+func (ch *CoreHandler) SetCallback(cb Callback) {
+	ch.Callback = cb
+	if ch.userAgentHigh != nil {
+		ch.userAgentHigh.Callback = cb
+	}
+	if ch.userAgentLow != nil {
+		ch.userAgentLow.Callback = cb
+	}
 }
 
 // UseLLMConfig configures the LLM client for the Core's orchestration
@@ -185,6 +202,9 @@ func (ch *CoreHandler) ProcessMessage(
 	userID string,
 	userMessage string,
 ) (string, error) {
+	// Notify status: message received
+	notifyStatus(ctx, userID, "", StatusReceived, "")
+
 	// Get user's total sessions count before processing
 	userSessions, _ := ch.sessionHandler.ListUserSessions(userID)
 	ch.coreSessionsMu.RLock()
@@ -202,6 +222,9 @@ func (ch *CoreHandler) ProcessMessage(
 	if ch.llmClient == nil {
 		return "", fmt.Errorf("LLM client not configured. Call UseLLMConfig first")
 	}
+
+	// Notify status: analyzing message
+	notifyStatus(ctx, userID, "", StatusAnalyzing, "")
 
 	// Check user ban status and nonsense messages
 	var isNonsense bool
@@ -253,7 +276,8 @@ func (ch *CoreHandler) ProcessMessage(
 
 	// Save user message to database
 	// Note: User messages don't have a model - the model field stays empty for user messages
-	userMsg := model.NewUserMessage(userID, coreSession.SessionID, userMessage, model.ContentTypeText)
+	userMsgID := coreSession.GenerateMessageID()
+	userMsg := model.NewUserMessage(userMsgID, userID, coreSession.SessionID, userMessage, model.ContentTypeText)
 	// Set nonsense flag if detected
 	userMsg.IsNonsense = isNonsense
 	ch.saveMessage(userMsg)
@@ -271,6 +295,9 @@ func (ch *CoreHandler) ProcessMessage(
 
 	// Add user_id to context for LLM calls
 	ctx = model.WithUserID(ctx, userID)
+
+	// Notify status: routing to agents
+	notifyStatus(ctx, userID, coreSession.SessionID, StatusRouting, "")
 
 	// Make LLM call
 	response, err := ch.processWithTools(ctx, messages, tools, userID, coreSession)
@@ -292,6 +319,9 @@ func (ch *CoreHandler) ProcessMessage(
 	if err := ch.saveCoreSession(coreSession); err != nil {
 		return "", fmt.Errorf("failed to save core session: %w", err)
 	}
+
+	// Notify status: completed
+	notifyStatus(ctx, userID, coreSession.SessionID, StatusCompleted, "")
 
 	return response, nil
 }
@@ -365,8 +395,8 @@ func (ch *CoreHandler) getOrCreateCoreSession(userID string) (*model.Session, er
 		}
 	}
 
-	// Create new Core session through SessionHandler (which will persist it)
-	session, err := ch.sessionHandler.CreateSession(userID, model.AgentTypeCore)
+	// Create new Core session with proper sequential ID
+	session, err := ch.createSessionForUser(userID, model.AgentTypeCore)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create core session: %w", err)
 	}
@@ -403,7 +433,13 @@ func (ch *CoreHandler) buildSystemPrompts(userID string) ([]string, error) {
 	// 1. Core Controller base prompt
 	prompts = append(prompts, coreControllerPrompt)
 
-	// 2. Session context - Summary and tags from previous conversations (if summarized)
+	// 2. UserAgent registered tools prompt — tells Core exactly what tools are available
+	toolsPrompt := ch.buildUserAgentToolsPrompt()
+	if toolsPrompt != "" {
+		prompts = append(prompts, toolsPrompt)
+	}
+
+	// 3. Session context - Summary and tags from previous conversations (if summarized)
 	// This provides context from archived messages that are no longer in the active conversation
 	ch.coreSessionsMu.RLock()
 	coreSession := ch.coreSessions[userID]
@@ -415,13 +451,13 @@ func (ch *CoreHandler) buildSystemPrompts(userID string) ([]string, error) {
 		}
 	}
 
-	// 3. Active sessions prompt (shows current active session for each agent type)
+	// 4. Active sessions prompt (shows current active session for each agent type)
 	activePrompt := ch.buildActiveSessionsPrompt(userID)
 	if activePrompt != "" {
 		prompts = append(prompts, activePrompt)
 	}
 
-	// 4. Sessions list prompt (for change_session)
+	// 5. Sessions list prompt (for change_session)
 	sessionsPrompt, err := ch.sessionHandler.GetSessionsPrompt(userID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get sessions prompt: %w", err)
@@ -429,6 +465,37 @@ func (ch *CoreHandler) buildSystemPrompts(userID string) ([]string, error) {
 	prompts = append(prompts, sessionsPrompt)
 
 	return prompts, nil
+}
+
+// buildUserAgentToolsPrompt generates a system prompt listing all tools registered
+// in the UserAgent engines. This helps the Core LLM understand what capabilities
+// the agents have so it can route requests more accurately.
+func (ch *CoreHandler) buildUserAgentToolsPrompt() string {
+	// Collect unique tool names from both engines
+	toolSet := make(map[string]bool)
+	if ch.userAgentHigh != nil && ch.userAgentHigh.Functions != nil {
+		for _, name := range ch.userAgentHigh.Functions.GetAllRegistered() {
+			toolSet[name] = true
+		}
+	}
+	if ch.userAgentLow != nil && ch.userAgentLow.Functions != nil {
+		for _, name := range ch.userAgentLow.Functions.GetAllRegistered() {
+			toolSet[name] = true
+		}
+	}
+
+	if len(toolSet) == 0 {
+		return ""
+	}
+
+	var sb strings.Builder
+	sb.WriteString("## Registered UserAgent Tools\n\n")
+	sb.WriteString("The following tools are currently registered and available to UserAgents.\n")
+	sb.WriteString("When a user's request requires any of these tools, delegate to the appropriate agent.\n\n")
+	for name := range toolSet {
+		sb.WriteString(fmt.Sprintf("- `%s`\n", name))
+	}
+	return sb.String()
 }
 
 // buildCoreSessionContext builds session context with summary and tags for the Core
@@ -647,6 +714,28 @@ func (ch *CoreHandler) getCoreToolsForLLM() []openai.Tool {
 		},
 	}
 
+	// update_status tool: let Core LLM send contextual status updates
+	tools = append(tools, openai.Tool{
+		Type: openai.ToolTypeFunction,
+		Function: &openai.FunctionDefinition{
+			Name: "update_status",
+			Description: "Send a real-time status/progress update to the user. " +
+				"Use before long operations to inform the user what you are doing. " +
+				"You can also send partial results or intermediate findings. " +
+				"The message is shown as a temporary status that gets replaced by the final response.",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"message": map[string]interface{}{
+						"type":        "string",
+						"description": "Status message to show the user (in Persian)",
+					},
+				},
+				"required": []string{"message"},
+			},
+		},
+	})
+
 	// Add web search tools only if not disabled
 	if !ch.config.WebSearchDisabled {
 		tools = append(tools, openai.Tool{
@@ -702,7 +791,7 @@ func (ch *CoreHandler) processWithTools(
 	// Update Core session model if different from stored model (only once before the loop)
 	modelName := ch.llmConfig.Model
 	if modelName == "" {
-		modelName = "gpt-4o-mini"
+		modelName = "openai/gpt-5-nano"
 	}
 	if coreSession != nil && coreSession.Model != modelName {
 		coreSession.Model = modelName
@@ -717,9 +806,19 @@ func (ch *CoreHandler) processWithTools(
 		ctx = model.WithUserID(ctx, userID)
 	}
 
+	sessionID := ""
+	if coreSession != nil {
+		sessionID = coreSession.SessionID
+	}
+
 	for i := 0; i < maxIterations; i++ {
+		// Notify status: thinking (model name only in metadata, not exposed to user)
+		notifyStatus(ctx, userID, sessionID, StatusThinking, "")
+
 		// Make LLM call (tries backup provider first, then falls back to OpenAI)
+		llmStart := time.Now()
 		resp, err := ch.callLLM(ctx, modelName, currentMessages, tools)
+		llmDuration := time.Since(llmStart)
 		if err != nil {
 			return "", formatLLMError(err)
 		}
@@ -729,6 +828,18 @@ func (ch *CoreHandler) processWithTools(
 		}
 
 		choice := resp.Choices[0]
+
+		// Callback: record LLM usage
+		if ch.Callback != nil {
+			ch.Callback.AfterAction(ctx, &UsageEvent{
+				UserID:    userID,
+				SessionID: sessionID,
+				EventType: EventLLMCall,
+				Name:      modelName,
+				Tokens:    resp.Usage.TotalTokens,
+				Duration:  llmDuration,
+			})
+		}
 
 		// Save message to database
 		request := openai.ChatCompletionRequest{
@@ -753,10 +864,52 @@ func (ch *CoreHandler) processWithTools(
 				ch.saveToolCall(userID, coreSession.SessionID, messageID, toolCall)
 			}
 
+			// Notify status: tool executing
+			notifyStatus(ctx, userID, sessionID, StatusToolExecuting, toolCall.Function.Name)
+
+			// Callback: check limit before tool execution
+			if ch.Callback != nil {
+				if cbErr := ch.Callback.BeforeAction(ctx, &UsageEvent{
+					UserID:    userID,
+					SessionID: sessionID,
+					EventType: EventToolCall,
+					Name:      toolCall.Function.Name,
+				}); cbErr != nil {
+					result := fmt.Sprintf("Tool %s blocked: %v", toolCall.Function.Name, cbErr)
+					if coreSession != nil {
+						ch.updateToolCallResponse(toolCall.ID, result)
+					}
+					currentMessages = append(currentMessages, openai.ChatCompletionMessage{
+						Role:       openai.ChatMessageRoleTool,
+						Content:    result,
+						ToolCallID: toolCall.ID,
+					})
+					continue
+				}
+			}
+
+			toolStart := time.Now()
 			result, err := ch.executeCoreTool(ctx, userID, toolCall)
+			toolDuration := time.Since(toolStart)
 			if err != nil {
 				result = fmt.Sprintf("Error executing tool: %v", err)
 			}
+
+			// Callback: record tool usage
+			if ch.Callback != nil {
+				e := &UsageEvent{
+					UserID:    userID,
+					SessionID: sessionID,
+					EventType: EventToolCall,
+					Name:      toolCall.Function.Name,
+					Duration:  toolDuration,
+					Error:     err,
+				}
+				ch.Callback.AfterAction(ctx, e)
+			}
+
+			// Notify status: tool done
+			notifyStatus(ctx, userID, sessionID, StatusToolDone, toolCall.Function.Name)
 
 			// Update tool call response in database
 			if coreSession != nil {
@@ -788,19 +941,68 @@ func (ch *CoreHandler) executeCoreTool(
 
 	switch toolCall.Function.Name {
 	case "call_user_agent_high":
-		return ch.callUserAgent(ctx, userID, args, ch.userAgentHigh, model.AgentTypeHigh)
+		notifyStatus(ctx, userID, "", StatusAgentCalling, "high")
+		if ch.Callback != nil {
+			if cbErr := ch.Callback.BeforeAction(ctx, &UsageEvent{
+				UserID: userID, EventType: EventAgentRouting, Name: "high",
+			}); cbErr != nil {
+				return fmt.Sprintf("Agent high blocked: %v", cbErr), nil
+			}
+		}
+		result, err := ch.callUserAgent(ctx, userID, args, ch.userAgentHigh, model.AgentTypeHigh)
+		if ch.Callback != nil {
+			ch.Callback.AfterAction(ctx, &UsageEvent{
+				UserID: userID, EventType: EventAgentRouting, Name: "high", Error: err,
+			})
+		}
+		notifyStatus(ctx, userID, "", StatusAgentDone, "high")
+		return result, err
 
 	case "call_user_agent_low":
+		notifyStatus(ctx, userID, "", StatusAgentCalling, "low")
+		if ch.Callback != nil {
+			if cbErr := ch.Callback.BeforeAction(ctx, &UsageEvent{
+				UserID: userID, EventType: EventAgentRouting, Name: "low",
+			}); cbErr != nil {
+				return fmt.Sprintf("Agent low blocked: %v", cbErr), nil
+			}
+		}
 		result, err := ch.callUserAgent(ctx, userID, args, ch.userAgentLow, model.AgentTypeLow)
 		if err != nil {
 			return "", err
 		}
 		// Check for escalation
 		if strings.HasPrefix(strings.TrimSpace(result), "ESCALATE:") {
+			if ch.Callback != nil {
+				ch.Callback.AfterAction(ctx, &UsageEvent{
+					UserID: userID, EventType: EventAgentRouting, Name: "low",
+				})
+			}
+			notifyStatus(ctx, userID, "", StatusAgentCalling, "high (escalated)")
 			// Auto-escalate to high model
-			return ch.callUserAgent(ctx, userID, args, ch.userAgentHigh, model.AgentTypeHigh)
+			result, err = ch.callUserAgent(ctx, userID, args, ch.userAgentHigh, model.AgentTypeHigh)
+			if ch.Callback != nil {
+				ch.Callback.AfterAction(ctx, &UsageEvent{
+					UserID: userID, EventType: EventAgentRouting, Name: "high", Error: err,
+				})
+			}
+			notifyStatus(ctx, userID, "", StatusAgentDone, "high")
+			return result, err
 		}
+		if ch.Callback != nil {
+			ch.Callback.AfterAction(ctx, &UsageEvent{
+				UserID: userID, EventType: EventAgentRouting, Name: "low",
+			})
+		}
+		notifyStatus(ctx, userID, "", StatusAgentDone, "low")
 		return result, nil
+
+	case "update_status":
+		message, _ := args["message"].(string)
+		if message != "" {
+			notifyStatus(ctx, userID, "", StatusCustom, message)
+		}
+		return "status updated", nil
 
 	case "create_session":
 		return ch.createSessionTool(ctx, userID, args)
@@ -889,7 +1091,7 @@ func (ch *CoreHandler) createSessionTool(_ context.Context, userID string, args 
 
 	log.Log.Infof("[CoreHandler] 🛠️  createSessionTool called | UserID: %s | AgentType: %s", userID, agentType)
 
-	session, err := ch.sessionHandler.CreateSession(userID, agentType)
+	session, err := ch.createSessionForUser(userID, agentType)
 	if err != nil {
 		log.Log.Errorf("[CoreHandler] ❌ Failed to create session | UserID: %s | AgentType: %s | Error: %v", userID, agentType, err)
 		return "", fmt.Errorf("failed to create session: %w", err)
@@ -1023,6 +1225,35 @@ func (ch *CoreHandler) saveUser(user *model.User) error {
 	return fmt.Errorf("store does not support user management")
 }
 
+// createSessionForUser creates a new session with proper sequential ID
+// Format: {UserID}-{AgentType}-s{SeqCounter}
+// This ensures unique, incrementing session IDs per user and agent type
+func (ch *CoreHandler) createSessionForUser(userID string, agentType model.AgentType) (*model.Session, error) {
+	// Get or create user to access/increment session sequence
+	user, err := ch.getOrCreateUser(userID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get user: %w", err)
+	}
+
+	if user == nil {
+		// Fallback to old behavior if user management not supported
+		return ch.sessionHandler.CreateSession(userID, agentType)
+	}
+
+	// Create session with proper sequential ID
+	session, err := ch.sessionHandler.CreateSessionForUser(user, agentType)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create session: %w", err)
+	}
+
+	// Save user with updated session sequence counter
+	if err := ch.saveUser(user); err != nil {
+		log.Log.Warnf("[CoreHandler] ⚠️  Failed to save user after session creation | UserID: %s | Error: %v", userID, err)
+	}
+
+	return session, nil
+}
+
 // getActiveSessionID returns the active session ID for a user and agent type
 // Returns empty string if no active session exists
 func (ch *CoreHandler) getActiveSessionID(userID string, agentType model.AgentType) string {
@@ -1034,8 +1265,19 @@ func (ch *CoreHandler) getActiveSessionID(userID string, agentType model.AgentTy
 }
 
 // setActiveSessionID sets the active session ID for a user and agent type
-// Persists to database via User model
+// Persists to database via User model.
+// IMPORTANT: Only sets active session if the session exists in the database.
 func (ch *CoreHandler) setActiveSessionID(userID string, agentType model.AgentType, sessionID string) error {
+	// Validate that the session exists in the database before setting it as active
+	if sessionID != "" {
+		session, err := ch.sessionHandler.GetSession(sessionID)
+		if err != nil || session == nil {
+			log.Log.Warnf("[CoreHandler] ⚠️  Cannot set active session - session not found | UserID: %s | AgentType: %s | SessionID: %s",
+				userID, agentType, sessionID)
+			return fmt.Errorf("session not found in database: %s", sessionID)
+		}
+	}
+
 	user, err := ch.getOrCreateUser(userID)
 	if err != nil {
 		return fmt.Errorf("failed to get user: %w", err)
@@ -1070,8 +1312,8 @@ func (ch *CoreHandler) getOrCreateActiveSession(userID string, agentType model.A
 			userID, agentType, sessionID)
 	}
 
-	// Create new session
-	session, err := ch.sessionHandler.CreateSession(userID, agentType)
+	// Create new session with proper sequential ID
+	session, err := ch.createSessionForUser(userID, agentType)
 	if err != nil {
 		return "", fmt.Errorf("failed to create session: %w", err)
 	}
@@ -1163,7 +1405,9 @@ func (ch *CoreHandler) saveCoreMessage(
 	}
 
 	// Create message record
+	messageID := coreSession.GenerateMessageID()
 	msg := model.NewMessage(
+		messageID,
 		userID,
 		coreSession.SessionID,
 		openai.ChatMessageRoleAssistant,
@@ -1294,7 +1538,7 @@ func (ch *CoreHandler) ProcessMessageWithImage(
 	}
 
 	if llmModel == "" {
-		llmModel = "gpt-4o-mini" // Default fallback
+		llmModel = "openai/gpt-5-nano" // Default fallback
 	}
 
 	// Check user ban status
@@ -1353,7 +1597,8 @@ func (ch *CoreHandler) ProcessMessageWithImage(
 
 	// Save user message to database
 	// Note: User messages don't have a model - the model field stays empty for user messages
-	userMsgRecord := model.NewUserMessage(userID, coreSession.SessionID, historyContent, model.ContentTypeImage)
+	imageMsgID := coreSession.GenerateMessageID()
+	userMsgRecord := model.NewUserMessage(imageMsgID, userID, coreSession.SessionID, historyContent, model.ContentTypeImage)
 	ch.saveMessage(userMsgRecord)
 
 	// Build system prompts (simplified for vision - no tools needed)
@@ -1427,7 +1672,9 @@ func (ch *CoreHandler) ProcessMessageWithImage(
 	}
 
 	// Save assistant message to database
+	assistantMsgID := coreSession.GenerateMessageID()
 	assistantMsg := model.NewMessage(
+		assistantMsgID,
 		userID,
 		coreSession.SessionID,
 		openai.ChatMessageRoleAssistant,

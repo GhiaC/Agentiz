@@ -66,6 +66,8 @@ func RenderToolCalls(handler *debuger.DebugHandler, page int, sessionID string) 
 			{Header: "Function", NoWrap: true},
 			{Header: "Arguments"},
 			{Header: "Result"},
+			{Header: "Result Len", Center: true, NoWrap: true},
+			{Header: "Duration", Center: true, NoWrap: true},
 			{Header: "User", NoWrap: true},
 			{Header: "Session", Center: true, NoWrap: true},
 			{Header: "Time", NoWrap: true},
@@ -80,11 +82,17 @@ func RenderToolCalls(handler *debuger.DebugHandler, page int, sessionID string) 
 			// Agent type badge
 			agentBadge := components.AgentTypeBadgeFromString(tc.AgentType)
 
+			// Format result length (character count)
+			resultLenDisplay := debuger.FormatChars(tc.ResultLength)
+			durationDisplay := debuger.FormatDurationMs(tc.DurationMs)
+
 			html += fmt.Sprintf(`<tr>
                 <td class="text-center">%s</td>
                 <td class="text-nowrap">%s</td>
                 <td><div class="mb-0" style="max-width: 200px; font-size: 0.8em; white-space: pre-wrap; word-wrap: break-word;">%s</div></td>
                 <td><div class="mb-0" style="max-width: 200px; font-size: 0.8em; white-space: pre-wrap; word-wrap: break-word;">%s</div></td>
+                <td class="text-center">%s</td>
+                <td class="text-center">%s</td>
                 <td class="text-nowrap">%s</td>
                 <td class="text-center">%s</td>
                 <td class="text-nowrap">%s</td>
@@ -94,6 +102,8 @@ func RenderToolCalls(handler *debuger.DebugHandler, page int, sessionID string) 
 				components.InlineCode(tc.FunctionName),
 				argsDisplay,
 				resultDisplay,
+				resultLenDisplay,
+				durationDisplay,
 				components.TruncatedLink(tc.UserID, "/agentize/debug/users/"+template.URLQueryEscaper(tc.UserID), 20),
 				components.OpenButton("/agentize/debug/sessions/"+template.URLQueryEscaper(tc.SessionID)),
 				debuger.FormatTime(tc.CreatedAt),
@@ -148,6 +158,7 @@ func RenderToolCallDetail(handler *debuger.DebugHandler, toolCallID string) (str
 	html += fmt.Sprintf(`<tr><th class="w-25">Tool Call ID</th><td>%s</td></tr>`, components.InlineCode(tc.ToolCallID))
 	html += fmt.Sprintf(`<tr><th>Function</th><td>%s</td></tr>`, components.InlineCode(tc.FunctionName))
 	html += fmt.Sprintf(`<tr><th>Agent Type</th><td>%s</td></tr>`, agentBadge)
+	html += fmt.Sprintf(`<tr><th>Duration</th><td>%s</td></tr>`, debuger.FormatDurationMs(tc.DurationMs))
 	html += fmt.Sprintf(`<tr><th>Created At</th><td>%s</td></tr>`, debuger.FormatTime(tc.CreatedAt))
 	html += fmt.Sprintf(`<tr><th>Updated At</th><td>%s</td></tr>`, debuger.FormatTime(tc.UpdatedAt))
 	html += `</table>`
@@ -175,7 +186,11 @@ func RenderToolCallDetail(handler *debuger.DebugHandler, toolCallID string) (str
 	html += ui.CardEnd()
 
 	// Response Card
-	html += ui.CardStart("Response", "reply")
+	responseTitle := "Response"
+	if tc.ResponseLength > 0 {
+		responseTitle = fmt.Sprintf("Response (%s chars)", debuger.FormatChars(tc.ResponseLength))
+	}
+	html += ui.CardStart(responseTitle, "reply")
 	if tc.Response == "" {
 		html += components.InfoAlert("No response recorded yet.")
 	} else {

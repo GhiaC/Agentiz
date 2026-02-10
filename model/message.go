@@ -1,7 +1,6 @@
 package model
 
 import (
-	"fmt"
 	"time"
 
 	"github.com/sashabaranov/go-openai"
@@ -65,6 +64,7 @@ type Message struct {
 
 // NewMessage creates a new message from an OpenAI response
 func NewMessage(
+	messageID string,
 	userID string,
 	sessionID string,
 	role string,
@@ -82,7 +82,7 @@ func NewMessage(
 	}
 
 	msg := &Message{
-		MessageID:        generateMessageID(userID, sessionID, now),
+		MessageID:        messageID,
 		AgentType:        agentType,
 		ContentType:      contentType,
 		UserID:           userID,
@@ -105,10 +105,10 @@ func NewMessage(
 }
 
 // NewUserMessage creates a message for a user input (no LLM response)
-func NewUserMessage(userID string, sessionID string, content string, contentType ContentType) *Message {
+func NewUserMessage(messageID string, userID string, sessionID string, content string, contentType ContentType) *Message {
 	now := time.Now()
 	return &Message{
-		MessageID:   generateMessageID(userID, sessionID, now),
+		MessageID:   messageID,
 		AgentType:   AgentTypeUser,
 		ContentType: contentType,
 		UserID:      userID,
@@ -117,20 +117,4 @@ func NewUserMessage(userID string, sessionID string, content string, contentType
 		Content:     content,
 		CreatedAt:   now,
 	}
-}
-
-// generateMessageID generates a unique message ID
-func generateMessageID(userID string, sessionID string, timestamp time.Time) string {
-	// Format: {timestamp}-{userID}-{sessionID}-{random4}
-	// Include nanoseconds to ensure uniqueness even for messages created in the same second
-	date := timestamp.Format("060102150405")  // YYMMDDHHMMSS
-	nanos := timestamp.Nanosecond() % 1000000 // Last 6 digits of nanoseconds (millisecond precision)
-	return fmt.Sprintf("%s%06d-%s-%s-%s", date, nanos, userID[:min(8, len(userID))], sessionID[:min(8, len(sessionID))], randomString(4))
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

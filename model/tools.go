@@ -247,6 +247,12 @@ type ToolCall struct {
 	// Response is the result/response from the tool execution
 	Response string
 
+	// ResponseLength is the length of the response string (in bytes)
+	ResponseLength int
+
+	// DurationMs is the execution time in milliseconds (from creation to response)
+	DurationMs int64
+
 	// Metadata
 	CreatedAt time.Time
 	UpdatedAt time.Time

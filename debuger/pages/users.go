@@ -168,6 +168,24 @@ func RenderUserDetail(handler *debuger.DebugHandler, userID string) (string, err
 		usernameDisplay = template.HTMLEscapeString(user.Username)
 	}
 
+	// Build active sessions display for detail page
+	activeSessionsHTML := "-"
+	if len(user.ActiveSessionIDs) > 0 {
+		var parts []string
+		for agentType, sessionID := range user.ActiveSessionIDs {
+			if sessionID != "" {
+				link := fmt.Sprintf(`<a href="/agentize/debug/sessions/%s">%s: %s</a>`,
+					template.URLQueryEscaper(sessionID),
+					template.HTMLEscapeString(string(agentType)),
+					components.InlineCode(debuger.TruncateString(sessionID, 16)))
+				parts = append(parts, link)
+			}
+		}
+		if len(parts) > 0 {
+			activeSessionsHTML = strings.Join(parts, "<br>")
+		}
+	}
+
 	html += fmt.Sprintf(`
 <div class="card mb-4">
     <div class="card-header">
@@ -210,6 +228,10 @@ func RenderUserDetail(handler *debuger.DebugHandler, userID string) (string, err
                     <strong class="d-block mb-2">Last Nonsense:</strong>
                     <div class="text-muted">%s</div>
                 </div>
+                <div class="mb-3">
+                    <strong class="d-block mb-2">Active Sessions:</strong>
+                    <div>%s</div>
+                </div>
             </div>
         </div>
     </div>
@@ -222,6 +244,7 @@ func RenderUserDetail(handler *debuger.DebugHandler, userID string) (string, err
 		debuger.FormatTime(user.CreatedAt),
 		debuger.FormatTime(user.UpdatedAt),
 		debuger.FormatTime(user.LastNonsenseTime),
+		activeSessionsHTML,
 	)
 
 	// Sessions card
@@ -307,9 +330,9 @@ func RenderUserDetail(handler *debuger.DebugHandler, userID string) (string, err
 			AlignMiddle: true,
 		})
 
-		// Show last 10 messages
+		// Show first 10 messages (already sorted by CreatedAt DESC - newest first)
 		displayCount := debuger.Min(len(messages), 10)
-		for i := len(messages) - displayCount; i < len(messages); i++ {
+		for i := 0; i < displayCount; i++ {
 			msg := messages[i]
 			contentDisplay := components.ExpandableWithPreview(msg.Content, 100)
 

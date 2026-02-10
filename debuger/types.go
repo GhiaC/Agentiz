@@ -47,6 +47,8 @@ type ToolCallInfo struct {
 	FunctionName string
 	Arguments    string
 	Result       string
+	ResultLength int
+	DurationMs   int64
 	CreatedAt    time.Time
 }
 

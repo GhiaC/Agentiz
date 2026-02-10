@@ -23,7 +23,7 @@ type SummaryConfig struct {
 // DefaultSummaryConfig returns default configuration
 func DefaultSummaryConfig() SummaryConfig {
 	return SummaryConfig{
-		Model:     "gpt-4o-mini",
+		Model:     "openai/gpt-5-nano",
 		MaxTokens: 100,
 	}
 }
@@ -37,7 +37,7 @@ func GenerateSummary(ctx context.Context, client LLMClient, content string, conf
 
 	// Apply defaults
 	if config.Model == "" {
-		config.Model = "gpt-4o-mini"
+		config.Model = "openai/gpt-5-nano"
 	}
 	if config.MaxTokens <= 0 {
 		config.MaxTokens = 100
@@ -87,14 +87,14 @@ Example bad summary: "Kubernetes pod management and monitoring overview"
 
 // ConversationSummaryConfig holds configuration for conversation summarization
 type ConversationSummaryConfig struct {
-	Model     string // LLM model to use (default: gpt-4o-mini)
+	Model     string // LLM model to use (default: openai/gpt-5-nano)
 	MaxTokens int    // Max tokens for response (default: 200)
 }
 
 // DefaultConversationSummaryConfig returns default configuration for conversation summaries
 func DefaultConversationSummaryConfig() ConversationSummaryConfig {
 	return ConversationSummaryConfig{
-		Model:     "gpt-4o-mini",
+		Model:     "openai/gpt-5-nano",
 		MaxTokens: 200,
 	}
 }
@@ -108,7 +108,7 @@ func GenerateConversationSummary(ctx context.Context, client LLMClient, conversa
 
 	// Apply defaults
 	if config.Model == "" {
-		config.Model = "gpt-4o-mini"
+		config.Model = "openai/gpt-5-nano"
 	}
 	if config.MaxTokens <= 0 {
 		config.MaxTokens = 200
@@ -154,7 +154,7 @@ func GenerateSessionTitle(ctx context.Context, client LLMClient, conversation st
 	}
 
 	if model == "" {
-		model = "gpt-4o-mini"
+		model = "openai/gpt-5-nano"
 	}
 
 	systemPrompt := `Generate a short title (3-5 words) for this conversation.

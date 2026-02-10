@@ -141,6 +141,21 @@ func (dp *DataProvider) GetMessagesBySession(sessionID string) ([]*model.Message
 	return messages, nil
 }
 
+// GetMessagesBySessionDesc returns messages for a session sorted by CreatedAt (newest first for listing)
+func (dp *DataProvider) GetMessagesBySessionDesc(sessionID string) ([]*model.Message, error) {
+	messages, err := dp.store.GetMessagesBySession(sessionID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Sort by CreatedAt (newest first)
+	sort.Slice(messages, func(i, j int) bool {
+		return messages[i].CreatedAt.After(messages[j].CreatedAt)
+	})
+
+	return messages, nil
+}
+
 // GetMessagesByUser returns messages for a user sorted by CreatedAt (newest first)
 func (dp *DataProvider) GetMessagesByUser(userID string) ([]*model.Message, error) {
 	messages, err := dp.store.GetMessagesByUser(userID)
@@ -386,6 +401,8 @@ func ConvertToolCallsToInfo(toolCalls []*model.ToolCall) []debuger.ToolCallInfo 
 			FunctionName: tc.FunctionName,
 			Arguments:    tc.Arguments,
 			Result:       tc.Response,
+			ResultLength: tc.ResponseLength,
+			DurationMs:   tc.DurationMs,
 			CreatedAt:    tc.CreatedAt,
 		}
 	}

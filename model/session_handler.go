@@ -37,7 +37,7 @@ type SessionHandlerConfig struct {
 func DefaultSessionHandlerConfig() SessionHandlerConfig {
 	return SessionHandlerConfig{
 		AutoSummarizeThreshold: 20,
-		SummaryModel:           "gpt-4o-mini",
+		SummaryModel:           "openai/gpt-5-nano",
 		SummaryMaxTokens:       200,
 		DisableLogs:            true,
 	}
@@ -69,7 +69,7 @@ func NewSessionHandler(store SessionStore, config SessionHandlerConfig) *Session
 		config.AutoSummarizeThreshold = 20
 	}
 	if config.SummaryModel == "" {
-		config.SummaryModel = "gpt-4o-mini"
+		config.SummaryModel = "openai/gpt-5-nano"
 	}
 	if config.SummaryMaxTokens <= 0 {
 		config.SummaryMaxTokens = 200
@@ -118,6 +118,7 @@ func (sh *SessionHandler) GetLLMClient() LLMClient {
 }
 
 // CreateSession creates a new session for a user with the specified agent type
+// Deprecated: Use CreateSessionForUser instead for proper session ID generation
 func (sh *SessionHandler) CreateSession(userID string, agentType AgentType) (*Session, error) {
 	session := NewSessionWithType(userID, agentType)
 
@@ -134,6 +135,34 @@ func (sh *SessionHandler) CreateSession(userID string, agentType AgentType) (*Se
 		log.Log.Infof("[SessionHandler] ✅ Created new session | UserID: %s | SessionID: %s | AgentType: %s", userID, session.SessionID, agentType)
 		allSessions, _ := sh.store.List(userID)
 		log.Log.Infof("[SessionHandler] 📊 Total sessions for user %s: %d", userID, len(allSessions))
+	}
+
+	return session, nil
+}
+
+// CreateSessionForUser creates a new session for a user with proper sequential ID
+// Format: {UserID}-{AgentType}-s{SeqCounter}
+// The user's SessionSeq counter is incremented and must be saved by the caller
+func (sh *SessionHandler) CreateSessionForUser(user *User, agentType AgentType) (*Session, error) {
+	if user == nil {
+		return nil, fmt.Errorf("user cannot be nil")
+	}
+
+	session := NewSessionForUser(user, agentType)
+
+	if err := sh.store.Put(session); err != nil {
+		return nil, fmt.Errorf("failed to store session: %w", err)
+	}
+
+	// Update index
+	sh.mu.Lock()
+	sh.userIndex[user.UserID] = append(sh.userIndex[user.UserID], session.SessionID)
+	sh.mu.Unlock()
+
+	if !sh.config.DisableLogs {
+		log.Log.Infof("[SessionHandler] ✅ Created new session | UserID: %s | SessionID: %s | AgentType: %s", user.UserID, session.SessionID, agentType)
+		allSessions, _ := sh.store.List(user.UserID)
+		log.Log.Infof("[SessionHandler] 📊 Total sessions for user %s: %d", user.UserID, len(allSessions))
 	}
 
 	return session, nil
@@ -233,7 +262,7 @@ func (sh *SessionHandler) ListUserSessionsByType(userID string, agentType AgentT
 	return filtered, nil
 }
 
-// DeleteSession removes a session
+// DeleteSession removes a session and cleans up any active session references
 func (sh *SessionHandler) DeleteSession(sessionID string) error {
 	session, err := sh.store.Get(sessionID)
 	if err != nil {
@@ -251,6 +280,27 @@ func (sh *SessionHandler) DeleteSession(sessionID string) error {
 		}
 	}
 	sh.mu.Unlock()
+
+	// Clean up active session reference in user if this session was active
+	// This prevents stale references when a session is deleted
+	if session.AgentType == AgentTypeHigh || session.AgentType == AgentTypeLow {
+		if userStore, ok := sh.store.(interface {
+			GetOrCreateUser(string) (*User, error)
+			PutUser(*User) error
+		}); ok {
+			if user, err := userStore.GetOrCreateUser(session.UserID); err == nil && user != nil {
+				// Check if this session is the active session for this agent type
+				if user.GetActiveSessionID(session.AgentType) == sessionID {
+					user.SetActiveSessionID(session.AgentType, "") // Clear the reference
+					_ = userStore.PutUser(user)                    // Best effort save
+					if !sh.config.DisableLogs {
+						log.Log.Infof("[SessionHandler] 🧹 Cleared active session reference | UserID: %s | AgentType: %s | SessionID: %s",
+							session.UserID, session.AgentType, sessionID)
+					}
+				}
+			}
+		}
+	}
 
 	return sh.store.Delete(sessionID)
 }

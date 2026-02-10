@@ -91,7 +91,7 @@ func loadSchedulerConfig() SchedulerConfig {
 		SubsequentMessageThreshold:  getEnvInt("AGENTIZE_SCHEDULER_SUBSEQUENT_MESSAGE_THRESHOLD", 25),
 		SubsequentTimeThreshold:     time.Duration(subsequentTimeThresholdMinutes) * time.Minute,
 		LastActivityThreshold:       time.Duration(lastActivityThresholdMinutes) * time.Minute,
-		SummaryModel:                getEnvString("AGENTIZE_SCHEDULER_SUMMARY_MODEL", "gpt-4o-mini"),
+		SummaryModel:                getEnvString("AGENTIZE_SCHEDULER_SUMMARY_MODEL", "openai/gpt-5-nano"),
 		DisableLogs:                 getEnvBool("AGENTIZE_SCHEDULER_DISABLE_LOGS", false),
 	}
 }

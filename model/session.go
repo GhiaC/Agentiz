@@ -69,6 +69,9 @@ type Session struct {
 
 	// Model name used in this session (e.g., "gpt-4o", "gpt-4o-mini")
 	Model string
+
+	// MessageSeq is the sequence counter for messages in this session
+	MessageSeq int
 }
 
 // NodeDigest is a lightweight representation of a node (for memory efficiency)
@@ -81,12 +84,13 @@ type NodeDigest struct {
 	Excerpt  string // First 100 chars of content
 }
 
-// NewSession creates a new session for a user
+// NewSession creates a new session for a user (without User object - generates random ID)
+// Deprecated: Use NewSessionForUser instead for proper session ID generation
 func NewSession(userID string) *Session {
 	now := time.Now()
 	return &Session{
 		UserID:             userID,
-		SessionID:          generateSessionID(userID),
+		SessionID:          generateRandomSessionID(userID),
 		ConversationState:  NewConversationState(),
 		NodeDigests:        []NodeDigest{},
 		ToolResults:        make(map[string]string),
@@ -99,21 +103,87 @@ func NewSession(userID string) *Session {
 		ExMsgs:             []openai.ChatCompletionMessage{},
 		AgentType:          "",
 		Model:              "",
+		MessageSeq:         0,
 	}
 }
 
-// NewSessionWithType creates a new session for a user with a specific agent type
+// NewSessionWithType creates a new session for a user with a specific agent type (without User object)
+// Deprecated: Use NewSessionForUser instead for proper session ID generation
 func NewSessionWithType(userID string, agentType AgentType) *Session {
 	session := NewSession(userID)
 	session.AgentType = agentType
+	// Update SessionID to include agent type with random suffix
+	session.SessionID = generateRandomSessionIDWithType(userID, agentType)
 	return session
 }
 
-// generateSessionID generates a unique session ID
+// NewSessionForUser creates a new session for a user with proper sequential ID
+// Format: {UserID}-{AgentType}-s{SeqCounter}
+// This is the preferred method for creating sessions
+// Note: user must not be nil - caller should check before calling
+func NewSessionForUser(user *User, agentType AgentType) *Session {
+	if user == nil {
+		panic("NewSessionForUser: user cannot be nil")
+	}
+
+	seq := user.NextSessionSeq(agentType)
+	sessionID := GenerateSessionID(user.UserID, agentType, seq)
+
+	now := time.Now()
+	return &Session{
+		UserID:             user.UserID,
+		SessionID:          sessionID,
+		ConversationState:  NewConversationState(),
+		NodeDigests:        []NodeDigest{},
+		ToolResults:        make(map[string]string),
+		CreatedAt:          now,
+		UpdatedAt:          now,
+		Tags:               []string{},
+		Title:              "",
+		Summary:            "",
+		SummarizedMessages: []openai.ChatCompletionMessage{},
+		ExMsgs:             []openai.ChatCompletionMessage{},
+		AgentType:          agentType,
+		Model:              "",
+		MessageSeq:         0,
+	}
+}
+
+// GenerateSessionID generates a session ID with the new format
+// Format: {UserID}-{AgentType}-s{SeqCounter}
+// Example: user123-core-s0001, user123-low-s0002
+func GenerateSessionID(userID string, agentType AgentType, seq int) string {
+	agentShort := agentTypeShortCode(agentType)
+	return fmt.Sprintf("%s-%s-s%04d", userID, agentShort, seq)
+}
+
+// agentTypeShortCode returns short code for agent type
+func agentTypeShortCode(agentType AgentType) string {
+	switch agentType {
+	case AgentTypeCore:
+		return "core"
+	case AgentTypeHigh:
+		return "high"
+	case AgentTypeLow:
+		return "low"
+	default:
+		return "unk"
+	}
+}
+
+// generateRandomSessionID generates a random session ID (legacy format)
 // Format: {userID}-{YYMMDD}-{random4}
-func generateSessionID(userID string) string {
+func generateRandomSessionID(userID string) string {
 	date := time.Now().Format("060102") // YYMMDD
 	return userID + "-" + date + "-" + randomString(4)
+}
+
+// generateRandomSessionIDWithType generates a random session ID with agent type
+// Format: {userID}-{agentType}-{YYMMDD}-{random4}
+func generateRandomSessionIDWithType(userID string, agentType AgentType) string {
+	date := time.Now().Format("060102") // YYMMDD
+	agentShort := agentTypeShortCode(agentType)
+	return fmt.Sprintf("%s-%s-%s-%s", userID, agentShort, date, randomString(4))
 }
 
 func randomString(n int) string {
@@ -124,6 +194,19 @@ func randomString(n int) string {
 		b[i] = charset[(nano+int64(i*7))%int64(len(charset))]
 	}
 	return string(b)
+}
+
+// NextMessageSeq increments and returns the next message sequence number
+func (s *Session) NextMessageSeq() int {
+	s.MessageSeq++
+	return s.MessageSeq
+}
+
+// GenerateMessageID generates a unique message ID for this session
+// Format: {SessionID}-{SeqID}
+func (s *Session) GenerateMessageID() string {
+	seq := s.NextMessageSeq()
+	return fmt.Sprintf("%s-m%04d", s.SessionID, seq)
 }
 
 // LLMClientWithUserID wraps LLMClient to add user_id header to all requests
@@ -154,7 +237,7 @@ func (s *Session) PopulateFields(ctx context.Context, client LLMClient, model st
 	}
 
 	if model == "" {
-		model = "gpt-4o-mini"
+		model = "openai/gpt-5-nano"
 	}
 
 	// Ensure user_id is in context

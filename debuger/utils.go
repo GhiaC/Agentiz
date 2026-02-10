@@ -167,3 +167,37 @@ func JSONPretty(v interface{}) string {
 	}
 	return string(b)
 }
+
+// FormatChars formats character count in human readable format
+func FormatChars(chars int) string {
+	if chars == 0 {
+		return "0"
+	}
+	if chars < 1000 {
+		return fmt.Sprintf("%d", chars)
+	}
+	if chars < 1000000 {
+		return fmt.Sprintf("%.1fK", float64(chars)/1000)
+	}
+	return fmt.Sprintf("%.1fM", float64(chars)/1000000)
+}
+
+// FormatDurationMs formats duration in milliseconds to human readable format
+func FormatDurationMs(ms int64) string {
+	if ms == 0 {
+		return "-"
+	}
+	if ms < 1000 {
+		return fmt.Sprintf("%dms", ms)
+	}
+	seconds := float64(ms) / 1000
+	if seconds < 60 {
+		return fmt.Sprintf("%.1fs", seconds)
+	}
+	minutes := seconds / 60
+	if minutes < 60 {
+		return fmt.Sprintf("%.1fm", minutes)
+	}
+	hours := minutes / 60
+	return fmt.Sprintf("%.1fh", hours)
+}

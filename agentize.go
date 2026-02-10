@@ -8,6 +8,7 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/ghiac/agentize/debuger/ui"
 	"github.com/ghiac/agentize/engine"
 	"github.com/ghiac/agentize/fsrepo"
 	"github.com/ghiac/agentize/llmutils"
@@ -15,11 +16,20 @@ import (
 	"github.com/ghiac/agentize/model"
 	"github.com/ghiac/agentize/store"
 	"github.com/ghiac/agentize/visualize"
+	"github.com/gin-gonic/gin"
 )
 
 // Version returns the current version of the library
 func Version() string {
 	return "0.1.0"
+}
+
+// DebugPage represents an external page added to the debug panel
+type DebugPage struct {
+	Path    string          // e.g., "/agentize/debug/quota"
+	Title   string          // Nav label
+	Icon    string          // Nav icon emoji
+	Handler gin.HandlerFunc // Route handler
 }
 
 // Agentize is the main entry point for the library
@@ -35,6 +45,9 @@ type Agentize struct {
 	// Session scheduler for automatic summarization
 	scheduler   *engine.SessionScheduler
 	schedulerMu sync.RWMutex
+
+	// Extra debug pages registered by applications
+	extraDebugPages []DebugPage
 }
 
 // Options allows configuring Agentize behavior
@@ -342,6 +355,23 @@ func (ag *Agentize) GenerateGraphVisualization(filename string, title string) er
 // ============================================================================
 // Lifecycle
 // ============================================================================
+
+// AddDebugPage registers an external page to the debug panel.
+// The page will appear in the debugger navbar and be accessible via its Path.
+func (ag *Agentize) AddDebugPage(page DebugPage) {
+	ag.extraDebugPages = append(ag.extraDebugPages, page)
+	// Also register in the global UI navbar so it shows on all debugger pages
+	ui.RegisterNavItem(ui.NavItem{URL: page.Path, Icon: page.Icon, Text: page.Title})
+}
+
+// GetDebugNavItems returns the full set of navigation items including extra pages.
+func (ag *Agentize) GetDebugNavItems() []ui.NavItem {
+	items := ui.DefaultNavItems()
+	for _, p := range ag.extraDebugPages {
+		items = append(items, ui.NavItem{URL: p.Path, Icon: p.Icon, Text: p.Title})
+	}
+	return items
+}
 
 // WaitForShutdown waits for shutdown signals and performs graceful shutdown
 func (ag *Agentize) WaitForShutdown() {

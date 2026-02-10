@@ -25,6 +25,11 @@ type User struct {
 	// This is persisted to database and loaded on startup
 	ActiveSessionIDs map[AgentType]string
 
+	// Session sequence counters per agent type
+	// Key: AgentType (core, high, low), Value: last session sequence number
+	// Used to generate unique SessionIDs: {UserID}-{AgentType}-{SeqCounter}
+	SessionSeqs map[AgentType]int
+
 	// Metadata
 	CreatedAt time.Time
 	UpdatedAt time.Time
@@ -40,6 +45,7 @@ func NewUser(userID string) *User {
 		BanMessage:       "",
 		NonsenseCount:    0,
 		ActiveSessionIDs: make(map[AgentType]string),
+		SessionSeqs:      make(map[AgentType]int),
 		CreatedAt:        now,
 		UpdatedAt:        now,
 	}
@@ -109,4 +115,22 @@ func (u *User) SetActiveSessionID(agentType AgentType, sessionID string) {
 	}
 	u.ActiveSessionIDs[agentType] = sessionID
 	u.UpdatedAt = time.Now()
+}
+
+// NextSessionSeq increments and returns the next session sequence number for a given agent type
+func (u *User) NextSessionSeq(agentType AgentType) int {
+	if u.SessionSeqs == nil {
+		u.SessionSeqs = make(map[AgentType]int)
+	}
+	u.SessionSeqs[agentType]++
+	u.UpdatedAt = time.Now()
+	return u.SessionSeqs[agentType]
+}
+
+// GetSessionSeq returns the current session sequence number for a given agent type
+func (u *User) GetSessionSeq(agentType AgentType) int {
+	if u.SessionSeqs == nil {
+		return 0
+	}
+	return u.SessionSeqs[agentType]
 }
