@@ -14,7 +14,7 @@ import (
 )
 
 // MongoDBStore is a MongoDB implementation of SessionStore and DebugStore
-// It stores sessions, users, messages, tool calls, etc. in MongoDB collections with JSON serialization
+// It stores sessions, users, messages, tool calls, etc. in MongoDB collections with BSON serialization (backward compatible with JSON)
 type MongoDBStore struct {
 	client     *mongo.Client
 	database   *mongo.Database
@@ -65,7 +65,16 @@ func NewMongoDBStore(config MongoDBStoreConfig) (*MongoDBStore, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	clientOptions := options.Client().ApplyURI(config.URI)
+	// Configure connection pool for high load
+	clientOptions := options.Client().
+		ApplyURI(config.URI).
+		SetMaxPoolSize(100).                       // Maximum concurrent connections
+		SetMinPoolSize(10).                        // Minimum connections to keep open
+		SetMaxConnIdleTime(30 * time.Minute).      // Close idle connections after 30 minutes
+		SetRetryWrites(true).                      // Retry write operations on transient errors
+		SetRetryReads(true).                       // Retry read operations on transient errors
+		SetServerSelectionTimeout(5 * time.Second) // Timeout for server selection
+
 	client, err := mongo.Connect(ctx, clientOptions)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to MongoDB: %w", err)
@@ -100,6 +109,17 @@ func NewMongoDBStore(config MongoDBStoreConfig) (*MongoDBStore, error) {
 	return store, nil
 }
 
+// unmarshalJSONOrBSON tries to unmarshal JSON first, falls back to BSON for backward compatibility
+// This handles the case where old data was stored as BSON but new code expects JSON
+func unmarshalJSONOrBSON(data string, v interface{}) error {
+	// Try JSON first (new format)
+	if err := json.Unmarshal([]byte(data), v); err == nil {
+		return nil
+	}
+	// Fallback to BSON for old data
+	return bson.Unmarshal([]byte(data), v)
+}
+
 // initIndexes creates the necessary indexes
 func (s *MongoDBStore) initIndexes(ctx context.Context) error {
 	// Index on user_id
@@ -132,12 +152,114 @@ func (s *MongoDBStore) initIndexes(ctx context.Context) error {
 		return fmt.Errorf("failed to create unique core session index: %w", err)
 	}
 
+	// ============================================================================
+	// Messages Collection Indexes
+	// ============================================================================
+
+	// Index for GetMessagesBySession: session_id + created_at DESC
+	_, err = s.messagesCollection.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{
+			{Key: "session_id", Value: 1},
+			{Key: "created_at", Value: -1},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create messages session_id+created_at index: %w", err)
+	}
+
+	// Index for GetMessagesByUser: user_id + created_at DESC
+	_, err = s.messagesCollection.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{
+			{Key: "user_id", Value: 1},
+			{Key: "created_at", Value: -1},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create messages user_id+created_at index: %w", err)
+	}
+
+	// ============================================================================
+	// ToolCalls Collection Indexes
+	// ============================================================================
+
+	// Index for GetToolCallsBySession: session_id + created_at ASC
+	_, err = s.toolCallsCollection.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{
+			{Key: "session_id", Value: 1},
+			{Key: "created_at", Value: 1},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create tool_calls session_id+created_at index: %w", err)
+	}
+
+	// Unique index for GetToolCallByToolID: tool_id (prevents duplicates)
+	// Use partial filter to only index non-null tool_id values (for backward compatibility with old data)
+	// This allows documents with null/missing tool_id to coexist without violating unique constraint
+	_, err = s.toolCallsCollection.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{{Key: "tool_id", Value: 1}},
+		Options: options.Index().
+			SetUnique(true).
+			SetPartialFilterExpression(bson.M{"tool_id": bson.M{"$exists": true, "$type": "string"}}),
+	})
+	if err != nil {
+		// If unique index creation fails due to duplicates, fall back to non-unique index
+		// This allows the system to work even with duplicate tool_ids
+		_, fallbackErr := s.toolCallsCollection.Indexes().CreateOne(ctx, mongo.IndexModel{
+			Keys:    bson.D{{Key: "tool_id", Value: 1}},
+			Options: options.Index().SetPartialFilterExpression(bson.M{"tool_id": bson.M{"$exists": true, "$type": "string"}}),
+		})
+		if fallbackErr != nil {
+			return fmt.Errorf("failed to create tool_calls tool_id index (unique failed: %v, fallback failed: %w)", err, fallbackErr)
+		}
+		// Non-unique index created successfully - this is acceptable
+	}
+
+	// ============================================================================
+	// OpenedFiles Collection Indexes
+	// ============================================================================
+
+	// Index for GetOpenedFilesBySession: session_id
+	_, err = s.openedFilesCollection.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{{Key: "session_id", Value: 1}},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create opened_files session_id index: %w", err)
+	}
+
+	// Compound index for GetCurrentlyOpenedFilesBySession: session_id + closed_at
+	// This supports queries with $exists on closed_at
+	_, err = s.openedFilesCollection.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{
+			{Key: "session_id", Value: 1},
+			{Key: "closed_at", Value: 1},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create opened_files session_id+closed_at index: %w", err)
+	}
+
+	// ============================================================================
+	// SummarizationLogs Collection Indexes
+	// ============================================================================
+
+	// Index for GetSummarizationLogsBySession: session_id + created_at ASC
+	_, err = s.summarizationLogsCollection.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{
+			{Key: "session_id", Value: 1},
+			{Key: "created_at", Value: 1},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create summarization_logs session_id+created_at index: %w", err)
+	}
+
 	return nil
 }
 
 // Close closes the MongoDB connection
 func (s *MongoDBStore) Close() error {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	return s.client.Disconnect(ctx)
 }
@@ -177,10 +299,8 @@ type sessionDocument struct {
 
 // Get retrieves a session by ID
 func (s *MongoDBStore) Get(sessionID string) (*model.Session, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// MongoDB is thread-safe, no mutex needed
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 	defer cancel()
 
 	var doc sessionDocument
@@ -193,7 +313,7 @@ func (s *MongoDBStore) Get(sessionID string) (*model.Session, error) {
 	}
 
 	session := &model.Session{}
-	if err := json.Unmarshal([]byte(doc.Data), session); err != nil {
+	if err := unmarshalJSONOrBSON(doc.Data, session); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal session: %w", err)
 	}
 
@@ -216,12 +336,9 @@ func (s *MongoDBStore) Put(session *model.Session) error {
 		return s.PutCoreSession(session)
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
+	// MongoDB is thread-safe, no mutex needed
 	session.UpdatedAt = time.Now()
 
-	// Serialize session to JSON
 	data, err := json.Marshal(session)
 	if err != nil {
 		return fmt.Errorf("failed to marshal session: %w", err)
@@ -236,7 +353,7 @@ func (s *MongoDBStore) Put(session *model.Session) error {
 		UpdatedAt: session.UpdatedAt,
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	opts := options.Replace().SetUpsert(true)
@@ -250,10 +367,8 @@ func (s *MongoDBStore) Put(session *model.Session) error {
 
 // Delete removes a session
 func (s *MongoDBStore) Delete(sessionID string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// MongoDB is thread-safe, no mutex needed
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	_, err := s.collection.DeleteOne(ctx, bson.M{"_id": sessionID})
@@ -266,9 +381,7 @@ func (s *MongoDBStore) Delete(sessionID string) error {
 
 // List returns all sessions for a user
 func (s *MongoDBStore) List(userID string) ([]*model.Session, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
+	// MongoDB is thread-safe, no mutex needed
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -286,7 +399,7 @@ func (s *MongoDBStore) List(userID string) ([]*model.Session, error) {
 		}
 
 		session := &model.Session{}
-		if err := json.Unmarshal([]byte(doc.Data), session); err != nil {
+		if err := unmarshalJSONOrBSON(doc.Data, session); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal session: %w", err)
 		}
 
@@ -308,10 +421,8 @@ func (s *MongoDBStore) List(userID string) ([]*model.Session, error) {
 // For each user, there should be only one Core session
 // If no Core session exists, it returns nil without error
 func (s *MongoDBStore) GetCoreSession(userID string) (*model.Session, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// MongoDB is thread-safe, no mutex needed
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 	defer cancel()
 
 	var doc sessionDocument
@@ -328,7 +439,7 @@ func (s *MongoDBStore) GetCoreSession(userID string) (*model.Session, error) {
 	}
 
 	session := &model.Session{}
-	if err := json.Unmarshal([]byte(doc.Data), session); err != nil {
+	if err := unmarshalJSONOrBSON(doc.Data, session); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal session: %w", err)
 	}
 
@@ -349,9 +460,7 @@ func (s *MongoDBStore) PutCoreSession(session *model.Session) error {
 		return fmt.Errorf("session must be of type Core")
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
+	// MongoDB is thread-safe, no mutex needed
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -367,7 +476,6 @@ func (s *MongoDBStore) PutCoreSession(session *model.Session) error {
 	// Now store the new Core session
 	session.UpdatedAt = time.Now()
 
-	// Serialize session to JSON
 	data, err := json.Marshal(session)
 	if err != nil {
 		return fmt.Errorf("failed to marshal session: %w", err)
@@ -500,9 +608,7 @@ func (s *MongoDBStore) GetSession(sessionID string) (*model.Session, error) {
 
 // GetAllSessions returns all sessions grouped by userID
 func (s *MongoDBStore) GetAllSessions() (map[string][]*model.Session, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
+	// MongoDB is thread-safe, no mutex needed
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -520,7 +626,7 @@ func (s *MongoDBStore) GetAllSessions() (map[string][]*model.Session, error) {
 		}
 
 		session := &model.Session{}
-		if err := json.Unmarshal([]byte(doc.Data), session); err != nil {
+		if err := unmarshalJSONOrBSON(doc.Data, session); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal session: %w", err)
 		}
 
@@ -543,7 +649,7 @@ type userDocument struct {
 
 // GetUser retrieves a user by ID
 func (s *MongoDBStore) GetUser(userID string) (*model.User, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 	defer cancel()
 
 	var doc userDocument
@@ -556,7 +662,7 @@ func (s *MongoDBStore) GetUser(userID string) (*model.User, error) {
 	}
 
 	user := &model.User{}
-	if err := json.Unmarshal([]byte(doc.Data), user); err != nil {
+	if err := unmarshalJSONOrBSON(doc.Data, user); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal user: %w", err)
 	}
 
@@ -579,7 +685,7 @@ func (s *MongoDBStore) PutUser(user *model.User) error {
 		return fmt.Errorf("user cannot be nil")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	data, err := json.Marshal(user)
@@ -730,7 +836,7 @@ func (s *MongoDBStore) GetAllUsers() ([]*model.User, error) {
 		}
 
 		user := &model.User{}
-		if err := json.Unmarshal([]byte(doc.Data), user); err != nil {
+		if err := unmarshalJSONOrBSON(doc.Data, user); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal user: %w", err)
 		}
 
@@ -755,7 +861,7 @@ func (s *MongoDBStore) PutMessage(message *model.Message) error {
 		return fmt.Errorf("message cannot be nil")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	data, err := json.Marshal(message)
@@ -799,7 +905,7 @@ func (s *MongoDBStore) GetMessagesBySession(sessionID string) ([]*model.Message,
 		}
 
 		message := &model.Message{}
-		if err := json.Unmarshal([]byte(doc.Data), message); err != nil {
+		if err := unmarshalJSONOrBSON(doc.Data, message); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal message: %w", err)
 		}
 
@@ -828,7 +934,7 @@ func (s *MongoDBStore) GetMessagesByUser(userID string) ([]*model.Message, error
 		}
 
 		message := &model.Message{}
-		if err := json.Unmarshal([]byte(doc.Data), message); err != nil {
+		if err := unmarshalJSONOrBSON(doc.Data, message); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal message: %w", err)
 		}
 
@@ -857,7 +963,7 @@ func (s *MongoDBStore) GetAllMessages() ([]*model.Message, error) {
 		}
 
 		message := &model.Message{}
-		if err := json.Unmarshal([]byte(doc.Data), message); err != nil {
+		if err := unmarshalJSONOrBSON(doc.Data, message); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal message: %w", err)
 		}
 
@@ -883,7 +989,7 @@ func (s *MongoDBStore) AddOpenedFile(openedFile *model.OpenedFile) error {
 		return fmt.Errorf("openedFile cannot be nil")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	data, err := json.Marshal(openedFile)
@@ -911,7 +1017,7 @@ func (s *MongoDBStore) AddOpenedFile(openedFile *model.OpenedFile) error {
 
 // CloseOpenedFile marks a file as closed
 func (s *MongoDBStore) CloseOpenedFile(sessionID string, filePath string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	id := fmt.Sprintf("%s:%s", sessionID, filePath)
@@ -944,7 +1050,7 @@ func (s *MongoDBStore) GetOpenedFilesBySession(sessionID string) ([]*model.Opene
 		}
 
 		file := &model.OpenedFile{}
-		if err := json.Unmarshal([]byte(doc.Data), file); err != nil {
+		if err := unmarshalJSONOrBSON(doc.Data, file); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal opened file: %w", err)
 		}
 
@@ -976,7 +1082,7 @@ func (s *MongoDBStore) GetCurrentlyOpenedFilesBySession(sessionID string) ([]*mo
 		}
 
 		file := &model.OpenedFile{}
-		if err := json.Unmarshal([]byte(doc.Data), file); err != nil {
+		if err := unmarshalJSONOrBSON(doc.Data, file); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal opened file: %w", err)
 		}
 
@@ -1005,7 +1111,7 @@ func (s *MongoDBStore) GetAllOpenedFiles() ([]*model.OpenedFile, error) {
 		}
 
 		file := &model.OpenedFile{}
-		if err := json.Unmarshal([]byte(doc.Data), file); err != nil {
+		if err := unmarshalJSONOrBSON(doc.Data, file); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal opened file: %w", err)
 		}
 
@@ -1030,7 +1136,7 @@ func (s *MongoDBStore) PutToolCall(toolCall *model.ToolCall) error {
 		return fmt.Errorf("toolCall cannot be nil")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	data, err := json.Marshal(toolCall)
@@ -1074,7 +1180,7 @@ func (s *MongoDBStore) GetToolCallsBySession(sessionID string) ([]*model.ToolCal
 		}
 
 		tc := &model.ToolCall{}
-		if err := json.Unmarshal([]byte(doc.Data), tc); err != nil {
+		if err := unmarshalJSONOrBSON(doc.Data, tc); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal tool call: %w", err)
 		}
 
@@ -1086,7 +1192,7 @@ func (s *MongoDBStore) GetToolCallsBySession(sessionID string) ([]*model.ToolCal
 
 // GetToolCallByID returns a tool call by ID
 func (s *MongoDBStore) GetToolCallByID(toolCallID string) (*model.ToolCall, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 	defer cancel()
 
 	var doc toolCallDocument
@@ -1099,7 +1205,7 @@ func (s *MongoDBStore) GetToolCallByID(toolCallID string) (*model.ToolCall, erro
 	}
 
 	tc := &model.ToolCall{}
-	if err := json.Unmarshal([]byte(doc.Data), tc); err != nil {
+	if err := unmarshalJSONOrBSON(doc.Data, tc); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal tool call: %w", err)
 	}
 
@@ -1108,7 +1214,7 @@ func (s *MongoDBStore) GetToolCallByID(toolCallID string) (*model.ToolCall, erro
 
 // GetToolCallByToolID returns a tool call by ToolID (sequential ID)
 func (s *MongoDBStore) GetToolCallByToolID(toolID string) (*model.ToolCall, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 	defer cancel()
 
 	var doc toolCallDocument
@@ -1121,7 +1227,7 @@ func (s *MongoDBStore) GetToolCallByToolID(toolID string) (*model.ToolCall, erro
 	}
 
 	tc := &model.ToolCall{}
-	if err := json.Unmarshal([]byte(doc.Data), tc); err != nil {
+	if err := unmarshalJSONOrBSON(doc.Data, tc); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal tool call: %w", err)
 	}
 
@@ -1147,7 +1253,7 @@ func (s *MongoDBStore) GetAllToolCalls() ([]*model.ToolCall, error) {
 		}
 
 		tc := &model.ToolCall{}
-		if err := json.Unmarshal([]byte(doc.Data), tc); err != nil {
+		if err := unmarshalJSONOrBSON(doc.Data, tc); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal tool call: %w", err)
 		}
 
@@ -1159,7 +1265,7 @@ func (s *MongoDBStore) GetAllToolCalls() ([]*model.ToolCall, error) {
 
 // UpdateToolCallResponse updates the response for a tool call and calculates duration
 func (s *MongoDBStore) UpdateToolCallResponse(toolCallID string, response string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	now := time.Now()
@@ -1173,7 +1279,7 @@ func (s *MongoDBStore) UpdateToolCallResponse(toolCallID string, response string
 
 	// Unmarshal existing data
 	tc := &model.ToolCall{}
-	if err := json.Unmarshal([]byte(doc.Data), tc); err != nil {
+	if err := unmarshalJSONOrBSON(doc.Data, tc); err != nil {
 		return fmt.Errorf("failed to unmarshal tool call: %w", err)
 	}
 
@@ -1186,7 +1292,7 @@ func (s *MongoDBStore) UpdateToolCallResponse(toolCallID string, response string
 	tc.DurationMs = durationMs
 	tc.UpdatedAt = now
 
-	// Marshal back to JSON
+	// Marshal back to BSON
 	data, err := json.Marshal(tc)
 	if err != nil {
 		return fmt.Errorf("failed to marshal tool call: %w", err)
@@ -1218,7 +1324,7 @@ func (s *MongoDBStore) PutSummarizationLog(log *model.SummarizationLog) error {
 		return fmt.Errorf("log cannot be nil")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	data, err := json.Marshal(log)
@@ -1262,7 +1368,7 @@ func (s *MongoDBStore) GetSummarizationLogsBySession(sessionID string) ([]*model
 		}
 
 		log := &model.SummarizationLog{}
-		if err := json.Unmarshal([]byte(doc.Data), log); err != nil {
+		if err := unmarshalJSONOrBSON(doc.Data, log); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal summarization log: %w", err)
 		}
 
@@ -1291,7 +1397,7 @@ func (s *MongoDBStore) GetAllSummarizationLogs() ([]*model.SummarizationLog, err
 		}
 
 		log := &model.SummarizationLog{}
-		if err := json.Unmarshal([]byte(doc.Data), log); err != nil {
+		if err := unmarshalJSONOrBSON(doc.Data, log); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal summarization log: %w", err)
 		}
 

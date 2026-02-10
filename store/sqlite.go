@@ -201,6 +201,9 @@ func (s *SQLiteStore) initSchema() error {
 	// Migration: Add agent_type and content_type columns to messages table
 	_ = s.migrateAddMessageTypeColumns()
 
+	// Migration: Add seq_id column to messages table if it doesn't exist (for existing databases)
+	_ = s.migrateAddSeqIDColumn()
+
 	return nil
 }
 
@@ -224,6 +227,15 @@ func (s *SQLiteStore) migrateAddMessageTypeColumns() error {
 	// Add tool_id to tool_calls table (for sequential tool IDs)
 	_, _ = s.db.Exec(`ALTER TABLE tool_calls ADD COLUMN tool_id TEXT DEFAULT ''`)
 	// Ignore errors if columns already exist
+	return nil
+}
+
+// migrateAddSeqIDColumn adds seq_id column to messages table if it doesn't exist
+// This is needed for backward compatibility with older databases
+// SQLite doesn't support IF NOT EXISTS for ALTER TABLE ADD COLUMN, so we ignore errors
+func (s *SQLiteStore) migrateAddSeqIDColumn() error {
+	_, _ = s.db.Exec(`ALTER TABLE messages ADD COLUMN seq_id INTEGER DEFAULT 0`)
+	// Ignore error if column already exists
 	return nil
 }
 
