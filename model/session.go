@@ -72,6 +72,9 @@ type Session struct {
 
 	// MessageSeq is the sequence counter for messages in this session
 	MessageSeq int
+
+	// ToolSeq is the sequence counter for tool calls in this session
+	ToolSeq int
 }
 
 // NodeDigest is a lightweight representation of a node (for memory efficiency)
@@ -104,6 +107,7 @@ func NewSession(userID string) *Session {
 		AgentType:          "",
 		Model:              "",
 		MessageSeq:         0,
+		ToolSeq:            0,
 	}
 }
 
@@ -146,6 +150,7 @@ func NewSessionForUser(user *User, agentType AgentType) *Session {
 		AgentType:          agentType,
 		Model:              "",
 		MessageSeq:         0,
+		ToolSeq:            0,
 	}
 }
 
@@ -207,6 +212,37 @@ func (s *Session) NextMessageSeq() int {
 func (s *Session) GenerateMessageID() string {
 	seq := s.NextMessageSeq()
 	return fmt.Sprintf("%s-m%04d", s.SessionID, seq)
+}
+
+// GenerateMessageIDWithSeq generates a unique message ID and returns both the ID and sequence number
+// Format: {SessionID}-m{SeqID}
+// Returns: (messageID, seqID)
+func (s *Session) GenerateMessageIDWithSeq() (string, int) {
+	seq := s.NextMessageSeq()
+	messageID := fmt.Sprintf("%s-m%04d", s.SessionID, seq)
+	return messageID, seq
+}
+
+// NextToolSeq increments and returns the next tool sequence number
+func (s *Session) NextToolSeq() int {
+	s.ToolSeq++
+	return s.ToolSeq
+}
+
+// GenerateToolID generates a unique tool ID for this session
+// Format: {SessionID}-t{SeqID}
+func (s *Session) GenerateToolID() string {
+	seq := s.NextToolSeq()
+	return fmt.Sprintf("%s-t%04d", s.SessionID, seq)
+}
+
+// GenerateToolIDWithSeq generates a unique tool ID and returns both the ID and sequence number
+// Format: {SessionID}-t{SeqID}
+// Returns: (toolID, seqID)
+func (s *Session) GenerateToolIDWithSeq() (string, int) {
+	seq := s.NextToolSeq()
+	toolID := fmt.Sprintf("%s-t%04d", s.SessionID, seq)
+	return toolID, seq
 }
 
 // LLMClientWithUserID wraps LLMClient to add user_id header to all requests
@@ -375,6 +411,7 @@ Example: "Debugged Kubernetes pod restart issue. Found memory limits too low. Ap
 	return strings.TrimSpace(resp.Choices[0].Message.Content), nil
 }
 
+// TODO Refactor This Function to move better place in llmutils
 // generateTags generates tags for the session
 func (s *Session) generateTags(ctx context.Context, client LLMClient, model string, conversationText string) ([]string, error) {
 	systemPrompt := `You are a conversation tagger.

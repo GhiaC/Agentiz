@@ -13,13 +13,20 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
-// MongoDBStore is a MongoDB implementation of SessionStore
-// It stores sessions in a MongoDB collection with JSON serialization
+// MongoDBStore is a MongoDB implementation of SessionStore and DebugStore
+// It stores sessions, users, messages, tool calls, etc. in MongoDB collections with JSON serialization
 type MongoDBStore struct {
 	client     *mongo.Client
 	database   *mongo.Database
-	collection *mongo.Collection
+	collection *mongo.Collection // sessions collection
 	mu         sync.RWMutex
+
+	// Additional collections for DebugStore
+	usersCollection             *mongo.Collection
+	messagesCollection          *mongo.Collection
+	toolCallsCollection         *mongo.Collection
+	openedFilesCollection       *mongo.Collection
+	summarizationLogsCollection *mongo.Collection
 
 	// UserNodes tracks visited nodes for each user (user-level, not session-level)
 	userNodes sync.Map
@@ -73,10 +80,15 @@ func NewMongoDBStore(config MongoDBStoreConfig) (*MongoDBStore, error) {
 	collection := database.Collection(config.Collection)
 
 	store := &MongoDBStore{
-		client:     client,
-		database:   database,
-		collection: collection,
-		userLock:   make(map[string]*sync.Mutex),
+		client:                      client,
+		database:                    database,
+		collection:                  collection,
+		usersCollection:             database.Collection("users"),
+		messagesCollection:          database.Collection("messages"),
+		toolCallsCollection:         database.Collection("tool_calls"),
+		openedFilesCollection:       database.Collection("opened_files"),
+		summarizationLogsCollection: database.Collection("summarization_logs"),
+		userLock:                    make(map[string]*sync.Mutex),
 	}
 
 	// Create indexes
@@ -475,6 +487,818 @@ func NewMongoDBStoreFromURI(uri string) (model.SessionStore, error) {
 	config := DefaultMongoDBStoreConfig()
 	config.URI = uri
 	return NewMongoDBStore(config)
+}
+
+// ============================================================================
+// DebugStore Interface Implementation
+// ============================================================================
+
+// GetSession is an alias for Get to match DebugStore interface
+func (s *MongoDBStore) GetSession(sessionID string) (*model.Session, error) {
+	return s.Get(sessionID)
+}
+
+// GetAllSessions returns all sessions grouped by userID
+func (s *MongoDBStore) GetAllSessions() (map[string][]*model.Session, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cursor, err := s.collection.Find(ctx, bson.M{}, options.Find().SetSort(bson.D{{Key: "updated_at", Value: -1}}))
+	if err != nil {
+		return nil, fmt.Errorf("failed to query sessions: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	result := make(map[string][]*model.Session)
+	for cursor.Next(ctx) {
+		var doc sessionDocument
+		if err := cursor.Decode(&doc); err != nil {
+			return nil, fmt.Errorf("failed to decode session: %w", err)
+		}
+
+		session := &model.Session{}
+		if err := json.Unmarshal([]byte(doc.Data), session); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal session: %w", err)
+		}
+
+		session.CreatedAt = doc.CreatedAt
+		session.UpdatedAt = doc.UpdatedAt
+
+		result[doc.UserID] = append(result[doc.UserID], session)
+	}
+
+	return result, cursor.Err()
+}
+
+// userDocument represents a user document in MongoDB
+type userDocument struct {
+	UserID    string    `bson:"_id"`
+	Data      string    `bson:"data"` // JSON serialized User
+	CreatedAt time.Time `bson:"created_at"`
+	UpdatedAt time.Time `bson:"updated_at"`
+}
+
+// GetUser retrieves a user by ID
+func (s *MongoDBStore) GetUser(userID string) (*model.User, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var doc userDocument
+	err := s.usersCollection.FindOne(ctx, bson.M{"_id": userID}).Decode(&doc)
+	if err == mongo.ErrNoDocuments {
+		return nil, nil // User not found
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to query user: %w", err)
+	}
+
+	user := &model.User{}
+	if err := json.Unmarshal([]byte(doc.Data), user); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal user: %w", err)
+	}
+
+	// Initialize ActiveSessionIDs if nil (backward compatibility for old users)
+	if user.ActiveSessionIDs == nil {
+		user.ActiveSessionIDs = make(map[model.AgentType]string)
+	}
+
+	// Initialize SessionSeqs if nil (backward compatibility for old users)
+	if user.SessionSeqs == nil {
+		user.SessionSeqs = make(map[model.AgentType]int)
+	}
+
+	return user, nil
+}
+
+// PutUser stores or updates a user
+func (s *MongoDBStore) PutUser(user *model.User) error {
+	if user == nil {
+		return fmt.Errorf("user cannot be nil")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	data, err := json.Marshal(user)
+	if err != nil {
+		return fmt.Errorf("failed to marshal user: %w", err)
+	}
+
+	doc := userDocument{
+		UserID:    user.UserID,
+		Data:      string(data),
+		CreatedAt: user.CreatedAt,
+		UpdatedAt: time.Now(),
+	}
+
+	opts := options.Replace().SetUpsert(true)
+	_, err = s.usersCollection.ReplaceOne(ctx, bson.M{"_id": user.UserID}, doc, opts)
+	if err != nil {
+		return fmt.Errorf("failed to store user: %w", err)
+	}
+
+	return nil
+}
+
+// GetOrCreateUser gets an existing user or creates a new one
+func (s *MongoDBStore) GetOrCreateUser(userID string) (*model.User, error) {
+	user, err := s.GetUser(userID)
+	if err != nil {
+		return nil, err
+	}
+	if user != nil {
+		needsSave := false
+
+		// Compute SessionSeqs from existing sessions if empty (backward compatibility)
+		if len(user.SessionSeqs) == 0 {
+			if err := s.computeSessionSeqs(user); err == nil && len(user.SessionSeqs) > 0 {
+				needsSave = true
+			}
+		}
+
+		// Compute ActiveSessionIDs from existing sessions if empty (backward compatibility)
+		if len(user.ActiveSessionIDs) == 0 {
+			if err := s.computeActiveSessionIDs(user); err == nil && len(user.ActiveSessionIDs) > 0 {
+				needsSave = true
+			}
+		}
+
+		// Save user if any backward compatibility computation was done
+		if needsSave {
+			_ = s.PutUser(user) // Best effort save
+		}
+
+		return user, nil
+	}
+
+	// Create new user
+	user = model.NewUser(userID)
+	if err := s.PutUser(user); err != nil {
+		return nil, err
+	}
+	return user, nil
+}
+
+// computeSessionSeqs computes SessionSeqs from existing sessions for backward compatibility
+// This is called when a user has no SessionSeqs (old user migrating to new format)
+func (s *MongoDBStore) computeSessionSeqs(user *model.User) error {
+	if user == nil {
+		return nil
+	}
+
+	// Get all sessions for this user
+	sessions, err := s.List(user.UserID)
+	if err != nil {
+		return err
+	}
+
+	// Count sessions by agent type
+	seqCounts := make(map[model.AgentType]int)
+	for _, session := range sessions {
+		if session.AgentType != "" {
+			seqCounts[session.AgentType]++
+		}
+	}
+
+	// Update user's SessionSeqs
+	if user.SessionSeqs == nil {
+		user.SessionSeqs = make(map[model.AgentType]int)
+	}
+	for agentType, count := range seqCounts {
+		user.SessionSeqs[agentType] = count
+	}
+
+	return nil
+}
+
+// computeActiveSessionIDs computes ActiveSessionIDs from existing sessions for backward compatibility
+// This is called when a user has no ActiveSessionIDs (old user migrating to new format)
+// For each agent type, it selects the most recently updated session as the active session
+func (s *MongoDBStore) computeActiveSessionIDs(user *model.User) error {
+	if user == nil {
+		return nil
+	}
+
+	// Get all sessions for this user
+	sessions, err := s.List(user.UserID)
+	if err != nil {
+		return err
+	}
+
+	// Find the most recent session for each agent type
+	latestByType := make(map[model.AgentType]*model.Session)
+	for _, session := range sessions {
+		if session.AgentType == "" {
+			continue
+		}
+		existing := latestByType[session.AgentType]
+		if existing == nil || session.UpdatedAt.After(existing.UpdatedAt) {
+			latestByType[session.AgentType] = session
+		}
+	}
+
+	// Update user's ActiveSessionIDs
+	if user.ActiveSessionIDs == nil {
+		user.ActiveSessionIDs = make(map[model.AgentType]string)
+	}
+	for agentType, session := range latestByType {
+		user.ActiveSessionIDs[agentType] = session.SessionID
+	}
+
+	return nil
+}
+
+// GetAllUsers returns all users
+func (s *MongoDBStore) GetAllUsers() ([]*model.User, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cursor, err := s.usersCollection.Find(ctx, bson.M{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to query users: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	var users []*model.User
+	for cursor.Next(ctx) {
+		var doc userDocument
+		if err := cursor.Decode(&doc); err != nil {
+			return nil, fmt.Errorf("failed to decode user: %w", err)
+		}
+
+		user := &model.User{}
+		if err := json.Unmarshal([]byte(doc.Data), user); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal user: %w", err)
+		}
+
+		users = append(users, user)
+	}
+
+	return users, cursor.Err()
+}
+
+// messageDocument represents a message document in MongoDB
+type messageDocument struct {
+	MessageID string    `bson:"_id"`
+	SessionID string    `bson:"session_id"`
+	UserID    string    `bson:"user_id"`
+	Data      string    `bson:"data"` // JSON serialized Message
+	CreatedAt time.Time `bson:"created_at"`
+}
+
+// PutMessage stores a message
+func (s *MongoDBStore) PutMessage(message *model.Message) error {
+	if message == nil {
+		return fmt.Errorf("message cannot be nil")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	data, err := json.Marshal(message)
+	if err != nil {
+		return fmt.Errorf("failed to marshal message: %w", err)
+	}
+
+	doc := messageDocument{
+		MessageID: message.MessageID,
+		SessionID: message.SessionID,
+		UserID:    message.UserID,
+		Data:      string(data),
+		CreatedAt: message.CreatedAt,
+	}
+
+	opts := options.Replace().SetUpsert(true)
+	_, err = s.messagesCollection.ReplaceOne(ctx, bson.M{"_id": message.MessageID}, doc, opts)
+	if err != nil {
+		return fmt.Errorf("failed to store message: %w", err)
+	}
+
+	return nil
+}
+
+// GetMessagesBySession returns all messages for a session
+func (s *MongoDBStore) GetMessagesBySession(sessionID string) ([]*model.Message, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cursor, err := s.messagesCollection.Find(ctx, bson.M{"session_id": sessionID}, options.Find().SetSort(bson.D{{Key: "created_at", Value: -1}}))
+	if err != nil {
+		return nil, fmt.Errorf("failed to query messages: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	var messages []*model.Message
+	for cursor.Next(ctx) {
+		var doc messageDocument
+		if err := cursor.Decode(&doc); err != nil {
+			return nil, fmt.Errorf("failed to decode message: %w", err)
+		}
+
+		message := &model.Message{}
+		if err := json.Unmarshal([]byte(doc.Data), message); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal message: %w", err)
+		}
+
+		messages = append(messages, message)
+	}
+
+	return messages, cursor.Err()
+}
+
+// GetMessagesByUser returns all messages for a user
+func (s *MongoDBStore) GetMessagesByUser(userID string) ([]*model.Message, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cursor, err := s.messagesCollection.Find(ctx, bson.M{"user_id": userID}, options.Find().SetSort(bson.D{{Key: "created_at", Value: -1}}))
+	if err != nil {
+		return nil, fmt.Errorf("failed to query messages: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	var messages []*model.Message
+	for cursor.Next(ctx) {
+		var doc messageDocument
+		if err := cursor.Decode(&doc); err != nil {
+			return nil, fmt.Errorf("failed to decode message: %w", err)
+		}
+
+		message := &model.Message{}
+		if err := json.Unmarshal([]byte(doc.Data), message); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal message: %w", err)
+		}
+
+		messages = append(messages, message)
+	}
+
+	return messages, cursor.Err()
+}
+
+// GetAllMessages returns all messages
+func (s *MongoDBStore) GetAllMessages() ([]*model.Message, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cursor, err := s.messagesCollection.Find(ctx, bson.M{}, options.Find().SetSort(bson.D{{Key: "created_at", Value: -1}}))
+	if err != nil {
+		return nil, fmt.Errorf("failed to query messages: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	var messages []*model.Message
+	for cursor.Next(ctx) {
+		var doc messageDocument
+		if err := cursor.Decode(&doc); err != nil {
+			return nil, fmt.Errorf("failed to decode message: %w", err)
+		}
+
+		message := &model.Message{}
+		if err := json.Unmarshal([]byte(doc.Data), message); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal message: %w", err)
+		}
+
+		messages = append(messages, message)
+	}
+
+	return messages, cursor.Err()
+}
+
+// openedFileDocument represents an opened file document in MongoDB
+type openedFileDocument struct {
+	ID        string    `bson:"_id"`
+	SessionID string    `bson:"session_id"`
+	FilePath  string    `bson:"file_path"`
+	Data      string    `bson:"data"` // JSON serialized OpenedFile
+	OpenedAt  time.Time `bson:"opened_at"`
+	ClosedAt  time.Time `bson:"closed_at,omitempty"`
+}
+
+// AddOpenedFile records that a file was opened
+func (s *MongoDBStore) AddOpenedFile(openedFile *model.OpenedFile) error {
+	if openedFile == nil {
+		return fmt.Errorf("openedFile cannot be nil")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	data, err := json.Marshal(openedFile)
+	if err != nil {
+		return fmt.Errorf("failed to marshal opened file: %w", err)
+	}
+
+	id := fmt.Sprintf("%s:%s", openedFile.SessionID, openedFile.FilePath)
+	doc := openedFileDocument{
+		ID:        id,
+		SessionID: openedFile.SessionID,
+		FilePath:  openedFile.FilePath,
+		Data:      string(data),
+		OpenedAt:  openedFile.OpenedAt,
+	}
+
+	opts := options.Replace().SetUpsert(true)
+	_, err = s.openedFilesCollection.ReplaceOne(ctx, bson.M{"_id": id}, doc, opts)
+	if err != nil {
+		return fmt.Errorf("failed to store opened file: %w", err)
+	}
+
+	return nil
+}
+
+// CloseOpenedFile marks a file as closed
+func (s *MongoDBStore) CloseOpenedFile(sessionID string, filePath string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	id := fmt.Sprintf("%s:%s", sessionID, filePath)
+	_, err := s.openedFilesCollection.UpdateOne(ctx, bson.M{"_id": id}, bson.M{
+		"$set": bson.M{"closed_at": time.Now()},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to close opened file: %w", err)
+	}
+
+	return nil
+}
+
+// GetOpenedFilesBySession returns all opened files for a session
+func (s *MongoDBStore) GetOpenedFilesBySession(sessionID string) ([]*model.OpenedFile, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cursor, err := s.openedFilesCollection.Find(ctx, bson.M{"session_id": sessionID})
+	if err != nil {
+		return nil, fmt.Errorf("failed to query opened files: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	var files []*model.OpenedFile
+	for cursor.Next(ctx) {
+		var doc openedFileDocument
+		if err := cursor.Decode(&doc); err != nil {
+			return nil, fmt.Errorf("failed to decode opened file: %w", err)
+		}
+
+		file := &model.OpenedFile{}
+		if err := json.Unmarshal([]byte(doc.Data), file); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal opened file: %w", err)
+		}
+
+		files = append(files, file)
+	}
+
+	return files, cursor.Err()
+}
+
+// GetCurrentlyOpenedFilesBySession returns only currently open files
+func (s *MongoDBStore) GetCurrentlyOpenedFilesBySession(sessionID string) ([]*model.OpenedFile, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cursor, err := s.openedFilesCollection.Find(ctx, bson.M{
+		"session_id": sessionID,
+		"closed_at":  bson.M{"$exists": false},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to query opened files: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	var files []*model.OpenedFile
+	for cursor.Next(ctx) {
+		var doc openedFileDocument
+		if err := cursor.Decode(&doc); err != nil {
+			return nil, fmt.Errorf("failed to decode opened file: %w", err)
+		}
+
+		file := &model.OpenedFile{}
+		if err := json.Unmarshal([]byte(doc.Data), file); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal opened file: %w", err)
+		}
+
+		files = append(files, file)
+	}
+
+	return files, cursor.Err()
+}
+
+// GetAllOpenedFiles returns all opened files
+func (s *MongoDBStore) GetAllOpenedFiles() ([]*model.OpenedFile, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cursor, err := s.openedFilesCollection.Find(ctx, bson.M{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to query opened files: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	var files []*model.OpenedFile
+	for cursor.Next(ctx) {
+		var doc openedFileDocument
+		if err := cursor.Decode(&doc); err != nil {
+			return nil, fmt.Errorf("failed to decode opened file: %w", err)
+		}
+
+		file := &model.OpenedFile{}
+		if err := json.Unmarshal([]byte(doc.Data), file); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal opened file: %w", err)
+		}
+
+		files = append(files, file)
+	}
+
+	return files, cursor.Err()
+}
+
+// toolCallDocument represents a tool call document in MongoDB
+type toolCallDocument struct {
+	ToolCallID string    `bson:"_id"`
+	ToolID     string    `bson:"tool_id"` // Sequential tool ID
+	SessionID  string    `bson:"session_id"`
+	Data       string    `bson:"data"` // JSON serialized ToolCall
+	CreatedAt  time.Time `bson:"created_at"`
+}
+
+// PutToolCall stores a tool call
+func (s *MongoDBStore) PutToolCall(toolCall *model.ToolCall) error {
+	if toolCall == nil {
+		return fmt.Errorf("toolCall cannot be nil")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	data, err := json.Marshal(toolCall)
+	if err != nil {
+		return fmt.Errorf("failed to marshal tool call: %w", err)
+	}
+
+	doc := toolCallDocument{
+		ToolCallID: toolCall.ToolCallID,
+		ToolID:     toolCall.ToolID,
+		SessionID:  toolCall.SessionID,
+		Data:       string(data),
+		CreatedAt:  toolCall.CreatedAt,
+	}
+
+	opts := options.Replace().SetUpsert(true)
+	_, err = s.toolCallsCollection.ReplaceOne(ctx, bson.M{"_id": toolCall.ToolCallID}, doc, opts)
+	if err != nil {
+		return fmt.Errorf("failed to store tool call: %w", err)
+	}
+
+	return nil
+}
+
+// GetToolCallsBySession returns all tool calls for a session
+func (s *MongoDBStore) GetToolCallsBySession(sessionID string) ([]*model.ToolCall, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cursor, err := s.toolCallsCollection.Find(ctx, bson.M{"session_id": sessionID}, options.Find().SetSort(bson.D{{Key: "created_at", Value: 1}}))
+	if err != nil {
+		return nil, fmt.Errorf("failed to query tool calls: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	var toolCalls []*model.ToolCall
+	for cursor.Next(ctx) {
+		var doc toolCallDocument
+		if err := cursor.Decode(&doc); err != nil {
+			return nil, fmt.Errorf("failed to decode tool call: %w", err)
+		}
+
+		tc := &model.ToolCall{}
+		if err := json.Unmarshal([]byte(doc.Data), tc); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal tool call: %w", err)
+		}
+
+		toolCalls = append(toolCalls, tc)
+	}
+
+	return toolCalls, cursor.Err()
+}
+
+// GetToolCallByID returns a tool call by ID
+func (s *MongoDBStore) GetToolCallByID(toolCallID string) (*model.ToolCall, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var doc toolCallDocument
+	err := s.toolCallsCollection.FindOne(ctx, bson.M{"_id": toolCallID}).Decode(&doc)
+	if err == mongo.ErrNoDocuments {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to query tool call: %w", err)
+	}
+
+	tc := &model.ToolCall{}
+	if err := json.Unmarshal([]byte(doc.Data), tc); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal tool call: %w", err)
+	}
+
+	return tc, nil
+}
+
+// GetToolCallByToolID returns a tool call by ToolID (sequential ID)
+func (s *MongoDBStore) GetToolCallByToolID(toolID string) (*model.ToolCall, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var doc toolCallDocument
+	err := s.toolCallsCollection.FindOne(ctx, bson.M{"tool_id": toolID}).Decode(&doc)
+	if err == mongo.ErrNoDocuments {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to query tool call by tool ID: %w", err)
+	}
+
+	tc := &model.ToolCall{}
+	if err := json.Unmarshal([]byte(doc.Data), tc); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal tool call: %w", err)
+	}
+
+	return tc, nil
+}
+
+// GetAllToolCalls returns all tool calls
+func (s *MongoDBStore) GetAllToolCalls() ([]*model.ToolCall, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cursor, err := s.toolCallsCollection.Find(ctx, bson.M{}, options.Find().SetSort(bson.D{{Key: "created_at", Value: -1}}))
+	if err != nil {
+		return nil, fmt.Errorf("failed to query tool calls: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	var toolCalls []*model.ToolCall
+	for cursor.Next(ctx) {
+		var doc toolCallDocument
+		if err := cursor.Decode(&doc); err != nil {
+			return nil, fmt.Errorf("failed to decode tool call: %w", err)
+		}
+
+		tc := &model.ToolCall{}
+		if err := json.Unmarshal([]byte(doc.Data), tc); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal tool call: %w", err)
+		}
+
+		toolCalls = append(toolCalls, tc)
+	}
+
+	return toolCalls, cursor.Err()
+}
+
+// UpdateToolCallResponse updates the response for a tool call and calculates duration
+func (s *MongoDBStore) UpdateToolCallResponse(toolCallID string, response string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	now := time.Now()
+
+	// First, get the existing tool call to calculate duration
+	var doc toolCallDocument
+	err := s.toolCallsCollection.FindOne(ctx, bson.M{"_id": toolCallID}).Decode(&doc)
+	if err != nil {
+		return fmt.Errorf("failed to find tool call: %w", err)
+	}
+
+	// Unmarshal existing data
+	tc := &model.ToolCall{}
+	if err := json.Unmarshal([]byte(doc.Data), tc); err != nil {
+		return fmt.Errorf("failed to unmarshal tool call: %w", err)
+	}
+
+	// Calculate duration
+	durationMs := now.Sub(tc.CreatedAt).Milliseconds()
+
+	// Update the tool call fields
+	tc.Response = response
+	tc.ResponseLength = len([]rune(response)) // Character count
+	tc.DurationMs = durationMs
+	tc.UpdatedAt = now
+
+	// Marshal back to JSON
+	data, err := json.Marshal(tc)
+	if err != nil {
+		return fmt.Errorf("failed to marshal tool call: %w", err)
+	}
+
+	// Update document
+	doc.Data = string(data)
+
+	opts := options.Replace().SetUpsert(false)
+	_, err = s.toolCallsCollection.ReplaceOne(ctx, bson.M{"_id": toolCallID}, doc, opts)
+	if err != nil {
+		return fmt.Errorf("failed to update tool call response: %w", err)
+	}
+
+	return nil
+}
+
+// summarizationLogDocument represents a summarization log document in MongoDB
+type summarizationLogDocument struct {
+	ID        string    `bson:"_id"`
+	SessionID string    `bson:"session_id"`
+	Data      string    `bson:"data"` // JSON serialized SummarizationLog
+	CreatedAt time.Time `bson:"created_at"`
+}
+
+// PutSummarizationLog stores a summarization log
+func (s *MongoDBStore) PutSummarizationLog(log *model.SummarizationLog) error {
+	if log == nil {
+		return fmt.Errorf("log cannot be nil")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	data, err := json.Marshal(log)
+	if err != nil {
+		return fmt.Errorf("failed to marshal summarization log: %w", err)
+	}
+
+	id := fmt.Sprintf("%s:%d", log.SessionID, log.CreatedAt.UnixNano())
+	doc := summarizationLogDocument{
+		ID:        id,
+		SessionID: log.SessionID,
+		Data:      string(data),
+		CreatedAt: log.CreatedAt,
+	}
+
+	opts := options.Replace().SetUpsert(true)
+	_, err = s.summarizationLogsCollection.ReplaceOne(ctx, bson.M{"_id": id}, doc, opts)
+	if err != nil {
+		return fmt.Errorf("failed to store summarization log: %w", err)
+	}
+
+	return nil
+}
+
+// GetSummarizationLogsBySession returns all summarization logs for a session
+func (s *MongoDBStore) GetSummarizationLogsBySession(sessionID string) ([]*model.SummarizationLog, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cursor, err := s.summarizationLogsCollection.Find(ctx, bson.M{"session_id": sessionID}, options.Find().SetSort(bson.D{{Key: "created_at", Value: 1}}))
+	if err != nil {
+		return nil, fmt.Errorf("failed to query summarization logs: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	var logs []*model.SummarizationLog
+	for cursor.Next(ctx) {
+		var doc summarizationLogDocument
+		if err := cursor.Decode(&doc); err != nil {
+			return nil, fmt.Errorf("failed to decode summarization log: %w", err)
+		}
+
+		log := &model.SummarizationLog{}
+		if err := json.Unmarshal([]byte(doc.Data), log); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal summarization log: %w", err)
+		}
+
+		logs = append(logs, log)
+	}
+
+	return logs, cursor.Err()
+}
+
+// GetAllSummarizationLogs returns all summarization logs
+func (s *MongoDBStore) GetAllSummarizationLogs() ([]*model.SummarizationLog, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cursor, err := s.summarizationLogsCollection.Find(ctx, bson.M{}, options.Find().SetSort(bson.D{{Key: "created_at", Value: -1}}))
+	if err != nil {
+		return nil, fmt.Errorf("failed to query summarization logs: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	var logs []*model.SummarizationLog
+	for cursor.Next(ctx) {
+		var doc summarizationLogDocument
+		if err := cursor.Decode(&doc); err != nil {
+			return nil, fmt.Errorf("failed to decode summarization log: %w", err)
+		}
+
+		log := &model.SummarizationLog{}
+		if err := json.Unmarshal([]byte(doc.Data), log); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal summarization log: %w", err)
+		}
+
+		logs = append(logs, log)
+	}
+
+	return logs, cursor.Err()
 }
 
 // Ensure MongoDBStore implements model.SessionStore

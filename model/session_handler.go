@@ -143,6 +143,7 @@ func (sh *SessionHandler) CreateSession(userID string, agentType AgentType) (*Se
 // CreateSessionForUser creates a new session for a user with proper sequential ID
 // Format: {UserID}-{AgentType}-s{SeqCounter}
 // The user's SessionSeq counter is incremented and must be saved by the caller
+// NOTE: This also sets the new session as the ActiveSession for the given AgentType
 func (sh *SessionHandler) CreateSessionForUser(user *User, agentType AgentType) (*Session, error) {
 	if user == nil {
 		return nil, fmt.Errorf("user cannot be nil")
@@ -158,6 +159,20 @@ func (sh *SessionHandler) CreateSessionForUser(user *User, agentType AgentType) 
 	sh.mu.Lock()
 	sh.userIndex[user.UserID] = append(sh.userIndex[user.UserID], session.SessionID)
 	sh.mu.Unlock()
+
+	// Set as active session for this agent type and persist to database
+	user.SetActiveSessionID(agentType, session.SessionID)
+	if userStore, ok := sh.store.(interface {
+		PutUser(*User) error
+	}); ok {
+		if err := userStore.PutUser(user); err != nil {
+			if !sh.config.DisableLogs {
+				log.Log.Warnf("[SessionHandler] ⚠️  Failed to save user with active session | UserID: %s | Error: %v", user.UserID, err)
+			}
+		} else if !sh.config.DisableLogs {
+			log.Log.Infof("[SessionHandler] 📌 Set active session | UserID: %s | AgentType: %s | SessionID: %s", user.UserID, agentType, session.SessionID)
+		}
+	}
 
 	if !sh.config.DisableLogs {
 		log.Log.Infof("[SessionHandler] ✅ Created new session | UserID: %s | SessionID: %s | AgentType: %s", user.UserID, session.SessionID, agentType)
@@ -283,7 +298,8 @@ func (sh *SessionHandler) DeleteSession(sessionID string) error {
 
 	// Clean up active session reference in user if this session was active
 	// This prevents stale references when a session is deleted
-	if session.AgentType == AgentTypeHigh || session.AgentType == AgentTypeLow {
+	// Note: We check all agent types (Core, High, Low) to ensure no stale references
+	if session.AgentType == AgentTypeCore || session.AgentType == AgentTypeHigh || session.AgentType == AgentTypeLow {
 		if userStore, ok := sh.store.(interface {
 			GetOrCreateUser(string) (*User, error)
 			PutUser(*User) error

@@ -276,8 +276,8 @@ func (ch *CoreHandler) ProcessMessage(
 
 	// Save user message to database
 	// Note: User messages don't have a model - the model field stays empty for user messages
-	userMsgID := coreSession.GenerateMessageID()
-	userMsg := model.NewUserMessage(userMsgID, userID, coreSession.SessionID, userMessage, model.ContentTypeText)
+	userMsgID, userSeqID := coreSession.GenerateMessageIDWithSeq()
+	userMsg := model.NewUserMessage(userMsgID, userSeqID, userID, coreSession.SessionID, userMessage, model.ContentTypeText)
 	// Set nonsense flag if detected
 	userMsg.IsNonsense = isNonsense
 	ch.saveMessage(userMsg)
@@ -328,6 +328,7 @@ func (ch *CoreHandler) ProcessMessage(
 
 // getOrCreateCoreSession gets or creates a Core session for a user
 // It uses SessionHandler to ensure persistence in the database
+// NOTE: This uses the same pattern as getOrCreateActiveSession - first checks User's ActiveSessionID
 func (ch *CoreHandler) getOrCreateCoreSession(userID string) (*model.Session, error) {
 	// First check in-memory cache
 	ch.coreSessionsMu.RLock()
@@ -343,9 +344,8 @@ func (ch *CoreHandler) getOrCreateCoreSession(userID string) (*model.Session, er
 			ch.coreSessions[userID] = dbSession
 			ch.coreSessionsMu.Unlock()
 
-			userSessions, _ := ch.sessionHandler.ListUserSessions(userID)
-			log.Log.Infof("[CoreHandler] 🔄 Using existing Core session | UserID: %s | SessionID: %s | User sessions: %d",
-				userID, dbSession.SessionID, len(userSessions))
+			log.Log.Infof("[CoreHandler] 🔄 Using cached Core session | UserID: %s | SessionID: %s",
+				userID, dbSession.SessionID)
 			return dbSession, nil
 		}
 		// Session not found in DB, will create new one below
@@ -359,15 +359,28 @@ func (ch *CoreHandler) getOrCreateCoreSession(userID string) (*model.Session, er
 		dbSession, err := ch.sessionHandler.GetSession(session.SessionID)
 		if err == nil && dbSession != nil {
 			ch.coreSessions[userID] = dbSession
-			userSessions, _ := ch.sessionHandler.ListUserSessions(userID)
-			log.Log.Infof("[CoreHandler] 🔄 Using existing Core session (after lock) | UserID: %s | SessionID: %s | User sessions: %d",
-				userID, dbSession.SessionID, len(userSessions))
+			log.Log.Infof("[CoreHandler] 🔄 Using cached Core session (after lock) | UserID: %s | SessionID: %s",
+				userID, dbSession.SessionID)
 			return dbSession, nil
 		}
 	}
 
-	// Try to get existing Core session from database
-	// Check if store has GetCoreSession method (e.g., SQLiteStore)
+	// Check User's ActiveSessionID for Core type first
+	activeSessionID := ch.getActiveSessionID(userID, model.AgentTypeCore)
+	if activeSessionID != "" {
+		activeSession, err := ch.sessionHandler.GetSession(activeSessionID)
+		if err == nil && activeSession != nil {
+			ch.coreSessions[userID] = activeSession
+			log.Log.Infof("[CoreHandler] 🔄 Using active Core session from User | UserID: %s | SessionID: %s",
+				userID, activeSession.SessionID)
+			return activeSession, nil
+		}
+		// Active session reference is stale, will create new below
+		log.Log.Warnf("[CoreHandler] ⚠️  Active Core session no longer exists | UserID: %s | OldSessionID: %s",
+			userID, activeSessionID)
+	}
+
+	// Fallback: Try to get existing Core session from database (for migration from old data)
 	store := ch.sessionHandler.GetStore()
 	if sqliteStore, ok := store.(interface {
 		GetCoreSession(string) (*model.Session, error)
@@ -375,9 +388,10 @@ func (ch *CoreHandler) getOrCreateCoreSession(userID string) (*model.Session, er
 		existingCore, err := sqliteStore.GetCoreSession(userID)
 		if err == nil && existingCore != nil {
 			ch.coreSessions[userID] = existingCore
-			userSessions, _ := ch.sessionHandler.ListUserSessions(userID)
-			log.Log.Infof("[CoreHandler] 🔄 Loaded Core session from database | UserID: %s | SessionID: %s | User sessions: %d",
-				userID, existingCore.SessionID, len(userSessions))
+			// Also set as active session for future lookups
+			_ = ch.setActiveSessionID(userID, model.AgentTypeCore, existingCore.SessionID)
+			log.Log.Infof("[CoreHandler] 🔄 Loaded Core session from database (migration) | UserID: %s | SessionID: %s",
+				userID, existingCore.SessionID)
 			return existingCore, nil
 		}
 	} else {
@@ -387,7 +401,9 @@ func (ch *CoreHandler) getOrCreateCoreSession(userID string) (*model.Session, er
 			for _, s := range allSessions {
 				if s.AgentType == model.AgentTypeCore {
 					ch.coreSessions[userID] = s
-					log.Log.Infof("[CoreHandler] 🔄 Found Core session from list | UserID: %s | SessionID: %s",
+					// Also set as active session for future lookups
+					_ = ch.setActiveSessionID(userID, model.AgentTypeCore, s.SessionID)
+					log.Log.Infof("[CoreHandler] 🔄 Found Core session from list (migration) | UserID: %s | SessionID: %s",
 						userID, s.SessionID)
 					return s, nil
 				}
@@ -396,6 +412,7 @@ func (ch *CoreHandler) getOrCreateCoreSession(userID string) (*model.Session, er
 	}
 
 	// Create new Core session with proper sequential ID
+	// NOTE: createSessionForUser already sets the new session as ActiveSession
 	session, err := ch.createSessionForUser(userID, model.AgentTypeCore)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create core session: %w", err)
@@ -403,9 +420,7 @@ func (ch *CoreHandler) getOrCreateCoreSession(userID string) (*model.Session, er
 
 	ch.coreSessions[userID] = session
 
-	userSessions, _ := ch.sessionHandler.ListUserSessions(userID)
 	log.Log.Infof("[CoreHandler] ✨ Created new Core session | UserID: %s | SessionID: %s", userID, session.SessionID)
-	log.Log.Infof("[CoreHandler] 📊 User sessions: %d", len(userSessions))
 
 	return session, nil
 }
@@ -861,7 +876,7 @@ func (ch *CoreHandler) processWithTools(
 		for _, toolCall := range choice.Message.ToolCalls {
 			// Save tool call to database (before execution)
 			if coreSession != nil {
-				ch.saveToolCall(userID, coreSession.SessionID, messageID, toolCall)
+				ch.saveToolCall(coreSession, messageID, toolCall)
 			}
 
 			// Notify status: tool executing
@@ -1298,29 +1313,28 @@ func (ch *CoreHandler) setActiveSessionID(userID string, agentType model.AgentTy
 
 // getOrCreateActiveSession gets active session or creates one if not exists
 // Returns the session ID (either existing or newly created)
+// NOTE: This is the primary entry point for getting the correct session for LLM calls
 func (ch *CoreHandler) getOrCreateActiveSession(userID string, agentType model.AgentType) (string, error) {
-	// Check if active session exists
+	// Check if active session exists in user record
 	sessionID := ch.getActiveSessionID(userID, agentType)
 	if sessionID != "" {
 		// Verify session still exists in database
 		session, err := ch.sessionHandler.GetSession(sessionID)
 		if err == nil && session != nil {
+			log.Log.Infof("[CoreHandler] 🔄 Using existing active session | UserID: %s | AgentType: %s | SessionID: %s",
+				userID, agentType, sessionID)
 			return sessionID, nil
 		}
-		// Session was deleted, clear the reference
+		// Session was deleted, clear the reference and create new
 		log.Log.Warnf("[CoreHandler] ⚠️  Active session no longer exists, creating new | UserID: %s | AgentType: %s | OldSessionID: %s",
 			userID, agentType, sessionID)
 	}
 
 	// Create new session with proper sequential ID
+	// NOTE: createSessionForUser already sets the new session as ActiveSession via CreateSessionForUser
 	session, err := ch.createSessionForUser(userID, agentType)
 	if err != nil {
 		return "", fmt.Errorf("failed to create session: %w", err)
-	}
-
-	// Set as active session
-	if err := ch.setActiveSessionID(userID, agentType, session.SessionID); err != nil {
-		return "", fmt.Errorf("failed to set active session: %w", err)
 	}
 
 	log.Log.Infof("[CoreHandler] ✨ Auto-created active session | UserID: %s | AgentType: %s | SessionID: %s",
@@ -1405,9 +1419,10 @@ func (ch *CoreHandler) saveCoreMessage(
 	}
 
 	// Create message record
-	messageID := coreSession.GenerateMessageID()
+	messageID, seqID := coreSession.GenerateMessageIDWithSeq()
 	msg := model.NewMessage(
 		messageID,
+		seqID,
 		userID,
 		coreSession.SessionID,
 		openai.ChatMessageRoleAssistant,
@@ -1438,17 +1453,20 @@ func (ch *CoreHandler) saveMessage(msg *model.Message) {
 }
 
 // saveToolCall saves a tool call to the database
-func (ch *CoreHandler) saveToolCall(userID string, sessionID string, messageID string, toolCall openai.ToolCall) {
+func (ch *CoreHandler) saveToolCall(session *model.Session, messageID string, toolCall openai.ToolCall) {
 	store := ch.sessionHandler.GetStore()
 	if sqliteStore, ok := store.(interface {
 		PutToolCall(*model.ToolCall) error
 	}); ok {
 		now := time.Now()
+		// Generate sequential ToolID for this session
+		toolID := session.GenerateToolID()
 		tc := &model.ToolCall{
+			ToolID:       toolID,
 			ToolCallID:   toolCall.ID,
 			MessageID:    messageID,
-			SessionID:    sessionID,
-			UserID:       userID,
+			SessionID:    session.SessionID,
+			UserID:       session.UserID,
 			AgentType:    model.AgentTypeCore,
 			FunctionName: toolCall.Function.Name,
 			Arguments:    toolCall.Function.Arguments,
@@ -1457,9 +1475,9 @@ func (ch *CoreHandler) saveToolCall(userID string, sessionID string, messageID s
 			UpdatedAt:    now,
 		}
 		if err := sqliteStore.PutToolCall(tc); err != nil {
-			log.Log.Warnf("[CoreHandler] ⚠️  Failed to save tool call | ToolCallID: %s | Error: %v", toolCall.ID, err)
+			log.Log.Warnf("[CoreHandler] ⚠️  Failed to save tool call | ToolID: %s | ToolCallID: %s | Error: %v", toolID, toolCall.ID, err)
 		} else {
-			log.Log.Infof("[CoreHandler] 🔧 Tool call saved | ToolCallID: %s | Function: %s", toolCall.ID, toolCall.Function.Name)
+			log.Log.Infof("[CoreHandler] 🔧 Tool call saved | ToolID: %s | ToolCallID: %s | Function: %s", toolID, toolCall.ID, toolCall.Function.Name)
 		}
 	}
 }
@@ -1597,8 +1615,8 @@ func (ch *CoreHandler) ProcessMessageWithImage(
 
 	// Save user message to database
 	// Note: User messages don't have a model - the model field stays empty for user messages
-	imageMsgID := coreSession.GenerateMessageID()
-	userMsgRecord := model.NewUserMessage(imageMsgID, userID, coreSession.SessionID, historyContent, model.ContentTypeImage)
+	imageMsgID, imageSeqID := coreSession.GenerateMessageIDWithSeq()
+	userMsgRecord := model.NewUserMessage(imageMsgID, imageSeqID, userID, coreSession.SessionID, historyContent, model.ContentTypeImage)
 	ch.saveMessage(userMsgRecord)
 
 	// Build system prompts (simplified for vision - no tools needed)
@@ -1672,9 +1690,10 @@ func (ch *CoreHandler) ProcessMessageWithImage(
 	}
 
 	// Save assistant message to database
-	assistantMsgID := coreSession.GenerateMessageID()
+	assistantMsgID, assistantSeqID := coreSession.GenerateMessageIDWithSeq()
 	assistantMsg := model.NewMessage(
 		assistantMsgID,
+		assistantSeqID,
 		userID,
 		coreSession.SessionID,
 		openai.ChatMessageRoleAssistant,

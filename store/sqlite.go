@@ -91,6 +91,7 @@ func (s *SQLiteStore) initSchema() error {
 	
 	CREATE TABLE IF NOT EXISTS messages (
 		message_id TEXT PRIMARY KEY,
+		seq_id INTEGER DEFAULT 0,
 		user_id TEXT NOT NULL,
 		session_id TEXT NOT NULL,
 		role TEXT NOT NULL,
@@ -132,6 +133,7 @@ func (s *SQLiteStore) initSchema() error {
 	
 	CREATE TABLE IF NOT EXISTS tool_calls (
 		tool_call_id TEXT PRIMARY KEY,
+		tool_id TEXT DEFAULT '',
 		message_id TEXT NOT NULL,
 		session_id TEXT NOT NULL,
 		user_id TEXT NOT NULL,
@@ -219,6 +221,8 @@ func (s *SQLiteStore) migrateAddMessageTypeColumns() error {
 	_, _ = s.db.Exec(`ALTER TABLE tool_calls ADD COLUMN response_length INTEGER DEFAULT 0`)
 	// Add duration_ms to tool_calls table (for tracking execution time)
 	_, _ = s.db.Exec(`ALTER TABLE tool_calls ADD COLUMN duration_ms INTEGER DEFAULT 0`)
+	// Add tool_id to tool_calls table (for sequential tool IDs)
+	_, _ = s.db.Exec(`ALTER TABLE tool_calls ADD COLUMN tool_id TEXT DEFAULT ''`)
 	// Ignore errors if columns already exist
 	return nil
 }
@@ -748,13 +752,27 @@ func (s *SQLiteStore) GetOrCreateUser(userID string) (*model.User, error) {
 		return nil, err
 	}
 	if user != nil {
+		needsSave := false
+
 		// Compute SessionSeqs from existing sessions if empty (backward compatibility)
 		if len(user.SessionSeqs) == 0 {
-			if err := s.computeSessionSeqs(user); err != nil {
-				// Log warning but continue - session creation will still work
-				// just might have ID collisions with old sessions
+			if err := s.computeSessionSeqs(user); err == nil && len(user.SessionSeqs) > 0 {
+				needsSave = true
 			}
 		}
+
+		// Compute ActiveSessionIDs from existing sessions if empty (backward compatibility)
+		if len(user.ActiveSessionIDs) == 0 {
+			if err := s.computeActiveSessionIDs(user); err == nil && len(user.ActiveSessionIDs) > 0 {
+				needsSave = true
+			}
+		}
+
+		// Save user if any backward compatibility computation was done
+		if needsSave {
+			_ = s.PutUser(user) // Best effort save
+		}
+
 		return user, nil
 	}
 
@@ -796,9 +814,41 @@ func (s *SQLiteStore) computeSessionSeqs(user *model.User) error {
 		user.SessionSeqs[agentType] = count
 	}
 
-	// Save user with updated SessionSeqs
-	if len(seqCounts) > 0 {
-		return s.PutUser(user)
+	return nil
+}
+
+// computeActiveSessionIDs computes ActiveSessionIDs from existing sessions for backward compatibility
+// This is called when a user has no ActiveSessionIDs (old user migrating to new format)
+// For each agent type, it selects the most recently updated session as the active session
+func (s *SQLiteStore) computeActiveSessionIDs(user *model.User) error {
+	if user == nil {
+		return nil
+	}
+
+	// Get all sessions for this user
+	sessions, err := s.List(user.UserID)
+	if err != nil {
+		return err
+	}
+
+	// Find the most recent session for each agent type
+	latestByType := make(map[model.AgentType]*model.Session)
+	for _, session := range sessions {
+		if session.AgentType == "" {
+			continue
+		}
+		existing := latestByType[session.AgentType]
+		if existing == nil || session.UpdatedAt.After(existing.UpdatedAt) {
+			latestByType[session.AgentType] = session
+		}
+	}
+
+	// Update user's ActiveSessionIDs
+	if user.ActiveSessionIDs == nil {
+		user.ActiveSessionIDs = make(map[model.AgentType]string)
+	}
+	for agentType, session := range latestByType {
+		user.ActiveSessionIDs[agentType] = session.SessionID
 	}
 
 	return nil
@@ -828,12 +878,13 @@ func (s *SQLiteStore) PutMessage(message *model.Message) error {
 	// Use INSERT OR REPLACE for upsert behavior
 	_, err := s.db.Exec(
 		`INSERT OR REPLACE INTO messages (
-			message_id, user_id, session_id, role, content, model,
+			message_id, seq_id, user_id, session_id, role, content, model,
 			agent_type, content_type,
 			prompt_tokens, completion_tokens, total_tokens,
 			request_model, max_tokens, temperature, has_tool_calls, finish_reason, is_nonsense, created_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		message.MessageID,
+		message.SeqID,
 		message.UserID,
 		message.SessionID,
 		message.Role,
@@ -866,11 +917,11 @@ func (s *SQLiteStore) GetMessagesBySession(sessionID string) ([]*model.Message, 
 	defer s.mu.RUnlock()
 
 	rows, err := s.db.Query(
-		`SELECT message_id, user_id, session_id, role, content, model,
+		`SELECT message_id, seq_id, user_id, session_id, role, content, model,
 			agent_type, content_type,
 			prompt_tokens, completion_tokens, total_tokens,
 			request_model, max_tokens, temperature, has_tool_calls, finish_reason, is_nonsense, created_at
-		FROM messages WHERE session_id = ? ORDER BY created_at ASC`,
+		FROM messages WHERE session_id = ? ORDER BY created_at DESC`,
 		sessionID,
 	)
 	if err != nil {
@@ -888,6 +939,7 @@ func (s *SQLiteStore) GetMessagesBySession(sessionID string) ([]*model.Message, 
 
 		err := rows.Scan(
 			&msg.MessageID,
+			&msg.SeqID,
 			&msg.UserID,
 			&msg.SessionID,
 			&msg.Role,
@@ -931,11 +983,11 @@ func (s *SQLiteStore) GetMessagesByUser(userID string) ([]*model.Message, error)
 	defer s.mu.RUnlock()
 
 	rows, err := s.db.Query(
-		`SELECT message_id, user_id, session_id, role, content, model,
+		`SELECT message_id, seq_id, user_id, session_id, role, content, model,
 			agent_type, content_type,
 			prompt_tokens, completion_tokens, total_tokens,
 			request_model, max_tokens, temperature, has_tool_calls, finish_reason, is_nonsense, created_at
-		FROM messages WHERE user_id = ? ORDER BY created_at ASC`,
+		FROM messages WHERE user_id = ? ORDER BY created_at DESC`,
 		userID,
 	)
 	if err != nil {
@@ -953,6 +1005,7 @@ func (s *SQLiteStore) GetMessagesByUser(userID string) ([]*model.Message, error)
 
 		err := rows.Scan(
 			&msg.MessageID,
+			&msg.SeqID,
 			&msg.UserID,
 			&msg.SessionID,
 			&msg.Role,
@@ -1201,7 +1254,7 @@ func (s *SQLiteStore) GetAllMessages() ([]*model.Message, error) {
 	defer s.mu.RUnlock()
 
 	rows, err := s.db.Query(
-		`SELECT message_id, user_id, session_id, role, content, model,
+		`SELECT message_id, seq_id, user_id, session_id, role, content, model,
 			agent_type, content_type,
 			prompt_tokens, completion_tokens, total_tokens,
 			request_model, max_tokens, temperature, has_tool_calls, finish_reason, is_nonsense, created_at
@@ -1222,6 +1275,7 @@ func (s *SQLiteStore) GetAllMessages() ([]*model.Message, error) {
 
 		err := rows.Scan(
 			&msg.MessageID,
+			&msg.SeqID,
 			&msg.UserID,
 			&msg.SessionID,
 			&msg.Role,
@@ -1328,9 +1382,10 @@ func (s *SQLiteStore) PutToolCall(toolCall *model.ToolCall) error {
 	// Use INSERT OR REPLACE for upsert behavior
 	_, err := s.db.Exec(
 		`INSERT OR REPLACE INTO tool_calls (
-			tool_call_id, message_id, session_id, user_id, agent_type, function_name, arguments, response, response_length, duration_ms, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			tool_call_id, tool_id, message_id, session_id, user_id, agent_type, function_name, arguments, response, response_length, duration_ms, created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		toolCall.ToolCallID,
+		toolCall.ToolID,
 		toolCall.MessageID,
 		toolCall.SessionID,
 		toolCall.UserID,
@@ -1397,7 +1452,7 @@ func (s *SQLiteStore) GetToolCallsBySession(sessionID string) ([]*model.ToolCall
 	defer s.mu.RUnlock()
 
 	rows, err := s.db.Query(
-		`SELECT tool_call_id, message_id, session_id, user_id, agent_type, function_name, arguments, response, response_length, duration_ms, created_at, updated_at
+		`SELECT tool_call_id, tool_id, message_id, session_id, user_id, agent_type, function_name, arguments, response, response_length, duration_ms, created_at, updated_at
 		FROM tool_calls WHERE session_id = ? ORDER BY created_at ASC`,
 		sessionID,
 	)
@@ -1414,6 +1469,7 @@ func (s *SQLiteStore) GetToolCallsBySession(sessionID string) ([]*model.ToolCall
 
 		err := rows.Scan(
 			&tc.ToolCallID,
+			&tc.ToolID,
 			&tc.MessageID,
 			&tc.SessionID,
 			&tc.UserID,
@@ -1449,7 +1505,7 @@ func (s *SQLiteStore) GetAllToolCalls() ([]*model.ToolCall, error) {
 	defer s.mu.RUnlock()
 
 	rows, err := s.db.Query(
-		`SELECT tool_call_id, message_id, session_id, user_id, agent_type, function_name, arguments, response, response_length, duration_ms, created_at, updated_at
+		`SELECT tool_call_id, tool_id, message_id, session_id, user_id, agent_type, function_name, arguments, response, response_length, duration_ms, created_at, updated_at
 		FROM tool_calls ORDER BY created_at DESC`,
 	)
 	if err != nil {
@@ -1465,6 +1521,7 @@ func (s *SQLiteStore) GetAllToolCalls() ([]*model.ToolCall, error) {
 
 		err := rows.Scan(
 			&tc.ToolCallID,
+			&tc.ToolID,
 			&tc.MessageID,
 			&tc.SessionID,
 			&tc.UserID,
@@ -1500,7 +1557,7 @@ func (s *SQLiteStore) GetToolCallByID(toolCallID string) (*model.ToolCall, error
 	defer s.mu.RUnlock()
 
 	row := s.db.QueryRow(
-		`SELECT tool_call_id, message_id, session_id, user_id, agent_type, function_name, arguments, response, response_length, duration_ms, created_at, updated_at
+		`SELECT tool_call_id, tool_id, message_id, session_id, user_id, agent_type, function_name, arguments, response, response_length, duration_ms, created_at, updated_at
 		FROM tool_calls WHERE tool_call_id = ?`,
 		toolCallID,
 	)
@@ -1511,6 +1568,7 @@ func (s *SQLiteStore) GetToolCallByID(toolCallID string) (*model.ToolCall, error
 
 	err := row.Scan(
 		&tc.ToolCallID,
+		&tc.ToolID,
 		&tc.MessageID,
 		&tc.SessionID,
 		&tc.UserID,
@@ -1525,6 +1583,47 @@ func (s *SQLiteStore) GetToolCallByID(toolCallID string) (*model.ToolCall, error
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get tool call: %w", err)
+	}
+
+	tc.AgentType = model.AgentType(agentType)
+	tc.CreatedAt = time.Unix(createdAt, 0)
+	tc.UpdatedAt = time.Unix(updatedAt, 0)
+
+	return tc, nil
+}
+
+// GetToolCallByToolID returns a tool call by its ToolID (sequential ID)
+func (s *SQLiteStore) GetToolCallByToolID(toolID string) (*model.ToolCall, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	row := s.db.QueryRow(
+		`SELECT tool_call_id, tool_id, message_id, session_id, user_id, agent_type, function_name, arguments, response, response_length, duration_ms, created_at, updated_at
+		FROM tool_calls WHERE tool_id = ?`,
+		toolID,
+	)
+
+	tc := &model.ToolCall{}
+	var createdAt, updatedAt int64
+	var agentType string
+
+	err := row.Scan(
+		&tc.ToolCallID,
+		&tc.ToolID,
+		&tc.MessageID,
+		&tc.SessionID,
+		&tc.UserID,
+		&agentType,
+		&tc.FunctionName,
+		&tc.Arguments,
+		&tc.Response,
+		&tc.ResponseLength,
+		&tc.DurationMs,
+		&createdAt,
+		&updatedAt,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get tool call by tool ID: %w", err)
 	}
 
 	tc.AgentType = model.AgentType(agentType)

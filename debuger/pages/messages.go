@@ -70,67 +70,19 @@ func RenderMessages(handler *debuger.DebugHandler, page int, userID, sessionID s
 	if len(messages) == 0 {
 		html += components.InfoAlert("No messages found.")
 	} else {
-		columns := []components.ColumnConfig{
-			{Header: "Time", NoWrap: true},
-			{Header: "Agent", Center: true, NoWrap: true},
-			{Header: "Type", Center: true, NoWrap: true},
-			{Header: "Role", Center: true, NoWrap: true},
-			{Header: "Content"},
-			{Header: "Model", Center: true, NoWrap: true},
-			{Header: "User", NoWrap: true},
-			{Header: "Session", Center: true, NoWrap: true},
-			{Header: "Tools", Center: true, NoWrap: true},
-			{Header: "Nonsense", Center: true, NoWrap: true},
-		}
+		rowConfig := components.DefaultMessageRowConfig()
+		rowConfig.ShowUser = true
+		rowConfig.ShowSession = true
+
+		columns := components.MessageTableColumns(rowConfig)
 		html += components.TableStartWithConfig(columns, components.DefaultTableConfig())
 
-		for _, msg := range paginatedMessages {
-			contentDisplay := components.ExpandableWithPreview(msg.Content, 150)
-
-			// Tool calls - show link if has tool calls
-			toolCallDisplay := components.Badge("-", "secondary")
-			if msg.HasToolCalls {
-				toolCallDisplay = fmt.Sprintf(`<a href="/agentize/debug/tool-calls?session=%s" class="btn btn-sm btn-outline-warning">🔧 View</a>`,
-					template.URLQueryEscaper(msg.SessionID))
-			}
-
-			nonsenseBadge := components.Badge("-", "secondary")
-			if msg.IsNonsense {
-				nonsenseBadge = components.BadgeWithIcon("Nonsense", "⚠️", "warning text-dark")
-			}
-
-			// Agent type badge
-			agentBadge := components.AgentTypeBadgeFromModel(msg.AgentType)
-
-			// Content type badge
-			contentTypeBadge := components.ContentTypeBadgeFromModel(msg.ContentType)
-
-			html += fmt.Sprintf(`<tr>
-                <td class="text-nowrap">%s</td>
-                <td class="text-center">%s</td>
-                <td class="text-center">%s</td>
-                <td class="text-center">%s</td>
-                <td class="text-break">%s</td>
-                <td class="text-center">%s</td>
-                <td class="text-nowrap">%s</td>
-                <td class="text-center">%s</td>
-                <td class="text-center">%s</td>
-                <td class="text-center">%s</td>
-            </tr>`,
-				debuger.FormatTime(msg.CreatedAt),
-				agentBadge,
-				contentTypeBadge,
-				components.RoleBadge(msg.Role),
-				contentDisplay,
-				components.InlineCode(debuger.GetModelDisplay(msg.Model)),
-				components.TruncatedLink(msg.UserID, "/agentize/debug/users/"+template.URLQueryEscaper(msg.UserID), 20),
-				components.OpenButton("/agentize/debug/sessions/"+template.URLQueryEscaper(msg.SessionID)),
-				toolCallDisplay,
-				nonsenseBadge,
-			)
+		for i, msg := range paginatedMessages {
+			html += components.MessageTableRow(msg, rowConfig, i)
 		}
 
 		html += components.TableEnd(true)
+		html += components.MessageTableScript()
 		html += components.PaginationSimple(page, totalItems, components.DefaultItemsPerPage, baseURL)
 	}
 

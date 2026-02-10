@@ -112,63 +112,37 @@ func (dp *DataProvider) GetSession(sessionID string) (*model.Session, error) {
 }
 
 // GetAllMessages returns all messages sorted by CreatedAt (newest first)
+// Note: Database query already returns DESC order
 func (dp *DataProvider) GetAllMessages() ([]*model.Message, error) {
-	messages, err := dp.store.GetAllMessages()
-	if err != nil {
-		return nil, err
-	}
-
-	// Sort by CreatedAt (newest first)
-	sort.Slice(messages, func(i, j int) bool {
-		return messages[i].CreatedAt.After(messages[j].CreatedAt)
-	})
-
-	return messages, nil
+	return dp.store.GetAllMessages()
 }
 
 // GetMessagesBySession returns messages for a session sorted by CreatedAt (oldest first for conversation flow)
+// Note: Database query returns DESC, so we reverse to get ASC
 func (dp *DataProvider) GetMessagesBySession(sessionID string) ([]*model.Message, error) {
 	messages, err := dp.store.GetMessagesBySession(sessionID)
 	if err != nil {
 		return nil, err
 	}
 
-	// Sort by CreatedAt (oldest first for natural conversation order)
-	sort.Slice(messages, func(i, j int) bool {
-		return messages[i].CreatedAt.Before(messages[j].CreatedAt)
-	})
+	// Reverse to get oldest first (natural conversation order)
+	for i, j := 0, len(messages)-1; i < j; i, j = i+1, j-1 {
+		messages[i], messages[j] = messages[j], messages[i]
+	}
 
 	return messages, nil
 }
 
 // GetMessagesBySessionDesc returns messages for a session sorted by CreatedAt (newest first for listing)
+// Note: Database query already returns DESC order
 func (dp *DataProvider) GetMessagesBySessionDesc(sessionID string) ([]*model.Message, error) {
-	messages, err := dp.store.GetMessagesBySession(sessionID)
-	if err != nil {
-		return nil, err
-	}
-
-	// Sort by CreatedAt (newest first)
-	sort.Slice(messages, func(i, j int) bool {
-		return messages[i].CreatedAt.After(messages[j].CreatedAt)
-	})
-
-	return messages, nil
+	return dp.store.GetMessagesBySession(sessionID)
 }
 
 // GetMessagesByUser returns messages for a user sorted by CreatedAt (newest first)
+// Note: Database query already returns DESC order
 func (dp *DataProvider) GetMessagesByUser(userID string) ([]*model.Message, error) {
-	messages, err := dp.store.GetMessagesByUser(userID)
-	if err != nil {
-		return nil, err
-	}
-
-	// Sort by CreatedAt (newest first)
-	sort.Slice(messages, func(i, j int) bool {
-		return messages[i].CreatedAt.After(messages[j].CreatedAt)
-	})
-
-	return messages, nil
+	return dp.store.GetMessagesByUser(userID)
 }
 
 // GetAllOpenedFiles returns all opened files sorted by OpenedAt (newest first)
@@ -255,6 +229,11 @@ func (dp *DataProvider) GetToolCallsBySession(sessionID string) ([]*model.ToolCa
 // GetToolCallByID returns a tool call by its ID
 func (dp *DataProvider) GetToolCallByID(toolCallID string) (*model.ToolCall, error) {
 	return dp.store.GetToolCallByID(toolCallID)
+}
+
+// GetToolCallByToolID returns a tool call by its ToolID (sequential ID)
+func (dp *DataProvider) GetToolCallByToolID(toolID string) (*model.ToolCall, error) {
+	return dp.store.GetToolCallByToolID(toolID)
 }
 
 // GetAllSummarizationLogs returns all summarization logs
@@ -396,6 +375,7 @@ func ConvertToolCallsToInfo(toolCalls []*model.ToolCall) []debuger.ToolCallInfo 
 			SessionID:    tc.SessionID,
 			UserID:       tc.UserID,
 			MessageID:    tc.MessageID,
+			ToolID:       tc.ToolID,
 			ToolCallID:   tc.ToolCallID,
 			AgentType:    string(tc.AgentType),
 			FunctionName: tc.FunctionName,

@@ -575,8 +575,8 @@ func (e *Engine) ProcessMessage(
 
 		// Save user message to database
 		// Note: User messages don't have a model - the model field stays empty for user messages
-		userMsgID := session.GenerateMessageID()
-		userMsg := model.NewUserMessage(userMsgID, session.UserID, sessionID, userMessage, model.ContentTypeText)
+		userMsgID, userSeqID := session.GenerateMessageIDWithSeq()
+		userMsg := model.NewUserMessage(userMsgID, userSeqID, session.UserID, sessionID, userMessage, model.ContentTypeText)
 		if sqliteStore, ok := e.Sessions.(interface {
 			PutMessage(*model.Message) error
 		}); ok {
@@ -1243,7 +1243,7 @@ func (e *Engine) processChatRequest(
 		toolResults := make([]openai.ChatCompletionMessage, 0, len(choice.Message.ToolCalls))
 		for _, toolCall := range choice.Message.ToolCalls {
 			// Save tool call to database (before execution)
-			e.saveToolCall(session.UserID, sessionID, messageID, toolCall)
+			e.saveToolCall(session, messageID, toolCall)
 
 			// Parse arguments
 			var args map[string]interface{}
@@ -1390,9 +1390,10 @@ func (e *Engine) saveMessage(
 	}
 
 	// Create message record
-	messageID := session.GenerateMessageID()
+	messageID, seqID := session.GenerateMessageIDWithSeq()
 	msg := model.NewMessage(
 		messageID,
+		seqID,
 		session.UserID,
 		session.SessionID,
 		openai.ChatMessageRoleAssistant,
@@ -1418,16 +1419,19 @@ func (e *Engine) saveMessage(
 }
 
 // saveToolCall saves a tool call to the database
-func (e *Engine) saveToolCall(userID string, sessionID string, messageID string, toolCall openai.ToolCall) {
+func (e *Engine) saveToolCall(session *model.Session, messageID string, toolCall openai.ToolCall) {
 	if sqliteStore, ok := e.Sessions.(interface {
 		PutToolCall(*model.ToolCall) error
 	}); ok {
 		now := time.Now()
+		// Generate sequential ToolID for this session
+		toolID := session.GenerateToolID()
 		tc := &model.ToolCall{
+			ToolID:       toolID,
 			ToolCallID:   toolCall.ID,
 			MessageID:    messageID,
-			SessionID:    sessionID,
-			UserID:       userID,
+			SessionID:    session.SessionID,
+			UserID:       session.UserID,
 			AgentType:    model.AgentTypeLow,
 			FunctionName: toolCall.Function.Name,
 			Arguments:    toolCall.Function.Arguments,
@@ -1436,9 +1440,9 @@ func (e *Engine) saveToolCall(userID string, sessionID string, messageID string,
 			UpdatedAt:    now,
 		}
 		if err := sqliteStore.PutToolCall(tc); err != nil {
-			log.Log.Warnf("[Engine] ⚠️  Failed to save tool call | ToolCallID: %s | Error: %v", toolCall.ID, err)
+			log.Log.Warnf("[Engine] ⚠️  Failed to save tool call | ToolID: %s | ToolCallID: %s | Error: %v", toolID, toolCall.ID, err)
 		} else {
-			log.Log.Infof("[Engine] 🔧 Tool call saved | ToolCallID: %s | Function: %s", toolCall.ID, toolCall.Function.Name)
+			log.Log.Infof("[Engine] 🔧 Tool call saved | ToolID: %s | ToolCallID: %s | Function: %s", toolID, toolCall.ID, toolCall.Function.Name)
 		}
 	}
 }

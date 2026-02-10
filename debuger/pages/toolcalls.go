@@ -61,57 +61,26 @@ func RenderToolCalls(handler *debuger.DebugHandler, page int, sessionID string) 
 	if len(toolCalls) == 0 {
 		html += components.InfoAlert("No tool calls found.")
 	} else {
-		columns := []components.ColumnConfig{
-			{Header: "Agent", Center: true, NoWrap: true},
-			{Header: "Function", NoWrap: true},
-			{Header: "Arguments"},
-			{Header: "Result"},
-			{Header: "Result Len", Center: true, NoWrap: true},
-			{Header: "Duration", Center: true, NoWrap: true},
-			{Header: "User", NoWrap: true},
-			{Header: "Session", Center: true, NoWrap: true},
-			{Header: "Time", NoWrap: true},
-			{Header: "", Center: true, NoWrap: true},
-		}
-		html += components.TableStartWithConfig(columns, components.DefaultTableConfig())
+		// Configure tool call row display
+		rowConfig := components.DefaultToolCallRowConfig()
+		rowConfig.ShowUser = true
+		rowConfig.BaseURL = "/agentize/debug"
 
-		for _, tc := range paginatedToolCalls {
-			argsDisplay := components.ExpandableWithPreview(tc.Arguments, 100)
-			resultDisplay := components.ExpandableWithPreview(tc.Result, 100)
+		columns := components.ToolCallTableColumns(rowConfig)
+		html += components.TableStartWithConfig(columns, components.TableConfig{
+			Striped:     false,
+			Hover:       true,
+			Small:       true,
+			Responsive:  true,
+			AlignMiddle: true,
+		})
 
-			// Agent type badge
-			agentBadge := components.AgentTypeBadgeFromString(tc.AgentType)
-
-			// Format result length (character count)
-			resultLenDisplay := debuger.FormatChars(tc.ResultLength)
-			durationDisplay := debuger.FormatDurationMs(tc.DurationMs)
-
-			html += fmt.Sprintf(`<tr>
-                <td class="text-center">%s</td>
-                <td class="text-nowrap">%s</td>
-                <td><div class="mb-0" style="max-width: 200px; font-size: 0.8em; white-space: pre-wrap; word-wrap: break-word;">%s</div></td>
-                <td><div class="mb-0" style="max-width: 200px; font-size: 0.8em; white-space: pre-wrap; word-wrap: break-word;">%s</div></td>
-                <td class="text-center">%s</td>
-                <td class="text-center">%s</td>
-                <td class="text-nowrap">%s</td>
-                <td class="text-center">%s</td>
-                <td class="text-nowrap">%s</td>
-                <td class="text-center">%s</td>
-            </tr>`,
-				agentBadge,
-				components.InlineCode(tc.FunctionName),
-				argsDisplay,
-				resultDisplay,
-				resultLenDisplay,
-				durationDisplay,
-				components.TruncatedLink(tc.UserID, "/agentize/debug/users/"+template.URLQueryEscaper(tc.UserID), 20),
-				components.OpenButton("/agentize/debug/sessions/"+template.URLQueryEscaper(tc.SessionID)),
-				debuger.FormatTime(tc.CreatedAt),
-				components.OpenButton("/agentize/debug/tool-calls/"+template.URLQueryEscaper(tc.ToolCallID)),
-			)
+		for i, tc := range paginatedToolCalls {
+			html += components.ToolCallTableRow(&tc, rowConfig, i)
 		}
 
 		html += components.TableEnd(true)
+		html += components.ToolCallTableScript()
 		html += components.PaginationSimple(page, totalItems, components.DefaultItemsPerPage, baseURL)
 	}
 
@@ -123,15 +92,15 @@ func RenderToolCalls(handler *debuger.DebugHandler, page int, sessionID string) 
 }
 
 // RenderToolCallDetail generates a detailed view for a single tool call
-func RenderToolCallDetail(handler *debuger.DebugHandler, toolCallID string) (string, error) {
+func RenderToolCallDetail(handler *debuger.DebugHandler, toolID string) (string, error) {
 	dp := data.NewDataProvider(handler.GetStore())
 
-	tc, err := dp.GetToolCallByID(toolCallID)
+	tc, err := dp.GetToolCallByToolID(toolID)
 	if err != nil {
 		return "", fmt.Errorf("failed to get tool call: %w", err)
 	}
 	if tc == nil {
-		return "", fmt.Errorf("tool call not found: %s", toolCallID)
+		return "", fmt.Errorf("tool call not found: %s", toolID)
 	}
 
 	html := ui.Header("Agentize Debug - Tool Call: " + tc.FunctionName)
@@ -155,7 +124,8 @@ func RenderToolCallDetail(handler *debuger.DebugHandler, toolCallID string) (str
 	// Left column - Basic Info
 	html += `<div class="col-md-6">`
 	html += `<table class="table table-sm">`
-	html += fmt.Sprintf(`<tr><th class="w-25">Tool Call ID</th><td>%s</td></tr>`, components.InlineCode(tc.ToolCallID))
+	html += fmt.Sprintf(`<tr><th class="w-25">Tool ID</th><td>%s</td></tr>`, components.InlineCode(tc.ToolID))
+	html += fmt.Sprintf(`<tr><th>Tool Call ID</th><td>%s</td></tr>`, components.InlineCode(tc.ToolCallID))
 	html += fmt.Sprintf(`<tr><th>Function</th><td>%s</td></tr>`, components.InlineCode(tc.FunctionName))
 	html += fmt.Sprintf(`<tr><th>Agent Type</th><td>%s</td></tr>`, agentBadge)
 	html += fmt.Sprintf(`<tr><th>Duration</th><td>%s</td></tr>`, debuger.FormatDurationMs(tc.DurationMs))

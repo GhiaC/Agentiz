@@ -20,6 +20,9 @@ type Message struct {
 	// MessageID is a unique identifier for this message
 	MessageID string
 
+	// SeqID is the sequential number of this message within the session
+	SeqID int
+
 	// AgentType indicates which type of agent created this message (core, low, high)
 	AgentType AgentType
 
@@ -65,6 +68,7 @@ type Message struct {
 // NewMessage creates a new message from an OpenAI response
 func NewMessage(
 	messageID string,
+	seqID int,
 	userID string,
 	sessionID string,
 	role string,
@@ -83,6 +87,7 @@ func NewMessage(
 
 	msg := &Message{
 		MessageID:        messageID,
+		SeqID:            seqID,
 		AgentType:        agentType,
 		ContentType:      contentType,
 		UserID:           userID,
@@ -105,10 +110,11 @@ func NewMessage(
 }
 
 // NewUserMessage creates a message for a user input (no LLM response)
-func NewUserMessage(messageID string, userID string, sessionID string, content string, contentType ContentType) *Message {
+func NewUserMessage(messageID string, seqID int, userID string, sessionID string, content string, contentType ContentType) *Message {
 	now := time.Now()
 	return &Message{
 		MessageID:   messageID,
+		SeqID:       seqID,
 		AgentType:   AgentTypeUser,
 		ContentType: contentType,
 		UserID:      userID,

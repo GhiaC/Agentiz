@@ -3,7 +3,6 @@ package pages
 import (
 	"fmt"
 	"html/template"
-	"strings"
 
 	"github.com/ghiac/agentize/debuger"
 	"github.com/ghiac/agentize/debuger/data"
@@ -36,82 +35,29 @@ func RenderSessions(handler *debuger.DebugHandler, page int) (string, error) {
 	if len(allSessions) == 0 {
 		html += components.InfoAlert("No sessions found.")
 	} else {
-		columns := []components.ColumnConfig{
-			{Header: "Actions", Center: true, NoWrap: true},
-			{Header: "Title", NoWrap: true},
-			{Header: "Agent Type", Center: true, NoWrap: true},
-			{Header: "Model", Center: true, NoWrap: true},
-			{Header: "User", NoWrap: true},
-			{Header: "Messages", Center: true, NoWrap: true},
-			{Header: "Files", Center: true, NoWrap: true},
-			{Header: "Summary", NoWrap: true},
-			{Header: "Tags", NoWrap: true},
-			{Header: "Summarized", Center: true, NoWrap: true},
+		// Configure session row display
+		rowConfig := components.DefaultSessionRowConfig()
+		rowConfig.ShowUser = true
+		rowConfig.GetFilesCount = func(sessionID string) int {
+			files, _ := handler.GetStore().GetOpenedFilesBySession(sessionID)
+			return len(files)
 		}
-		html += components.TableStartWithConfig(columns, components.DefaultTableConfig())
 
-		for _, session := range paginatedSessions {
-			title := session.Title
-			if title == "" {
-				title = "Untitled Session"
-			}
+		columns := components.SessionTableColumns(rowConfig)
+		html += components.TableStartWithConfig(columns, components.TableConfig{
+			Striped:     false,
+			Hover:       true,
+			Small:       true,
+			Responsive:  true,
+			AlignMiddle: true,
+		})
 
-			agentTypeBadge := components.AgentTypeBadge(string(session.AgentType))
-
-			rowClass := ""
-			if session.AgentType == model.AgentTypeCore {
-				rowClass = "table-danger"
-			}
-
-			// Only count active messages in Msgs (not archived ones)
-			totalMessagesCount := 0
-			if session.ConversationState != nil {
-				totalMessagesCount = len(session.ConversationState.Msgs)
-			}
-
-			// Get opened files count
-			files, _ := handler.GetStore().GetOpenedFilesBySession(session.SessionID)
-			filesCount := len(files)
-
-			summaryDisplay := "-"
-			if session.Summary != "" {
-				summaryDisplay = debuger.TruncateString(session.Summary, 50)
-			}
-
-			tagsDisplay := "-"
-			if len(session.Tags) > 0 {
-				tagsDisplay = debuger.TruncateString(strings.Join(session.Tags, ", "), 30)
-			}
-
-			summarizedDisplay := debuger.FormatDuration(session.SummarizedAt)
-
-			html += fmt.Sprintf(`<tr class="%s">
-                <td class="text-center">%s</td>
-                <td>%s</td>
-                <td class="text-center">%s</td>
-                <td class="text-center">%s</td>
-                <td class="text-nowrap">%s</td>
-                <td class="text-center">%s</td>
-                <td class="text-center">%s</td>
-                <td class="text-break" style="max-width: 200px;">%s</td>
-                <td class="text-break" style="max-width: 150px;">%s</td>
-                <td class="text-center">%s</td>
-            </tr>`,
-				rowClass,
-				components.OpenButton("/agentize/debug/sessions/"+template.URLQueryEscaper(session.SessionID)),
-				template.HTMLEscapeString(title),
-				agentTypeBadge,
-				components.InlineCode(debuger.GetModelDisplay(session.Model)),
-				components.TruncatedLink(session.UserID, "/agentize/debug/users/"+template.URLQueryEscaper(session.UserID), 20),
-				components.CountBadge(totalMessagesCount, "primary"),
-				components.CountBadge(filesCount, "info"),
-				template.HTMLEscapeString(summaryDisplay),
-				template.HTMLEscapeString(tagsDisplay),
-				summarizedDisplay,
-			)
+		for i, session := range paginatedSessions {
+			html += components.SessionTableRow(session, rowConfig, i)
 		}
 
 		html += components.TableEnd(true)
+		html += components.SessionTableScript()
 		html += components.PaginationSimple(page, totalItems, components.DefaultItemsPerPage, "/agentize/debug/sessions")
 	}
 
@@ -343,14 +289,25 @@ func RenderSessionDetail(handler *debuger.DebugHandler, sessionID string) (strin
 	if len(messages) == 0 {
 		html += components.InfoAlert("No messages found for this session.")
 	} else {
-		msgConfig := components.DefaultMessageDisplayConfig()
-		msgConfig.SessionID = sessionID
+		rowConfig := components.DefaultMessageRowConfig()
+		rowConfig.ShowUser = false    // Already on session page, user is known
+		rowConfig.ShowSession = false // Already on session page
 
-		html += components.MessageListStart()
-		for _, msg := range messages {
-			html += components.MessageCard(msg, msgConfig)
+		columns := components.MessageTableColumns(rowConfig)
+		html += components.TableStartWithConfig(columns, components.TableConfig{
+			Striped:     false,
+			Hover:       true,
+			Small:       true,
+			Responsive:  true,
+			AlignMiddle: true,
+		})
+
+		for i, msg := range messages {
+			html += components.MessageTableRow(msg, rowConfig, i)
 		}
-		html += components.MessageListEnd()
+
+		html += components.TableEnd(true)
+		html += components.MessageTableScript()
 	}
 
 	html += ui.CardEnd()
@@ -502,7 +459,7 @@ func RenderSessionDetail(handler *debuger.DebugHandler, sessionID string) (strin
 				argsDisplay,
 				resultDisplay,
 				debuger.FormatTime(tc.CreatedAt),
-				components.OpenButton("/agentize/debug/tool-calls/"+template.URLQueryEscaper(tc.ToolCallID)),
+				components.OpenButton("/agentize/debug/tool-calls/"+template.URLQueryEscaper(tc.ToolID)),
 			)
 		}
 

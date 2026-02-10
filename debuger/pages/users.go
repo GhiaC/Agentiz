@@ -168,7 +168,7 @@ func RenderUserDetail(handler *debuger.DebugHandler, userID string) (string, err
 		usernameDisplay = template.HTMLEscapeString(user.Username)
 	}
 
-	// Build active sessions display for detail page
+	// Build active sessions display for detail page - show full text without truncation
 	activeSessionsHTML := "-"
 	if len(user.ActiveSessionIDs) > 0 {
 		var parts []string
@@ -177,7 +177,7 @@ func RenderUserDetail(handler *debuger.DebugHandler, userID string) (string, err
 				link := fmt.Sprintf(`<a href="/agentize/debug/sessions/%s">%s: %s</a>`,
 					template.URLQueryEscaper(sessionID),
 					template.HTMLEscapeString(string(agentType)),
-					components.InlineCode(debuger.TruncateString(sessionID, 16)))
+					components.InlineCode(template.HTMLEscapeString(sessionID)))
 				parts = append(parts, link)
 			}
 		}
@@ -186,52 +186,106 @@ func RenderUserDetail(handler *debuger.DebugHandler, userID string) (string, err
 		}
 	}
 
+	// Build Session Sequences display
+	sessionSeqsHTML := "-"
+	if len(user.SessionSeqs) > 0 {
+		var seqParts []string
+		for agentType, seq := range user.SessionSeqs {
+			seqParts = append(seqParts, fmt.Sprintf("%s: %d",
+				template.HTMLEscapeString(string(agentType)),
+				seq))
+		}
+		if len(seqParts) > 0 {
+			sessionSeqsHTML = strings.Join(seqParts, "<br>")
+		}
+	}
+
+	// Build ban details display
+	isBannedDisplay := "No"
+	if user.IsBanned {
+		isBannedDisplay = "Yes"
+	}
+	banUntilDisplay := "-"
+	if !user.BanUntil.IsZero() {
+		banUntilDisplay = debuger.FormatTime(user.BanUntil)
+	} else if user.IsBanned {
+		banUntilDisplay = "Permanent"
+	}
+	banMessageDisplay := "-"
+	if user.BanMessage != "" {
+		banMessageDisplay = template.HTMLEscapeString(user.BanMessage)
+	}
+
 	html += fmt.Sprintf(`
 <div class="card mb-4">
     <div class="card-header">
         <h4 class="mb-0"><i class="bi bi-person-fill me-2"></i>User Information</h4>
     </div>
-    <div class="card-body">
-        <div class="row g-4">
+    <div class="card-body p-0">
+        <div class="row g-0">
             <div class="col-md-6">
-                <div class="mb-3">
-                    <strong class="d-block mb-2">User ID:</strong>
-                    %s
-                </div>
-                <div class="mb-3">
-                    <strong class="d-block mb-2">Name:</strong>
-                    <div>%s</div>
-                </div>
-                <div class="mb-3">
-                    <strong class="d-block mb-2">Username:</strong>
-                    <div>%s</div>
-                </div>
-                <div class="mb-3">
-                    <strong class="d-block mb-2">Status:</strong>
-                    <div>%s</div>
-                </div>
-                <div class="mb-3">
-                    <strong class="d-block mb-2">Nonsense Count:</strong>
-                    %s
-                </div>
+                <table class="table table-sm table-borderless mb-0">
+                    <tbody>
+                        <tr>
+                            <td class="text-end fw-bold" style="width: 140px; padding: 0.5rem 1rem;">User ID:</td>
+                            <td style="padding: 0.5rem 1rem;">%s</td>
+                        </tr>
+                        <tr>
+                            <td class="text-end fw-bold" style="padding: 0.5rem 1rem;">Name:</td>
+                            <td style="padding: 0.5rem 1rem;">%s</td>
+                        </tr>
+                        <tr>
+                            <td class="text-end fw-bold" style="padding: 0.5rem 1rem;">Username:</td>
+                            <td style="padding: 0.5rem 1rem;">%s</td>
+                        </tr>
+                        <tr>
+                            <td class="text-end fw-bold" style="padding: 0.5rem 1rem;">Status:</td>
+                            <td style="padding: 0.5rem 1rem;">%s</td>
+                        </tr>
+                        <tr>
+                            <td class="text-end fw-bold" style="padding: 0.5rem 1rem;">Is Banned:</td>
+                            <td style="padding: 0.5rem 1rem;">%s</td>
+                        </tr>
+                        <tr>
+                            <td class="text-end fw-bold" style="padding: 0.5rem 1rem;">Ban Until:</td>
+                            <td style="padding: 0.5rem 1rem;" class="text-muted">%s</td>
+                        </tr>
+                        <tr>
+                            <td class="text-end fw-bold align-top" style="padding: 0.5rem 1rem;">Ban Message:</td>
+                            <td style="padding: 0.5rem 1rem;" class="text-muted">%s</td>
+                        </tr>
+                    </tbody>
+                </table>
             </div>
             <div class="col-md-6">
-                <div class="mb-3">
-                    <strong class="d-block mb-2">Created At:</strong>
-                    <div class="text-muted">%s</div>
-                </div>
-                <div class="mb-3">
-                    <strong class="d-block mb-2">Updated At:</strong>
-                    <div class="text-muted">%s</div>
-                </div>
-                <div class="mb-3">
-                    <strong class="d-block mb-2">Last Nonsense:</strong>
-                    <div class="text-muted">%s</div>
-                </div>
-                <div class="mb-3">
-                    <strong class="d-block mb-2">Active Sessions:</strong>
-                    <div>%s</div>
-                </div>
+                <table class="table table-sm table-borderless mb-0">
+                    <tbody>
+                        <tr>
+                            <td class="text-end fw-bold" style="width: 140px; padding: 0.5rem 1rem;">Nonsense Count:</td>
+                            <td style="padding: 0.5rem 1rem;">%s</td>
+                        </tr>
+                        <tr>
+                            <td class="text-end fw-bold" style="padding: 0.5rem 1rem;">Last Nonsense:</td>
+                            <td style="padding: 0.5rem 1rem;" class="text-muted">%s</td>
+                        </tr>
+                        <tr>
+                            <td class="text-end fw-bold" style="padding: 0.5rem 1rem;">Created At:</td>
+                            <td style="padding: 0.5rem 1rem;" class="text-muted">%s</td>
+                        </tr>
+                        <tr>
+                            <td class="text-end fw-bold" style="padding: 0.5rem 1rem;">Updated At:</td>
+                            <td style="padding: 0.5rem 1rem;" class="text-muted">%s</td>
+                        </tr>
+                        <tr>
+                            <td class="text-end fw-bold align-top" style="padding: 0.5rem 1rem;">Active Sessions:</td>
+                            <td style="padding: 0.5rem 1rem;">%s</td>
+                        </tr>
+                        <tr>
+                            <td class="text-end fw-bold align-top" style="padding: 0.5rem 1rem;">Session Sequences:</td>
+                            <td style="padding: 0.5rem 1rem;">%s</td>
+                        </tr>
+                    </tbody>
+                </table>
             </div>
         </div>
     </div>
@@ -240,11 +294,15 @@ func RenderUserDetail(handler *debuger.DebugHandler, userID string) (string, err
 		nameDisplay,
 		usernameDisplay,
 		banStatus,
+		isBannedDisplay,
+		banUntilDisplay,
+		banMessageDisplay,
 		components.CountBadge(user.NonsenseCount, "warning text-dark"),
+		debuger.FormatTime(user.LastNonsenseTime),
 		debuger.FormatTime(user.CreatedAt),
 		debuger.FormatTime(user.UpdatedAt),
-		debuger.FormatTime(user.LastNonsenseTime),
 		activeSessionsHTML,
+		sessionSeqsHTML,
 	)
 
 	// Sessions card
@@ -280,7 +338,8 @@ func RenderUserDetail(handler *debuger.DebugHandler, userID string) (string, err
     <div class="d-flex w-100 justify-content-between align-items-start">
         <div class="flex-grow-1">
             <h6 class="mb-2">%s</h6>
-            <small class="text-muted">Created: %s | Updated: %s</small>
+            <small class="text-muted">SessionID: %s | MsgSeq: %d</small>
+            <small class="text-muted d-block">Created: %s | Updated: %s</small>
             <small class="text-muted d-block">Model: %s</small>
             <small class="text-muted d-block">Summary: %s</small>
             <small class="text-muted d-block">Summarized At: %s</small>
@@ -291,8 +350,10 @@ func RenderUserDetail(handler *debuger.DebugHandler, userID string) (string, err
 </a>`,
 				template.URLQueryEscaper(session.SessionID),
 				template.HTMLEscapeString(title),
-				debuger.FormatTime(session.CreatedAt),
-				debuger.FormatTime(session.UpdatedAt),
+				components.InlineCode(session.SessionID),
+				session.MessageSeq,
+				debuger.FormatDuration(session.CreatedAt),
+				debuger.FormatDuration(session.UpdatedAt),
 				components.InlineCode(debuger.GetModelDisplay(session.Model)),
 				template.HTMLEscapeString(summaryDisplay),
 				summarizedAtDisplay,
@@ -312,16 +373,11 @@ func RenderUserDetail(handler *debuger.DebugHandler, userID string) (string, err
 	if len(messages) == 0 {
 		html += components.InfoAlert("No messages found for this user.")
 	} else {
-		columns := []components.ColumnConfig{
-			{Header: "Time", NoWrap: true},
-			{Header: "Agent", Center: true, NoWrap: true},
-			{Header: "Type", Center: true, NoWrap: true},
-			{Header: "Role", Center: true, NoWrap: true},
-			{Header: "Content"},
-			{Header: "Model", Center: true, NoWrap: true},
-			{Header: "Session", NoWrap: true},
-			{Header: "Nonsense", Center: true, NoWrap: true},
-		}
+		rowConfig := components.DefaultMessageRowConfig()
+		rowConfig.ShowUser = false // Already on user page
+		rowConfig.ShowSession = true
+
+		columns := components.MessageTableColumns(rowConfig)
 		html += components.TableStartWithConfig(columns, components.TableConfig{
 			Striped:     false,
 			Hover:       true,
@@ -333,39 +389,11 @@ func RenderUserDetail(handler *debuger.DebugHandler, userID string) (string, err
 		// Show first 10 messages (already sorted by CreatedAt DESC - newest first)
 		displayCount := debuger.Min(len(messages), 10)
 		for i := 0; i < displayCount; i++ {
-			msg := messages[i]
-			contentDisplay := components.ExpandableWithPreview(msg.Content, 100)
-
-			nonsenseBadge := components.Badge("-", "secondary")
-			if msg.IsNonsense {
-				nonsenseBadge = components.BadgeWithIcon("Nonsense", "⚠️", "warning text-dark")
-			}
-
-			agentBadge := components.AgentTypeBadgeFromModel(msg.AgentType)
-			contentTypeBadge := components.ContentTypeBadgeFromModel(msg.ContentType)
-
-			html += fmt.Sprintf(`<tr>
-                <td class="text-nowrap">%s</td>
-                <td class="text-center">%s</td>
-                <td class="text-center">%s</td>
-                <td class="text-center">%s</td>
-                <td class="text-break">%s</td>
-                <td class="text-center">%s</td>
-                <td class="text-nowrap">%s</td>
-                <td class="text-center">%s</td>
-            </tr>`,
-				debuger.FormatTime(msg.CreatedAt),
-				agentBadge,
-				contentTypeBadge,
-				components.RoleBadge(msg.Role),
-				contentDisplay,
-				components.InlineCode(debuger.GetModelDisplay(msg.Model)),
-				components.OpenButton("/agentize/debug/sessions/"+template.URLQueryEscaper(msg.SessionID)),
-				nonsenseBadge,
-			)
+			html += components.MessageTableRow(messages[i], rowConfig, i)
 		}
 
 		html += components.TableEnd(true)
+		html += components.MessageTableScript()
 	}
 
 	html += ui.CardEnd()

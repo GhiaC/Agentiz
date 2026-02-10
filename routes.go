@@ -28,7 +28,7 @@ func (ag *Agentize) RegisterRoutes(router *gin.Engine) {
 	router.GET("/agentize/debug/messages", ag.handleDebugMessages)
 	router.GET("/agentize/debug/files", ag.handleDebugFiles)
 	router.GET("/agentize/debug/tool-calls", ag.handleDebugToolCalls)
-	router.GET("/agentize/debug/tool-calls/:toolCallID", ag.handleDebugToolCallDetail)
+	router.GET("/agentize/debug/tool-calls/:toolID", ag.handleDebugToolCallDetail)
 	router.GET("/agentize/debug/summarized", ag.handleDebugSummarized)
 	router.GET("/agentize/debug/summarized/:logID", ag.handleDebugSummarizationLogDetail)
 
@@ -302,9 +302,9 @@ func (ag *Agentize) handleDebugToolCalls(c *gin.Context) {
 
 // handleDebugToolCallDetail handles tool call detail page requests
 func (ag *Agentize) handleDebugToolCallDetail(c *gin.Context) {
-	toolCallID := c.Param("toolCallID")
-	if toolCallID == "" {
-		c.JSON(400, gin.H{"error": "toolCallID parameter is required"})
+	toolID := c.Param("toolID")
+	if toolID == "" {
+		c.JSON(400, gin.H{"error": "toolID parameter is required"})
 		return
 	}
 
@@ -314,7 +314,7 @@ func (ag *Agentize) handleDebugToolCallDetail(c *gin.Context) {
 		return
 	}
 
-	html, err := pages.RenderToolCallDetail(handler, toolCallID)
+	html, err := pages.RenderToolCallDetail(handler, toolID)
 	if err != nil {
 		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to generate tool call detail page: %v", err)})
 		return

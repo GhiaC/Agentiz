@@ -370,6 +370,11 @@ func (s *DBStore) GetToolCallByID(toolCallID string) (*model.ToolCall, error) {
 	return s.sqliteStore.GetToolCallByID(toolCallID)
 }
 
+// GetToolCallByToolID returns a tool call by its ToolID (sequential ID) (delegates to SQLiteStore)
+func (s *DBStore) GetToolCallByToolID(toolID string) (*model.ToolCall, error) {
+	return s.sqliteStore.GetToolCallByToolID(toolID)
+}
+
 // SessionStore is an alias for model.SessionStore for backward compatibility
 type SessionStore = model.SessionStore
 

@@ -21,6 +21,7 @@ type DebugStore interface {
 	GetAllToolCalls() ([]*model.ToolCall, error)
 	GetToolCallsBySession(sessionID string) ([]*model.ToolCall, error)
 	GetToolCallByID(toolCallID string) (*model.ToolCall, error)
+	GetToolCallByToolID(toolID string) (*model.ToolCall, error)
 	PutSummarizationLog(log *model.SummarizationLog) error
 	GetSummarizationLogsBySession(sessionID string) ([]*model.SummarizationLog, error)
 	GetAllSummarizationLogs() ([]*model.SummarizationLog, error)
@@ -42,7 +43,8 @@ type ToolCallInfo struct {
 	SessionID    string
 	UserID       string
 	MessageID    string
-	ToolCallID   string
+	ToolID       string // Sequential tool ID (e.g., user123-core-s0001-t0001)
+	ToolCallID   string // OpenAI's tool call ID
 	AgentType    string
 	FunctionName string
 	Arguments    string
