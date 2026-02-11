@@ -1,7 +1,6 @@
 package model
 
 import (
-	"fmt"
 	"time"
 )
 
@@ -33,12 +32,13 @@ type OpenedFile struct {
 }
 
 // NewOpenedFile creates a new opened file record
-func NewOpenedFile(sessionID string, userID string, filePath string, fileName string) *OpenedFile {
+// Uses session.GenerateFileID() for sequence-based ID generation
+func NewOpenedFile(session *Session, filePath string, fileName string) *OpenedFile {
 	now := time.Now()
 	return &OpenedFile{
-		FileID:    generateFileID(sessionID, filePath, now),
-		SessionID: sessionID,
-		UserID:    userID,
+		FileID:    session.GenerateFileID(),
+		SessionID: session.SessionID,
+		UserID:    session.UserID,
 		FilePath:  filePath,
 		FileName:  fileName,
 		OpenedAt:  now,
@@ -51,10 +51,4 @@ func NewOpenedFile(sessionID string, userID string, filePath string, fileName st
 func (f *OpenedFile) Close() {
 	f.IsOpen = false
 	f.ClosedAt = time.Now()
-}
-
-// generateFileID generates a unique file ID
-func generateFileID(sessionID string, filePath string, timestamp time.Time) string {
-	date := timestamp.Format("060102150405") // YYMMDDHHMMSS
-	return fmt.Sprintf("%s-%s-%s-%s", date, sessionID[:min(8, len(sessionID))], filePath[:min(8, len(filePath))], randomString(4))
 }

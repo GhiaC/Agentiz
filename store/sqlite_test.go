@@ -95,8 +95,8 @@ func TestSQLiteStore_ConversationState(t *testing.T) {
 
 	session := model.NewSessionWithType("user123", model.AgentTypeCore)
 
-	// Add messages to conversation state
-	session.ConversationState.Msgs = []openai.ChatCompletionMessage{
+	// Add messages to session
+	session.Msgs = []openai.ChatCompletionMessage{
 		{
 			Role:    openai.ChatMessageRoleUser,
 			Content: "Hello",
@@ -116,14 +116,11 @@ func TestSQLiteStore_ConversationState(t *testing.T) {
 		t.Fatalf("Failed to get session: %v", err)
 	}
 
-	if retrieved.ConversationState == nil {
-		t.Fatal("ConversationState is nil")
+	if len(retrieved.Msgs) != 2 {
+		t.Errorf("Expected 2 messages, got %d", len(retrieved.Msgs))
 	}
-	if len(retrieved.ConversationState.Msgs) != 2 {
-		t.Errorf("Expected 2 messages, got %d", len(retrieved.ConversationState.Msgs))
-	}
-	if retrieved.ConversationState.Msgs[0].Content != "Hello" {
-		t.Errorf("First message content mismatch: got %s, want Hello", retrieved.ConversationState.Msgs[0].Content)
+	if retrieved.Msgs[0].Content != "Hello" {
+		t.Errorf("First message content mismatch: got %s, want Hello", retrieved.Msgs[0].Content)
 	}
 }
 

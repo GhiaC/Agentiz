@@ -402,11 +402,8 @@ sessionLoop:
 				break sessionLoop
 			}
 
-			msgCount := 0
-			if session.ConversationState != nil {
-				msgCount = len(session.ConversationState.Msgs)
-				totalMessages += msgCount
-			}
+			msgCount := len(session.Msgs)
+			totalMessages += msgCount
 
 			// Track sessions with/without messages
 			if msgCount > 0 {
@@ -425,7 +422,7 @@ sessionLoop:
 				sessionsNotEligible++
 				// Log why session is not eligible (only for sessions with messages)
 				reasons := []string{}
-				if session.ConversationState == nil || msgCount == 0 {
+				if msgCount == 0 {
 					reasons = append(reasons, "no messages")
 				}
 
@@ -444,8 +441,8 @@ sessionLoop:
 					if summarizedAge < ss.config.SubsequentTimeThreshold {
 						reasons = append(reasons, fmt.Sprintf("summarized %v ago (need %v)", summarizedAge, ss.config.SubsequentTimeThreshold))
 					}
-					if session.ConversationState != nil && !session.ConversationState.LastActivity.IsZero() {
-						lastActivityAge := now.Sub(session.ConversationState.LastActivity)
+					if !session.UpdatedAt.IsZero() {
+						lastActivityAge := now.Sub(session.UpdatedAt)
 						if lastActivityAge > ss.config.LastActivityThreshold {
 							reasons = append(reasons, fmt.Sprintf("last activity %v ago (need within %v)", lastActivityAge, ss.config.LastActivityThreshold))
 						}
@@ -511,12 +508,24 @@ sessionLoop:
 // 2. First summarization (never summarized): only needs FirstSummarizationThreshold messages
 // 3. Subsequent summarizations: needs SubsequentMessageThreshold messages AND SubsequentTimeThreshold time since last summarization
 func (ss *SessionScheduler) isEligibleForSummarization(session *model.Session, now time.Time) bool {
+	// INCOMPLETE SUMMARIZATION: SummarizedAt set but Summary empty — always re-summarize (check FIRST so we don't skip due to empty Msgs)
+	// This must be checked before "no messages" check because sessions with SummarizedAt but empty Summary should be re-summarized
+	// even if their current Msgs are empty (we'll use ArchivedMsgs in summarizeSession)
+	if !session.SummarizedAt.IsZero() && session.Summary == "" {
+		msgCount := len(session.Msgs)
+		if !ss.config.DisableLogs {
+			log.Log.Infof("[SessionScheduler] 🔄 Session has SummarizedAt but empty Summary, re-summarizing | SessionID: %s | CurrentMsgs: %d (will use archived if needed)",
+				session.SessionID, msgCount)
+		}
+		return true
+	}
+
 	// Check if session has messages
-	if session.ConversationState == nil || len(session.ConversationState.Msgs) == 0 {
+	if len(session.Msgs) == 0 {
 		return false
 	}
 
-	msgCount := len(session.ConversationState.Msgs)
+	msgCount := len(session.Msgs)
 
 	// IMMEDIATE CASE: If messages exceed ImmediateSummarizationThreshold, summarize immediately
 	// This overrides all other conditions to prevent context window overflow
@@ -555,10 +564,10 @@ func (ss *SessionScheduler) isEligibleForSummarization(session *model.Session, n
 	}
 
 	// Check if LastActivity is recent (session is being used)
-	if session.ConversationState.LastActivity.IsZero() {
+	if session.UpdatedAt.IsZero() {
 		return false
 	}
-	lastActivityRecent := now.Sub(session.ConversationState.LastActivity) <= ss.config.LastActivityThreshold
+	lastActivityRecent := now.Sub(session.UpdatedAt) <= ss.config.LastActivityThreshold
 	if !lastActivityRecent {
 		return false
 	}
@@ -566,7 +575,7 @@ func (ss *SessionScheduler) isEligibleForSummarization(session *model.Session, n
 	return true
 }
 
-// summarizeSession summarizes a session and moves messages to ExMsgs
+// summarizeSession summarizes a session and moves messages to ArchivedMsgs
 func (ss *SessionScheduler) summarizeSession(ctx context.Context, session *model.Session) error {
 	// Lock the session to prevent race conditions with AddMessage
 	ss.sessionHandler.LockSession(session.SessionID)
@@ -580,12 +589,22 @@ func (ss *SessionScheduler) summarizeSession(ctx context.Context, session *model
 	}
 	session = freshSession
 
-	msgCount := len(session.ConversationState.Msgs)
+	msgCount := len(session.Msgs)
+	// When Msgs is empty but summarization is needed (e.g. SummarizedAt set but Summary empty), use ArchivedMsgs
+	useArchivedForSummary := false
 	if msgCount == 0 {
-		if !ss.config.DisableLogs {
-			log.Log.Infof("[SessionScheduler] ⏭️  Session %s has no messages after lock, skipping", session.SessionID)
+		if len(session.ArchivedMsgs) == 0 {
+			if !ss.config.DisableLogs {
+				log.Log.Infof("[SessionScheduler] ⏭️  Session %s has no messages and no archived messages, skipping", session.SessionID)
+			}
+			return nil
 		}
-		return nil
+		// Should re-summarize using archived messages (e.g. incomplete: SummarizedAt set but Summary empty)
+		useArchivedForSummary = true
+		msgCount = len(session.ArchivedMsgs) // for log stats
+		if !ss.config.DisableLogs {
+			log.Log.Infof("[SessionScheduler] 📝 Session %s has no current Msgs, using %d archived messages for summarization", session.SessionID, msgCount)
+		}
 	}
 
 	if !ss.config.DisableLogs {
@@ -607,27 +626,33 @@ func (ss *SessionScheduler) summarizeSession(ctx context.Context, session *model
 	}
 
 	// Create summarization log with all context before summarization
-	summLog := model.NewSummarizationLog(session.SessionID, session.UserID)
+	summLog := model.NewSummarizationLog(session)
 	summLog.SessionTitle = session.Title
 	summLog.PreviousSummary = session.Summary
 	summLog.PreviousTags = strings.Join(session.Tags, ", ")
 	summLog.MessagesBeforeCount = msgCount
-	summLog.ArchivedMessagesCount = len(session.SummarizedMessages) + len(session.ExMsgs)
+	summLog.ArchivedMessagesCount = len(session.ArchivedMsgs)
 	summLog.RequestedModel = ss.config.SummaryModel
 	summLog.SummarizationType = summarizationType
 
 	// Get debug store for logging
 	debugStore, hasDebugStore := sessionStore.(debuger.DebugStore)
 
-	// Format conversation for summarization
-	conversationText := formatMessagesForSummary(session.ConversationState.Msgs)
+	// Format conversation for summarization (use current Msgs or ArchivedMsgs when Msgs empty)
+	var conversationText string
+	if useArchivedForSummary {
+		conversationText = formatMessagesForSummary(session.ArchivedMsgs)
+	} else {
+		conversationText = formatMessagesForSummary(session.Msgs)
+	}
 
 	// Track what we generate
 	var generatedSummary, generatedTags, generatedTitle string
 
 	// Generate improved summary (incorporating previous summary)
 	previousSummary := session.Summary
-	newSummary, summaryResp, err := ss.generateImprovedSummaryWithResponse(ctx, session.SessionID, session.UserID, previousSummary, conversationText)
+	newSummary, summaryResp, promptSent, err := ss.generateImprovedSummaryWithResponse(ctx, session.SessionID, session.UserID, previousSummary, conversationText)
+	summLog.PromptSent = promptSent // Store prompt for debug/DB (even on failure)
 	if err != nil {
 		if !ss.config.DisableLogs {
 			log.Log.Warnf("[SessionScheduler] ⚠️  Failed to generate summary for session %s: %v", session.SessionID, err)
@@ -681,43 +706,35 @@ func (ss *SessionScheduler) summarizeSession(ctx context.Context, session *model
 		summLog.ModelUsed = ss.config.SummaryModel
 	}
 
-	// Create a backup of Msgs before moving (for rollback in case of save failure)
-	msgsBackup := make([]openai.ChatCompletionMessage, len(session.ConversationState.Msgs))
-	copy(msgsBackup, session.ConversationState.Msgs)
-	summarizedMsgsBackupLen := len(session.SummarizedMessages)
-	exMsgsBackupLen := len(session.ExMsgs)
+	// When we had current Msgs: move them to ArchivedMsgs. When we used archived only: no move.
+	msgsToMove := make([]openai.ChatCompletionMessage, len(session.Msgs))
+	copy(msgsToMove, session.Msgs)
 
-	// Move current Msgs to both SummarizedMessages (for counting) and ExMsgs (for debug)
-	msgsToMove := make([]openai.ChatCompletionMessage, len(session.ConversationState.Msgs))
-	copy(msgsToMove, session.ConversationState.Msgs)
-	session.SummarizedMessages = append(session.SummarizedMessages, msgsToMove...)
-	session.ExMsgs = append(session.ExMsgs, msgsToMove...)
+	var archivedMsgsBackupLen int
+	if len(msgsToMove) > 0 {
+		archivedMsgsBackupLen = len(session.ArchivedMsgs)
+		session.ArchivedMsgs = append(session.ArchivedMsgs, msgsToMove...)
+		session.Msgs = []openai.ChatCompletionMessage{}
+	}
 
-	// Clear Msgs
-	session.ConversationState.Msgs = []openai.ChatCompletionMessage{}
-
-	// Update timestamps
 	session.SummarizedAt = time.Now()
 	session.UpdatedAt = time.Now()
 
-	// Update log with after-state
-	summLog.MessagesAfterCount = len(session.ConversationState.Msgs) // Should be 0
-	summLog.ArchivedMessagesCount = len(session.SummarizedMessages)
+	// Update log with after-state before save
+	summLog.MessagesAfterCount = len(session.Msgs)
+	summLog.ArchivedMessagesCount = len(session.ArchivedMsgs)
 
-	// Save session - if this fails, we'll rollback the changes
+	// Save session - if this fails, rollback when we had moved msgs
 	if err := sessionStore.Put(session); err != nil {
-		// Rollback: restore Msgs and remove from SummarizedMessages and ExMsgs
-		session.ConversationState.Msgs = msgsBackup
-		session.SummarizedMessages = session.SummarizedMessages[:summarizedMsgsBackupLen]
-		session.ExMsgs = session.ExMsgs[:exMsgsBackupLen]
-
-		// Log the failure
+		if len(msgsToMove) > 0 {
+			session.Msgs = msgsToMove
+			session.ArchivedMsgs = session.ArchivedMsgs[:archivedMsgsBackupLen]
+		}
 		summLog.MarkCompleted("failed")
 		summLog.ErrorMessage = fmt.Sprintf("failed to save session: %v", err)
 		if hasDebugStore {
 			_ = debugStore.PutSummarizationLog(summLog)
 		}
-
 		return fmt.Errorf("failed to save session: %w", err)
 	}
 
@@ -729,15 +746,15 @@ func (ss *SessionScheduler) summarizeSession(ctx context.Context, session *model
 
 	if !ss.config.DisableLogs {
 		log.Log.Infof("[SessionScheduler] ✅ Session %s summarized | Type: %s | Moved: %d msgs | Archived: %d | Summary: %s | Tags: %v | Duration: %dms",
-			session.SessionID, summarizationType, len(msgsToMove), len(session.SummarizedMessages),
+			session.SessionID, summarizationType, len(msgsToMove), len(session.ArchivedMsgs),
 			truncateStringForLog(session.Summary, 50), session.Tags, summLog.DurationMs)
 	}
 
 	return nil
 }
 
-// generateImprovedSummaryWithResponse generates an improved summary and returns the full response
-func (ss *SessionScheduler) generateImprovedSummaryWithResponse(ctx context.Context, sessionID string, userID string, previousSummary string, conversationText string) (string, *openai.ChatCompletionResponse, error) {
+// generateImprovedSummaryWithResponse generates an improved summary and returns the full response and the prompt sent (for logging).
+func (ss *SessionScheduler) generateImprovedSummaryWithResponse(ctx context.Context, sessionID string, userID string, previousSummary string, conversationText string) (string, *openai.ChatCompletionResponse, string, error) {
 	if !ss.config.DisableLogs {
 		log.Log.Infof("[SessionScheduler] 🔍 generateImprovedSummaryWithResponse called | SessionID: %s | PreviousSummary: %s",
 			sessionID, truncateStringForLog(previousSummary, 50))
@@ -770,6 +787,9 @@ func (ss *SessionScheduler) generateImprovedSummaryWithResponse(ctx context.Cont
 	}
 	userPrompt = strings.Replace(userPrompt, "{{.ConversationText}}", conversationText, 1)
 
+	// Build prompt string for DB/debug (same format as sent to LLM)
+	promptSent := formatPromptForLog(systemPrompt, userPrompt)
+
 	request := openai.ChatCompletionRequest{
 		Model: ss.config.SummaryModel,
 		Messages: []openai.ChatCompletionMessage{
@@ -785,11 +805,11 @@ func (ss *SessionScheduler) generateImprovedSummaryWithResponse(ctx context.Cont
 
 	resp, err := ss.chatCompletion(ctx, request)
 	if err != nil {
-		return "", nil, err
+		return "", nil, promptSent, err
 	}
 
 	if len(resp.Choices) == 0 {
-		return "", nil, fmt.Errorf("no response from LLM")
+		return "", nil, promptSent, fmt.Errorf("no response from LLM")
 	}
 
 	summary := strings.TrimSpace(resp.Choices[0].Message.Content)
@@ -798,7 +818,12 @@ func (ss *SessionScheduler) generateImprovedSummaryWithResponse(ctx context.Cont
 		log.Log.Infof("[SessionScheduler] 📊 TOKEN USAGE >> total=%d (improved summary)", resp.Usage.TotalTokens)
 	}
 
-	return summary, &resp, nil
+	return summary, &resp, promptSent, nil
+}
+
+// formatPromptForLog formats system and user prompt for storage in SummarizationLog.PromptSent
+func formatPromptForLog(systemPrompt, userPrompt string) string {
+	return "=== System ===\n" + systemPrompt + "\n\n=== User ===\n" + userPrompt
 }
 
 // generateAndMergeTags generates new tags and merges with existing ones

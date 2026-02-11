@@ -72,6 +72,12 @@ type CoreHandler struct {
 	coreSessions   map[string]*model.Session
 	coreSessionsMu sync.RWMutex
 
+	// Per-user mutex for serializing message processing
+	// Ensures only one message is processed at a time per user to prevent
+	// race conditions on session creation and sequence number generation
+	userMutexes   map[string]*sync.Mutex
+	userMutexesMu sync.RWMutex
+
 	// Configuration
 	config CoreHandlerConfig
 
@@ -101,6 +107,7 @@ func NewCoreHandler(
 		userAgentLow:   userAgentLow,
 		config:         config,
 		coreSessions:   make(map[string]*model.Session),
+		userMutexes:    make(map[string]*sync.Mutex),
 		coreTools:      model.NewFunctionRegistry(),
 	}
 
@@ -108,6 +115,31 @@ func NewCoreHandler(
 	ch.registerCoreTools()
 
 	return ch
+}
+
+// getUserMutex returns or creates a mutex for a specific user
+// This ensures only one message is processed at a time per user
+func (ch *CoreHandler) getUserMutex(userID string) *sync.Mutex {
+	// First try with read lock (fast path for existing mutexes)
+	ch.userMutexesMu.RLock()
+	if mu, exists := ch.userMutexes[userID]; exists {
+		ch.userMutexesMu.RUnlock()
+		return mu
+	}
+	ch.userMutexesMu.RUnlock()
+
+	// Need to create new mutex, acquire write lock
+	ch.userMutexesMu.Lock()
+	defer ch.userMutexesMu.Unlock()
+
+	// Double-check after acquiring write lock
+	if mu, exists := ch.userMutexes[userID]; exists {
+		return mu
+	}
+
+	mu := &sync.Mutex{}
+	ch.userMutexes[userID] = mu
+	return mu
 }
 
 // SetCallback sets the billing/usage callback on the CoreHandler and propagates it to child engines.
@@ -197,11 +229,18 @@ func (ch *CoreHandler) SetHTTPClient(client *http.Client) {
 
 // ProcessMessage is the main entry point for user messages
 // It routes through the Core's orchestration logic
+// Uses per-user mutex to ensure only one message is processed at a time per user
 func (ch *CoreHandler) ProcessMessage(
 	ctx context.Context,
 	userID string,
 	userMessage string,
 ) (string, error) {
+	// Acquire per-user mutex to serialize message processing
+	// This prevents race conditions on session creation and sequence number generation
+	userMu := ch.getUserMutex(userID)
+	userMu.Lock()
+	defer userMu.Unlock()
+
 	// Notify status: message received
 	notifyStatus(ctx, userID, "", StatusReceived, "")
 
@@ -266,8 +305,8 @@ func (ch *CoreHandler) ProcessMessage(
 	}
 
 	// Add user message to Core's session
-	coreSession.ConversationState.Msgs = append(
-		coreSession.ConversationState.Msgs,
+	coreSession.Msgs = append(
+		coreSession.Msgs,
 		openai.ChatCompletionMessage{
 			Role:    openai.ChatMessageRoleUser,
 			Content: userMessage,
@@ -288,7 +327,7 @@ func (ch *CoreHandler) ProcessMessage(
 	}
 
 	// Build messages for LLM call
-	messages := ch.buildMessages(systemPrompts, coreSession.ConversationState.Msgs)
+	messages := ch.buildMessages(systemPrompts, coreSession.Msgs)
 
 	// Get Core's tools
 	tools := ch.getCoreToolsForLLM()
@@ -306,14 +345,14 @@ func (ch *CoreHandler) ProcessMessage(
 	}
 
 	// Add assistant response to Core's session
-	coreSession.ConversationState.Msgs = append(
-		coreSession.ConversationState.Msgs,
+	coreSession.Msgs = append(
+		coreSession.Msgs,
 		openai.ChatCompletionMessage{
 			Role:    openai.ChatMessageRoleAssistant,
 			Content: response,
 		},
 	)
-	coreSession.ConversationState.LastActivity = time.Now()
+	coreSession.UpdatedAt = time.Now()
 
 	// Save Core session after adding assistant response
 	if err := ch.saveCoreSession(coreSession); err != nil {
@@ -582,7 +621,7 @@ func (ch *CoreHandler) buildActiveSessionsPrompt(userID string) string {
 		if title == "" {
 			title = "Untitled"
 		}
-		msgCount := len(session.ConversationState.Msgs)
+		msgCount := len(session.Msgs)
 		sb.WriteString(fmt.Sprintf("- **%s**: [%s] \"%s\" (%d messages)\n", at.name, sessionID, title, msgCount))
 	}
 
@@ -734,6 +773,7 @@ func (ch *CoreHandler) getCoreToolsForLLM() []openai.Tool {
 		Type: openai.ToolTypeFunction,
 		Function: &openai.FunctionDefinition{
 			Name: "update_status",
+			// TODO write shorter Description
 			Description: "Send a real-time status/progress update to the user. " +
 				"Use before long operations to inform the user what you are doing. " +
 				"You can also send partial results or intermediate findings. " +
@@ -757,7 +797,7 @@ func (ch *CoreHandler) getCoreToolsForLLM() []openai.Tool {
 			Type: openai.ToolTypeFunction,
 			Function: &openai.FunctionDefinition{
 				Name:        "web_search",
-				Description: "Search the web for up-to-date information. Use this when you need current information, recent news, real-time data, or information that may have changed recently. The search will return results with citations to sources.",
+				Description: "Search the web for up-to-date information. Use this when you need current information, recent news, real-time data, or information that may have changed recently. The search will return results with citations to sources. Input: query (string, required) - The search query to find information on the web.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -774,7 +814,7 @@ func (ch *CoreHandler) getCoreToolsForLLM() []openai.Tool {
 			Type: openai.ToolTypeFunction,
 			Function: &openai.FunctionDefinition{
 				Name:        "web_search_deepresearch",
-				Description: "Same as web_search but uses Tongyi DeepResearch model (alibaba/tongyi-deepresearch-30b-a3b). Use for testing or when you want deep-research style search results.",
+				Description: "Same as web_search but uses Tongyi DeepResearch model (alibaba/tongyi-deepresearch-30b-a3b). Use for testing or when you want deep-research style search results. Input: query (string, required) - The search query to find information on the web.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -1522,6 +1562,7 @@ func (ch *CoreHandler) UseVisionLLMConfig(config LLMConfig) error {
 // ProcessMessageWithImage handles messages that include an image
 // It uses the Vision LLM (if configured) or falls back to the main LLM
 // The image is processed directly by the LLM, not sent to UserAgents
+// Uses per-user mutex to ensure only one message is processed at a time per user
 func (ch *CoreHandler) ProcessMessageWithImage(
 	ctx context.Context,
 	userID string,
@@ -1529,6 +1570,12 @@ func (ch *CoreHandler) ProcessMessageWithImage(
 	imageData []byte,
 	imageMimeType string,
 ) (string, error) {
+	// Acquire per-user mutex to serialize message processing
+	// This prevents race conditions on session creation and sequence number generation
+	userMu := ch.getUserMutex(userID)
+	userMu.Lock()
+	defer userMu.Unlock()
+
 	log.Log.Infof("[CoreHandler] 🖼️  Processing image message | UserID: %s | Message length: %d chars | Image size: %d bytes | MimeType: %s",
 		userID, len(userMessage), len(imageData), imageMimeType)
 
@@ -1602,8 +1649,8 @@ func (ch *CoreHandler) ProcessMessageWithImage(
 	} else {
 		historyContent = fmt.Sprintf("(کاربر یک تصویر ارسال کرد) %s", userMessage)
 	}
-	coreSession.ConversationState.Msgs = append(
-		coreSession.ConversationState.Msgs,
+	coreSession.Msgs = append(
+		coreSession.Msgs,
 		openai.ChatCompletionMessage{
 			Role:    openai.ChatMessageRoleUser,
 			Content: historyContent,
@@ -1637,7 +1684,7 @@ func (ch *CoreHandler) ProcessMessageWithImage(
 	}
 
 	// Add conversation history (without the current message)
-	historyMsgs := coreSession.ConversationState.Msgs
+	historyMsgs := coreSession.Msgs
 	if len(historyMsgs) > 1 {
 		messages = append(messages, historyMsgs[:len(historyMsgs)-1]...)
 	}
@@ -1675,14 +1722,14 @@ func (ch *CoreHandler) ProcessMessageWithImage(
 	}
 
 	// Add assistant response to session
-	coreSession.ConversationState.Msgs = append(
-		coreSession.ConversationState.Msgs,
+	coreSession.Msgs = append(
+		coreSession.Msgs,
 		openai.ChatCompletionMessage{
 			Role:    openai.ChatMessageRoleAssistant,
 			Content: response,
 		},
 	)
-	coreSession.ConversationState.LastActivity = time.Now()
+	coreSession.UpdatedAt = time.Now()
 
 	// Save session
 	if err := ch.saveCoreSession(coreSession); err != nil {

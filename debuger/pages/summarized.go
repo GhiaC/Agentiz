@@ -228,8 +228,8 @@ func RenderSummarizedMessages(handler *debuger.DebugHandler) (string, error) {
 
 	for _, sessions := range sessionsByUser {
 		for _, session := range sessions {
-			if len(session.SummarizedMessages) > 0 {
-				for _, msg := range session.SummarizedMessages {
+			if len(session.ArchivedMsgs) > 0 {
+				for _, msg := range session.ArchivedMsgs {
 					allSummarizedMessages = append(allSummarizedMessages, debuger.SummarizedMessageInfo{
 						SessionID:        session.SessionID,
 						UserID:           session.UserID,

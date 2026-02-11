@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sashabaranov/go-openai"
@@ -34,47 +35,54 @@ const (
 )
 
 // Session represents a user session in the agent system
+// All fields are flattened for simple database storage and loading
 type Session struct {
-	// UserID identifies the user
-	UserID string
-
-	// SessionID is a unique identifier for this session
+	// ==================== Identifiers ====================
+	UserID    string
 	SessionID string
+	AgentType AgentType // core, high, low, user
+	Model     string    // LLM model name (e.g., "gpt-4o", "gpt-4o-mini")
 
-	// ConversationState stores conversation/interaction data
-	ConversationState *ConversationState
+	// ==================== Messages (flattened from ConversationState) ====================
+	// Msgs contains the active conversation messages
+	Msgs []openai.ChatCompletionMessage
 
+	// ArchivedMsgs contains messages that have been summarized and moved out of active conversation
+	// (Previously was both SummarizedMessages and ExMsgs - now unified)
+	ArchivedMsgs []openai.ChatCompletionMessage
+
+	// ==================== Runtime State (not persisted to database) ====================
+	// InProgress indicates if a message is currently being processed
+	InProgress bool `bson:"-" json:"-"`
+
+	// Queue holds messages waiting to be processed
+	Queue []openai.ChatCompletionMessage `bson:"-" json:"-"`
+
+	// ==================== Knowledge/Tools ====================
 	// NodeDigests stores lightweight information about visited nodes
 	NodeDigests []NodeDigest
 
 	// ToolResults stores tool execution results by unique ID (for large results)
 	ToolResults map[string]string
 
-	// Metadata
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	// ==================== Timestamps ====================
+	CreatedAt    time.Time
+	UpdatedAt    time.Time // Also serves as LastActivity
+	SummarizedAt time.Time // When the session was last summarized
 
-	// Session organization and summarization fields
+	// ==================== Summarization ====================
 	Tags    []string // User-defined or auto-generated tags for categorization
 	Title   string   // Session title (auto-generated or user-set)
 	Summary string   // LLM-generated summary of the conversation
 
-	// Summarization state
-	SummarizedAt       time.Time                      // When the session was last summarized
-	SummarizedMessages []openai.ChatCompletionMessage // Archived messages that have been summarized
-	ExMsgs             []openai.ChatCompletionMessage // Exported messages (moved from Msgs after summarization, only for debug)
+	// ==================== Sequences ====================
+	MessageSeq          int // Sequence counter for messages
+	ToolSeq             int // Sequence counter for tool calls
+	OpenedFileSeq       int // Sequence counter for opened files
+	SummarizationLogSeq int // Sequence counter for summarization logs
 
-	// Agent type identifier (core, high, low)
-	AgentType AgentType
-
-	// Model name used in this session (e.g., "gpt-4o", "gpt-4o-mini")
-	Model string
-
-	// MessageSeq is the sequence counter for messages in this session
-	MessageSeq int
-
-	// ToolSeq is the sequence counter for tool calls in this session
-	ToolSeq int
+	// ==================== Internal (not persisted) ====================
+	seqMu sync.Mutex `bson:"-" json:"-"` // Mutex for thread-safe sequence operations
 }
 
 // NodeDigest is a lightweight representation of a node (for memory efficiency)
@@ -87,43 +95,36 @@ type NodeDigest struct {
 	Excerpt  string // First 100 chars of content
 }
 
-// NewSession creates a new session for a user (without User object - generates random ID)
-// Deprecated: Use NewSessionForUser instead for proper session ID generation
-func NewSession(userID string) *Session {
+// NewSessionWithID creates a new session with a pre-generated session ID
+// This is the preferred method when you have the session ID already (e.g., from store.GetNextSessionSeq)
+func NewSessionWithID(userID string, sessionID string, agentType AgentType) *Session {
 	now := time.Now()
 	return &Session{
-		UserID:             userID,
-		SessionID:          generateRandomSessionID(userID),
-		ConversationState:  NewConversationState(),
-		NodeDigests:        []NodeDigest{},
-		ToolResults:        make(map[string]string),
-		CreatedAt:          now,
-		UpdatedAt:          now,
-		Tags:               []string{},
-		Title:              "",
-		Summary:            "",
-		SummarizedMessages: []openai.ChatCompletionMessage{},
-		ExMsgs:             []openai.ChatCompletionMessage{},
-		AgentType:          "",
-		Model:              "",
-		MessageSeq:         0,
-		ToolSeq:            0,
+		UserID:              userID,
+		SessionID:           sessionID,
+		AgentType:           agentType,
+		Model:               "",
+		Msgs:                []openai.ChatCompletionMessage{},
+		ArchivedMsgs:        []openai.ChatCompletionMessage{},
+		InProgress:          false,
+		Queue:               []openai.ChatCompletionMessage{},
+		NodeDigests:         []NodeDigest{},
+		ToolResults:         make(map[string]string),
+		CreatedAt:           now,
+		UpdatedAt:           now,
+		Tags:                []string{},
+		Title:               "",
+		Summary:             "",
+		MessageSeq:          0,
+		ToolSeq:             0,
+		OpenedFileSeq:       0,
+		SummarizationLogSeq: 0,
 	}
-}
-
-// NewSessionWithType creates a new session for a user with a specific agent type (without User object)
-// Deprecated: Use NewSessionForUser instead for proper session ID generation
-func NewSessionWithType(userID string, agentType AgentType) *Session {
-	session := NewSession(userID)
-	session.AgentType = agentType
-	// Update SessionID to include agent type with random suffix
-	session.SessionID = generateRandomSessionIDWithType(userID, agentType)
-	return session
 }
 
 // NewSessionForUser creates a new session for a user with proper sequential ID
 // Format: {UserID}-{AgentType}-s{SeqCounter}
-// This is the preferred method for creating sessions
+// This method uses User.NextSessionSeq for sequence generation
 // Note: user must not be nil - caller should check before calling
 func NewSessionForUser(user *User, agentType AgentType) *Session {
 	if user == nil {
@@ -132,26 +133,16 @@ func NewSessionForUser(user *User, agentType AgentType) *Session {
 
 	seq := user.NextSessionSeq(agentType)
 	sessionID := GenerateSessionID(user.UserID, agentType, seq)
+	return NewSessionWithID(user.UserID, sessionID, agentType)
+}
 
-	now := time.Now()
-	return &Session{
-		UserID:             user.UserID,
-		SessionID:          sessionID,
-		ConversationState:  NewConversationState(),
-		NodeDigests:        []NodeDigest{},
-		ToolResults:        make(map[string]string),
-		CreatedAt:          now,
-		UpdatedAt:          now,
-		Tags:               []string{},
-		Title:              "",
-		Summary:            "",
-		SummarizedMessages: []openai.ChatCompletionMessage{},
-		ExMsgs:             []openai.ChatCompletionMessage{},
-		AgentType:          agentType,
-		Model:              "",
-		MessageSeq:         0,
-		ToolSeq:            0,
-	}
+// NewSessionWithType creates a new session for a user with a specific agent type
+// This is a convenience function for tests and simple use cases
+// For production, prefer using SessionHandler.CreateSession or NewSessionWithID
+func NewSessionWithType(userID string, agentType AgentType) *Session {
+	// Use seq=1 for simple initialization (tests, local dev)
+	sessionID := GenerateSessionID(userID, agentType, 1)
+	return NewSessionWithID(userID, sessionID, agentType)
 }
 
 // GenerateSessionID generates a session ID with the new format
@@ -176,73 +167,190 @@ func agentTypeShortCode(agentType AgentType) string {
 	}
 }
 
-// generateRandomSessionID generates a random session ID (legacy format)
-// Format: {userID}-{YYMMDD}-{random4}
-func generateRandomSessionID(userID string) string {
-	date := time.Now().Format("060102") // YYMMDD
-	return userID + "-" + date + "-" + randomString(4)
-}
-
-// generateRandomSessionIDWithType generates a random session ID with agent type
-// Format: {userID}-{agentType}-{YYMMDD}-{random4}
-func generateRandomSessionIDWithType(userID string, agentType AgentType) string {
-	date := time.Now().Format("060102") // YYMMDD
-	agentShort := agentTypeShortCode(agentType)
-	return fmt.Sprintf("%s-%s-%s-%s", userID, agentShort, date, randomString(4))
-}
-
-func randomString(n int) string {
-	const charset = "abcdefghijklmnopqrstuvwxyz0123456789"
-	nano := time.Now().UnixNano()
-	b := make([]byte, n)
-	for i := range b {
-		b[i] = charset[(nano+int64(i*7))%int64(len(charset))]
-	}
-	return string(b)
-}
-
 // NextMessageSeq increments and returns the next message sequence number
+// Thread-safe via mutex
 func (s *Session) NextMessageSeq() int {
+	s.seqMu.Lock()
+	defer s.seqMu.Unlock()
 	s.MessageSeq++
 	return s.MessageSeq
 }
 
 // GenerateMessageID generates a unique message ID for this session
 // Format: {SessionID}-{SeqID}
+// Thread-safe via mutex
 func (s *Session) GenerateMessageID() string {
-	seq := s.NextMessageSeq()
-	return fmt.Sprintf("%s-m%04d", s.SessionID, seq)
+	s.seqMu.Lock()
+	defer s.seqMu.Unlock()
+	s.MessageSeq++
+	return fmt.Sprintf("%s-m%04d", s.SessionID, s.MessageSeq)
 }
 
 // GenerateMessageIDWithSeq generates a unique message ID and returns both the ID and sequence number
 // Format: {SessionID}-m{SeqID}
 // Returns: (messageID, seqID)
+// Thread-safe via mutex
 func (s *Session) GenerateMessageIDWithSeq() (string, int) {
-	seq := s.NextMessageSeq()
-	messageID := fmt.Sprintf("%s-m%04d", s.SessionID, seq)
-	return messageID, seq
+	s.seqMu.Lock()
+	defer s.seqMu.Unlock()
+	s.MessageSeq++
+	messageID := fmt.Sprintf("%s-m%04d", s.SessionID, s.MessageSeq)
+	return messageID, s.MessageSeq
 }
 
 // NextToolSeq increments and returns the next tool sequence number
+// Thread-safe via mutex
 func (s *Session) NextToolSeq() int {
+	s.seqMu.Lock()
+	defer s.seqMu.Unlock()
 	s.ToolSeq++
 	return s.ToolSeq
 }
 
 // GenerateToolID generates a unique tool ID for this session
 // Format: {SessionID}-t{SeqID}
+// Thread-safe via mutex
 func (s *Session) GenerateToolID() string {
-	seq := s.NextToolSeq()
-	return fmt.Sprintf("%s-t%04d", s.SessionID, seq)
+	s.seqMu.Lock()
+	defer s.seqMu.Unlock()
+	s.ToolSeq++
+	return fmt.Sprintf("%s-t%04d", s.SessionID, s.ToolSeq)
 }
 
 // GenerateToolIDWithSeq generates a unique tool ID and returns both the ID and sequence number
 // Format: {SessionID}-t{SeqID}
 // Returns: (toolID, seqID)
+// Thread-safe via mutex
 func (s *Session) GenerateToolIDWithSeq() (string, int) {
-	seq := s.NextToolSeq()
-	toolID := fmt.Sprintf("%s-t%04d", s.SessionID, seq)
-	return toolID, seq
+	s.seqMu.Lock()
+	defer s.seqMu.Unlock()
+	s.ToolSeq++
+	toolID := fmt.Sprintf("%s-t%04d", s.SessionID, s.ToolSeq)
+	return toolID, s.ToolSeq
+}
+
+// GenerateFileID generates a unique file ID for this session
+// Format: {SessionID}-f{SeqID}
+// Thread-safe via mutex
+func (s *Session) GenerateFileID() string {
+	s.seqMu.Lock()
+	defer s.seqMu.Unlock()
+	s.OpenedFileSeq++
+	return fmt.Sprintf("%s-f%04d", s.SessionID, s.OpenedFileSeq)
+}
+
+// GenerateFileIDWithSeq generates a unique file ID and returns both the ID and sequence number
+// Format: {SessionID}-f{SeqID}
+// Returns: (fileID, seqID)
+// Thread-safe via mutex
+func (s *Session) GenerateFileIDWithSeq() (string, int) {
+	s.seqMu.Lock()
+	defer s.seqMu.Unlock()
+	s.OpenedFileSeq++
+	fileID := fmt.Sprintf("%s-f%04d", s.SessionID, s.OpenedFileSeq)
+	return fileID, s.OpenedFileSeq
+}
+
+// GenerateSummarizationLogID generates a unique summarization log ID for this session
+// Format: {SessionID}-l{SeqID}
+// Thread-safe via mutex
+func (s *Session) GenerateSummarizationLogID() string {
+	s.seqMu.Lock()
+	defer s.seqMu.Unlock()
+	s.SummarizationLogSeq++
+	return fmt.Sprintf("%s-l%04d", s.SessionID, s.SummarizationLogSeq)
+}
+
+// GenerateSummarizationLogIDWithSeq generates a unique summarization log ID and returns both
+// Format: {SessionID}-l{SeqID}
+// Returns: (logID, seqID)
+// Thread-safe via mutex
+func (s *Session) GenerateSummarizationLogIDWithSeq() (string, int) {
+	s.seqMu.Lock()
+	defer s.seqMu.Unlock()
+	s.SummarizationLogSeq++
+	logID := fmt.Sprintf("%s-l%04d", s.SessionID, s.SummarizationLogSeq)
+	return logID, s.SummarizationLogSeq
+}
+
+// ==================== Backward Compatibility Methods ====================
+
+// GetConversationState returns a ConversationState-like view of the session
+// Deprecated: Access Msgs, InProgress, Queue, UpdatedAt directly on Session
+func (s *Session) GetConversationState() *ConversationState {
+	return &ConversationState{
+		Msgs:         s.Msgs,
+		InProgress:   s.InProgress,
+		Queue:        s.Queue,
+		LastActivity: s.UpdatedAt,
+	}
+}
+
+// GetExMsgs returns ArchivedMsgs (for backward compatibility with debugger)
+// Deprecated: Use ArchivedMsgs directly
+func (s *Session) GetExMsgs() []openai.ChatCompletionMessage {
+	return s.ArchivedMsgs
+}
+
+// GetSummarizedMessages returns ArchivedMsgs (for backward compatibility)
+// Deprecated: Use ArchivedMsgs directly
+func (s *Session) GetSummarizedMessages() []openai.ChatCompletionMessage {
+	return s.ArchivedMsgs
+}
+
+// Clone creates a deep copy of the session
+// This is safe to use when you need to copy a session without copying the mutex
+func (s *Session) Clone() *Session {
+	// Create a new session with the same values
+	clone := &Session{
+		UserID:              s.UserID,
+		SessionID:           s.SessionID,
+		AgentType:           s.AgentType,
+		Model:               s.Model,
+		InProgress:          s.InProgress,
+		CreatedAt:           s.CreatedAt,
+		UpdatedAt:           s.UpdatedAt,
+		SummarizedAt:        s.SummarizedAt,
+		Title:               s.Title,
+		Summary:             s.Summary,
+		MessageSeq:          s.MessageSeq,
+		ToolSeq:             s.ToolSeq,
+		OpenedFileSeq:       s.OpenedFileSeq,
+		SummarizationLogSeq: s.SummarizationLogSeq,
+		// seqMu is NOT copied - new mutex for the clone
+	}
+
+	// Copy slices
+	if s.Msgs != nil {
+		clone.Msgs = make([]openai.ChatCompletionMessage, len(s.Msgs))
+		copy(clone.Msgs, s.Msgs)
+	}
+	if s.ArchivedMsgs != nil {
+		clone.ArchivedMsgs = make([]openai.ChatCompletionMessage, len(s.ArchivedMsgs))
+		copy(clone.ArchivedMsgs, s.ArchivedMsgs)
+	}
+	if s.Queue != nil {
+		clone.Queue = make([]openai.ChatCompletionMessage, len(s.Queue))
+		copy(clone.Queue, s.Queue)
+	}
+	if s.NodeDigests != nil {
+		clone.NodeDigests = make([]NodeDigest, len(s.NodeDigests))
+		copy(clone.NodeDigests, s.NodeDigests)
+	}
+	if s.Tags != nil {
+		clone.Tags = make([]string, len(s.Tags))
+		copy(clone.Tags, s.Tags)
+	}
+
+	// Copy map
+	if s.ToolResults != nil {
+		clone.ToolResults = make(map[string]string, len(s.ToolResults))
+		for k, v := range s.ToolResults {
+			clone.ToolResults[k] = v
+		}
+	}
+
+	return clone
 }
 
 // LLMClientWithUserID wraps LLMClient to add user_id header to all requests
@@ -280,9 +388,9 @@ func (s *Session) PopulateFields(ctx context.Context, client LLMClient, model st
 	ctx = WithUserID(ctx, s.UserID)
 
 	// Get conversation text from messages
-	// Note: Only use Summary, Tags, and Msgs for usage. ExMsgs is only for debug purposes.
+	// Uses ArchivedMsgs (previously summarized) + current Msgs
 	var conversationText string
-	allMessages := append(s.SummarizedMessages, s.ConversationState.Msgs...)
+	allMessages := append(s.ArchivedMsgs, s.Msgs...)
 	if len(allMessages) == 0 {
 		return fmt.Errorf("no messages in session to populate fields")
 	}

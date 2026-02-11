@@ -18,6 +18,9 @@ type SessionStore interface {
 	Put(session *Session) error
 	Delete(sessionID string) error
 	List(userID string) ([]*Session, error)
+	// GetNextSessionSeq returns the next session sequence number for a user and agent type
+	// This is used to generate unique session IDs without random strings
+	GetNextSessionSeq(userID string, agentType AgentType) (int, error)
 }
 
 // LLMClient defines the interface for LLM operations (for summarization)
@@ -118,9 +121,17 @@ func (sh *SessionHandler) GetLLMClient() LLMClient {
 }
 
 // CreateSession creates a new session for a user with the specified agent type
-// Deprecated: Use CreateSessionForUser instead for proper session ID generation
+// Uses store.GetNextSessionSeq for proper sequential ID generation
 func (sh *SessionHandler) CreateSession(userID string, agentType AgentType) (*Session, error) {
-	session := NewSessionWithType(userID, agentType)
+	// Get next sequence number from store
+	seq, err := sh.store.GetNextSessionSeq(userID, agentType)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get next session seq: %w", err)
+	}
+
+	// Create session with sequence-based ID
+	sessionID := GenerateSessionID(userID, agentType, seq)
+	session := NewSessionWithID(userID, sessionID, agentType)
 
 	if err := sh.store.Put(session); err != nil {
 		return nil, fmt.Errorf("failed to store session: %w", err)
@@ -228,8 +239,8 @@ func (sh *SessionHandler) ListUserSessions(userID string) ([]*Session, error) {
 
 	for _, s := range sessions {
 		byType[s.AgentType]++
-		activeMsgs := len(s.ConversationState.Msgs)
-		archivedMsgs := len(s.SummarizedMessages)
+		activeMsgs := len(s.Msgs)
+		archivedMsgs := len(s.ArchivedMsgs)
 		totalActiveMessages += activeMsgs
 		totalArchivedMessages += archivedMsgs
 
@@ -353,8 +364,7 @@ func (sh *SessionHandler) AddMessage(ctx context.Context, sessionID string, msg 
 		return err
 	}
 
-	session.ConversationState.Msgs = append(session.ConversationState.Msgs, msg)
-	session.ConversationState.LastActivity = time.Now()
+	session.Msgs = append(session.Msgs, msg)
 	session.UpdatedAt = time.Now()
 
 	if err := sh.store.Put(session); err != nil {
@@ -362,7 +372,7 @@ func (sh *SessionHandler) AddMessage(ctx context.Context, sessionID string, msg 
 	}
 
 	// Check for auto-summarization (runs in background but will acquire lock)
-	if len(session.ConversationState.Msgs) >= sh.config.AutoSummarizeThreshold {
+	if len(session.Msgs) >= sh.config.AutoSummarizeThreshold {
 		go func() {
 			if err := sh.SummarizeSession(ctx, sessionID); err != nil {
 				// Log error but don't block
@@ -390,12 +400,12 @@ func (sh *SessionHandler) SummarizeSession(ctx context.Context, sessionID string
 	}
 
 	// Skip if no messages to summarize
-	if len(session.ConversationState.Msgs) == 0 {
+	if len(session.Msgs) == 0 {
 		return nil
 	}
 
 	// Format messages for summarization
-	conversationText := formatMessagesForSummary(session.ConversationState.Msgs)
+	conversationText := formatMessagesForSummary(session.Msgs)
 
 	// Add user_id to context for LLM calls
 	if session.UserID != "" {
@@ -403,7 +413,7 @@ func (sh *SessionHandler) SummarizeSession(ctx context.Context, sessionID string
 	}
 
 	// Create log entry before making the request
-	summLog := NewSummarizationLog(sessionID, session.UserID)
+	summLog := NewSummarizationLog(session)
 	summLog.ModelUsed = sh.config.SummaryModel
 	summLog.Status = "pending"
 	// PromptSent will be set in generateConversationSummary with full prompt
@@ -445,8 +455,8 @@ func (sh *SessionHandler) SummarizeSession(ctx context.Context, sessionID string
 	}
 
 	// Archive messages and update session
-	session.SummarizedMessages = append(session.SummarizedMessages, session.ConversationState.Msgs...)
-	session.ConversationState.Msgs = []openai.ChatCompletionMessage{}
+	session.ArchivedMsgs = append(session.ArchivedMsgs, session.Msgs...)
+	session.Msgs = []openai.ChatCompletionMessage{}
 	session.Summary = summary
 	session.SummarizedAt = time.Now()
 	session.UpdatedAt = time.Now()
@@ -538,8 +548,8 @@ func (sh *SessionHandler) formatSessionEntry(sb *strings.Builder, index int, s *
 	}
 
 	// Show message count
-	msgCount := len(s.ConversationState.Msgs)
-	archivedCount := len(s.SummarizedMessages)
+	msgCount := len(s.Msgs)
+	archivedCount := len(s.ArchivedMsgs)
 	sb.WriteString(fmt.Sprintf("   Messages: %d active, %d archived\n", msgCount, archivedCount))
 }
 

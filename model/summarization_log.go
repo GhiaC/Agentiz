@@ -1,7 +1,6 @@
 package model
 
 import (
-	"fmt"
 	"time"
 )
 
@@ -58,12 +57,13 @@ type SummarizationLog struct {
 }
 
 // NewSummarizationLog creates a new summarization log entry
-func NewSummarizationLog(sessionID string, userID string) *SummarizationLog {
+// Uses session.GenerateSummarizationLogID() for sequence-based ID generation
+func NewSummarizationLog(session *Session) *SummarizationLog {
 	now := time.Now()
 	return &SummarizationLog{
-		LogID:     generateSummarizationLogID(sessionID, now),
-		SessionID: sessionID,
-		UserID:    userID,
+		LogID:     session.GenerateSummarizationLogID(),
+		SessionID: session.SessionID,
+		UserID:    session.UserID,
 		Status:    "pending",
 		CreatedAt: now,
 	}
@@ -74,10 +74,4 @@ func (log *SummarizationLog) MarkCompleted(status string) {
 	log.Status = status
 	log.CompletedAt = time.Now()
 	log.DurationMs = log.CompletedAt.Sub(log.CreatedAt).Milliseconds()
-}
-
-// generateSummarizationLogID generates a unique log ID
-func generateSummarizationLogID(sessionID string, timestamp time.Time) string {
-	date := timestamp.Format("060102150405") // YYMMDDHHMMSS
-	return fmt.Sprintf("summ-%s-%s-%s", date, sessionID[:min(8, len(sessionID))], randomString(4))
 }

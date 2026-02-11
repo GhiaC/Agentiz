@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -150,6 +152,19 @@ func (s *MongoDBStore) initIndexes(ctx context.Context) error {
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create unique core session index: %w", err)
+	}
+
+	// Compound index for GetNextSessionSeq: user_id + agent_type + session_seq
+	// This optimizes the aggregation pipeline that finds MAX(session_seq)
+	_, err = s.collection.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{
+			{Key: "user_id", Value: 1},
+			{Key: "agent_type", Value: 1},
+			{Key: "session_seq", Value: -1}, // Descending for MAX queries
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create user_agent_seq index: %w", err)
 	}
 
 	// ============================================================================
@@ -310,12 +325,30 @@ func (s *MongoDBStore) getOrCreateLock(userID string) *sync.Mutex {
 
 // sessionDocument represents a session document in MongoDB
 type sessionDocument struct {
-	SessionID string    `bson:"_id"`
-	UserID    string    `bson:"user_id"`
-	AgentType string    `bson:"agent_type"`
-	Data      string    `bson:"data"` // JSON serialized Session
-	CreatedAt time.Time `bson:"created_at"`
-	UpdatedAt time.Time `bson:"updated_at"`
+	SessionID  string    `bson:"_id"`
+	UserID     string    `bson:"user_id"`
+	AgentType  string    `bson:"agent_type"`
+	SessionSeq int       `bson:"session_seq"`
+	Data       string    `bson:"data"` // JSON serialized Session
+	CreatedAt  time.Time `bson:"created_at"`
+	UpdatedAt  time.Time `bson:"updated_at"`
+}
+
+// extractSessionSeqFromID extracts the sequence number from a session ID
+// Format: userID-agentType-s0001 -> 1
+// Returns 0 if the format is not recognized
+func extractSessionSeqFromID(sessionID string) int {
+	// Find the last occurrence of "-s" and extract the number after it
+	idx := strings.LastIndex(sessionID, "-s")
+	if idx == -1 || idx+2 >= len(sessionID) {
+		return 0
+	}
+	seqStr := sessionID[idx+2:]
+	seq, err := strconv.Atoi(seqStr)
+	if err != nil {
+		return 0
+	}
+	return seq
 }
 
 // Get retrieves a session by ID
@@ -442,12 +475,13 @@ func (s *MongoDBStore) Put(session *model.Session) error {
 	}
 
 	doc := sessionDocument{
-		SessionID: session.SessionID,
-		UserID:    session.UserID,
-		AgentType: string(session.AgentType),
-		Data:      string(data),
-		CreatedAt: session.CreatedAt,
-		UpdatedAt: session.UpdatedAt,
+		SessionID:  session.SessionID,
+		UserID:     session.UserID,
+		AgentType:  string(session.AgentType),
+		SessionSeq: extractSessionSeqFromID(session.SessionID),
+		Data:       string(data),
+		CreatedAt:  session.CreatedAt,
+		UpdatedAt:  session.UpdatedAt,
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -512,6 +546,46 @@ func (s *MongoDBStore) List(userID string) ([]*model.Session, error) {
 	}
 
 	return sessions, nil
+}
+
+// GetNextSessionSeq returns the next session sequence number for a user and agent type
+// Uses MAX(session_seq) to avoid duplicate IDs when sessions are deleted
+func (s *MongoDBStore) GetNextSessionSeq(userID string, agentType model.AgentType) (int, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Use aggregation to find MAX(session_seq) for this user and agent type
+	pipeline := mongo.Pipeline{
+		{{Key: "$match", Value: bson.M{
+			"user_id":    userID,
+			"agent_type": string(agentType),
+		}}},
+		{{Key: "$group", Value: bson.M{
+			"_id":     nil,
+			"max_seq": bson.M{"$max": "$session_seq"},
+		}}},
+	}
+
+	cursor, err := s.collection.Aggregate(ctx, pipeline)
+	if err != nil {
+		return 0, fmt.Errorf("failed to aggregate sessions: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	var result struct {
+		MaxSeq *int `bson:"max_seq"`
+	}
+
+	if cursor.Next(ctx) {
+		if err := cursor.Decode(&result); err != nil {
+			return 0, fmt.Errorf("failed to decode result: %w", err)
+		}
+		if result.MaxSeq != nil {
+			return *result.MaxSeq + 1, nil
+		}
+	}
+
+	return 1, nil
 }
 
 // GetCoreSession returns the Core session for a user
@@ -587,12 +661,13 @@ func (s *MongoDBStore) PutCoreSession(session *model.Session) error {
 	}
 
 	doc := sessionDocument{
-		SessionID: session.SessionID,
-		UserID:    session.UserID,
-		AgentType: string(session.AgentType),
-		Data:      string(data),
-		CreatedAt: session.CreatedAt,
-		UpdatedAt: session.UpdatedAt,
+		SessionID:  session.SessionID,
+		UserID:     session.UserID,
+		AgentType:  string(session.AgentType),
+		SessionSeq: extractSessionSeqFromID(session.SessionID),
+		Data:       string(data),
+		CreatedAt:  session.CreatedAt,
+		UpdatedAt:  session.UpdatedAt,
 	}
 
 	_, err = s.collection.InsertOne(ctx, doc)

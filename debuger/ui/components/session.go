@@ -66,17 +66,14 @@ func SessionTableRow(session *model.Session, config SessionRowConfig, rowIndex i
 	}
 
 	// Message count (active only)
-	msgCount := 0
-	if session.ConversationState != nil {
-		msgCount = len(session.ConversationState.Msgs)
-	}
+	msgCount := len(session.Msgs)
 
 	// Format time as "ago"
 	timeAgo := formatTimeAgo(session.UpdatedAt)
 
 	// Status badges
 	var statusBadges string
-	if session.ConversationState != nil && session.ConversationState.InProgress {
+	if session.InProgress {
 		statusBadges = Badge("⏳ Active", "warning text-dark")
 	} else if !session.SummarizedAt.IsZero() {
 		statusBadges = Badge("📋 Summarized", "success")
@@ -136,14 +133,8 @@ func SessionTableRow(session *model.Session, config SessionRowConfig, rowIndex i
 	}
 
 	// Calculate message counts
-	activeMsgs := 0
-	if session.ConversationState != nil {
-		activeMsgs = len(session.ConversationState.Msgs)
-	}
-	archivedMsgs := len(session.SummarizedMessages)
-	if len(session.ExMsgs) > archivedMsgs {
-		archivedMsgs = len(session.ExMsgs)
-	}
+	activeMsgs := len(session.Msgs)
+	archivedMsgs := len(session.ArchivedMsgs)
 
 	// Summary display
 	summaryDisplay := "-"
@@ -175,7 +166,7 @@ func SessionTableRow(session *model.Session, config SessionRowConfig, rowIndex i
 
 	// In progress badge
 	inProgressDisplay := Badge("No", "secondary")
-	if session.ConversationState != nil && session.ConversationState.InProgress {
+	if session.InProgress {
 		inProgressDisplay = BadgeWithIcon("Yes", "⏳", "warning text-dark")
 	}
 

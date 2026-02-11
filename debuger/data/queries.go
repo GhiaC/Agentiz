@@ -6,6 +6,7 @@ import (
 
 	"github.com/ghiac/agentize/debuger"
 	"github.com/ghiac/agentize/model"
+	"github.com/sashabaranov/go-openai"
 )
 
 // DataProvider provides access to debug data from the store
@@ -19,11 +20,8 @@ func NewDataProvider(store debuger.DebugStore) *DataProvider {
 }
 
 // getSessionLastActivity returns the last activity time for a session
-// It uses ConversationState.LastActivity if available, otherwise falls back to UpdatedAt
+// Session.UpdatedAt now serves as LastActivity
 func getSessionLastActivity(s *model.Session) time.Time {
-	if s.ConversationState != nil && !s.ConversationState.LastActivity.IsZero() {
-		return s.ConversationState.LastActivity
-	}
 	return s.UpdatedAt
 }
 
@@ -106,9 +104,27 @@ func (dp *DataProvider) GetUser(userID string) (*model.User, error) {
 	return dp.store.GetUser(userID)
 }
 
-// GetSession returns a single session
+// GetSession returns a single session with ExMsgs sorted by CreatedAt DESC
 func (dp *DataProvider) GetSession(sessionID string) (*model.Session, error) {
-	return dp.store.GetSession(sessionID)
+	session, err := dp.store.GetSession(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if session == nil {
+		return nil, nil
+	}
+
+	// Sort ArchivedMsgs by CreatedAt DESC (newest first)
+	if len(session.ArchivedMsgs) > 0 {
+		session.ArchivedMsgs = SortExMsgsByCreatedAtDesc(session.ArchivedMsgs)
+	}
+
+	// Sort Msgs by CreatedAt DESC (newest first)
+	if len(session.Msgs) > 0 {
+		session.Msgs = SortExMsgsByCreatedAtDesc(session.Msgs)
+	}
+
+	return session, nil
 }
 
 // GetAllMessages returns all messages sorted by CreatedAt (newest first)
@@ -347,10 +363,7 @@ func (dp *DataProvider) GetSummarizationStats(config *debuger.SchedulerConfig) (
 			sessStats.SummarizedSessions++
 		}
 
-		msgCount := 0
-		if session.ConversationState != nil {
-			msgCount = len(session.ConversationState.Msgs)
-		}
+		msgCount := len(session.Msgs)
 
 		if msgCount > 0 {
 			sessStats.SessionsWithMessages++
@@ -387,4 +400,20 @@ func ConvertToolCallsToInfo(toolCalls []*model.ToolCall) []debuger.ToolCallInfo 
 		}
 	}
 	return result
+}
+
+// SortExMsgsByCreatedAtDesc sorts ExMsgs by CreatedAt descending (newest first)
+// Since ChatCompletionMessage doesn't have CreatedAt field, we reverse the slice
+// ExMsgs are added in order, so last items are newest and should appear first (DESC order)
+func SortExMsgsByCreatedAtDesc(exMsgs []openai.ChatCompletionMessage) []openai.ChatCompletionMessage {
+	// Create a copy to avoid modifying the original
+	sorted := make([]openai.ChatCompletionMessage, len(exMsgs))
+	copy(sorted, exMsgs)
+
+	// Reverse the slice: last items (newest) become first
+	for i, j := 0, len(sorted)-1; i < j; i, j = i+1, j-1 {
+		sorted[i], sorted[j] = sorted[j], sorted[i]
+	}
+
+	return sorted
 }

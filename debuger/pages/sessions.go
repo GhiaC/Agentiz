@@ -3,6 +3,7 @@ package pages
 import (
 	"fmt"
 	"html/template"
+	"time"
 
 	"github.com/ghiac/agentize/debuger"
 	"github.com/ghiac/agentize/debuger/data"
@@ -68,6 +69,25 @@ func RenderSessions(handler *debuger.DebugHandler, page int) (string, error) {
 	return html, nil
 }
 
+// convertExMsgToMessage converts an openai.ChatCompletionMessage to model.Message for display
+func convertExMsgToMessage(chatMsg openai.ChatCompletionMessage, sessionID, userID string, index int, sessionModel string, agentType model.AgentType, createdAt time.Time) *model.Message {
+	return &model.Message{
+		MessageID:    fmt.Sprintf("exmsg-%s-%d", sessionID, index),
+		SeqID:        index,
+		AgentType:    agentType,
+		ContentType:  model.ContentTypeText,
+		UserID:       userID,
+		SessionID:    sessionID,
+		Role:         chatMsg.Role,
+		Content:      chatMsg.Content,
+		Model:        sessionModel,
+		RequestModel: sessionModel,
+		HasToolCalls: len(chatMsg.ToolCalls) > 0,
+		IsNonsense:   false,
+		CreatedAt:    createdAt,
+	}
+}
+
 // RenderSessionDetail generates the session detail HTML page
 func RenderSessionDetail(handler *debuger.DebugHandler, sessionID string) (string, error) {
 	dp := data.NewDataProvider(handler.GetStore())
@@ -86,12 +106,9 @@ func RenderSessionDetail(handler *debuger.DebugHandler, sessionID string) (strin
 	}
 
 	// Filter to only show active (non-archived) messages
-	// Active messages count is based on session.ConversationState.Msgs
+	// Active messages count is based on session.Msgs
 	// Since messages are sorted oldest-first, we take the last N messages where N is the active count
-	activeCount := 0
-	if session.ConversationState != nil {
-		activeCount = len(session.ConversationState.Msgs)
-	}
+	activeCount := len(session.Msgs)
 
 	// If activeCount is 0 or greater than all messages, show nothing or all respectively
 	var messages []*model.Message
@@ -134,20 +151,13 @@ func RenderSessionDetail(handler *debuger.DebugHandler, sessionID string) (strin
 	agentTypeBadge := components.AgentTypeBadge(string(session.AgentType))
 
 	inProgressBadge := ""
-	if session.ConversationState != nil && session.ConversationState.InProgress {
+	if session.InProgress {
 		inProgressBadge = components.Badge("In Progress", "warning") + " "
 	}
 
 	// Calculate message counts from session object
-	activeMessagesCount := 0
-	if session.ConversationState != nil {
-		activeMessagesCount = len(session.ConversationState.Msgs)
-	}
-	// Use ExMsgs for archived count (SummarizedMessages may be empty for old sessions)
-	archivedMessagesCount := len(session.ExMsgs)
-	if len(session.SummarizedMessages) > archivedMessagesCount {
-		archivedMessagesCount = len(session.SummarizedMessages)
-	}
+	activeMessagesCount := len(session.Msgs)
+	archivedMessagesCount := len(session.ArchivedMsgs)
 	// If database messages count is higher, use it (messages from DB are more accurate)
 	dbMessagesCount := len(messages)
 	sessionTotalCount := activeMessagesCount + archivedMessagesCount
@@ -233,6 +243,14 @@ func RenderSessionDetail(handler *debuger.DebugHandler, sessionID string) (strin
                     <strong class="d-block mb-2">Opened Files:</strong>
                     <div>%s</div>
                 </div>
+                <div class="mb-3">
+                    <strong class="d-block mb-2">Message Seq:</strong>
+                    <div>%s</div>
+                </div>
+                <div class="mb-3">
+                    <strong class="d-block mb-2">Tool Seq:</strong>
+                    <div>%s</div>
+                </div>
             </div>
         </div>
     </div>
@@ -253,20 +271,20 @@ func RenderSessionDetail(handler *debuger.DebugHandler, sessionID string) (strin
 		components.Badge(fmt.Sprintf("%d active", activeMessagesCount), "primary"),
 		components.Badge(fmt.Sprintf("%d archived", archivedMessagesCount), "secondary"),
 		components.CountBadge(len(files), "info"),
+		components.CountBadge(session.MessageSeq, "info"),
+		components.CountBadge(session.ToolSeq, "info"),
 	)
 
 	// System Prompts card
 	var systemPrompts []string
-	if session.ConversationState != nil {
-		for _, msg := range session.ConversationState.Msgs {
-			if msg.Role == openai.ChatMessageRoleSystem && msg.Content != "" {
-				systemPrompts = append(systemPrompts, msg.Content)
-			}
+	for _, msg := range session.Msgs {
+		if msg.Role == openai.ChatMessageRoleSystem && msg.Content != "" {
+			systemPrompts = append(systemPrompts, msg.Content)
 		}
-		for _, msg := range session.SummarizedMessages {
-			if msg.Role == openai.ChatMessageRoleSystem && msg.Content != "" {
-				systemPrompts = append(systemPrompts, msg.Content)
-			}
+	}
+	for _, msg := range session.ArchivedMsgs {
+		if msg.Role == openai.ChatMessageRoleSystem && msg.Content != "" {
+			systemPrompts = append(systemPrompts, msg.Content)
 		}
 	}
 
@@ -312,43 +330,52 @@ func RenderSessionDetail(handler *debuger.DebugHandler, sessionID string) (strin
 
 	html += ui.CardEnd()
 
-	// ExMsgs card
-	exMsgsCount := len(session.ExMsgs)
+	// ArchivedMsgs card (previously ExMsgs)
+	archivedCount := len(session.ArchivedMsgs)
 	html += fmt.Sprintf(`
 <div class="card mb-4">
     <div class="card-header">
-        <h5 class="mb-0"><i class="bi bi-archive-fill me-2"></i>Exported Messages (%d) <small class="text-muted">(Debug Only)</small></h5>
+        <h5 class="mb-0"><i class="bi bi-archive-fill me-2"></i>Archived Messages (%d) <small class="text-muted">(Debug Only)</small></h5>
     </div>
-    <div class="card-body">`, exMsgsCount)
+    <div class="card-body">`, archivedCount)
 
-	if exMsgsCount == 0 {
-		html += components.InfoAlert("No exported messages found for this session.")
+	if archivedCount == 0 {
+		html += components.InfoAlert("No archived messages found for this session.")
 	} else {
-		html += components.NoteAlert("Note", "ExMsgs are exported messages moved from Msgs after summarization. They are only displayed here for debugging purposes and are not used in normal operations.")
-		html += components.ListGroupStart()
-		for _, msg := range session.ExMsgs {
-			contentDisplay := components.ExpandableWithPreview(msg.Content, 500)
+		html += components.NoteAlert("Note", "ArchivedMsgs are messages moved from Msgs after summarization. They are only displayed here for debugging purposes and are not used in normal operations.")
 
-			toolCallBadge := ""
-			if len(msg.ToolCalls) > 0 {
-				toolCallBadge = " " + components.Badge("Has Tool Calls", "danger")
-			}
+		// ArchivedMsgs are already sorted by CreatedAt DESC in GetSession
+		rowConfig := components.DefaultMessageRowConfig()
+		rowConfig.ShowUser = false    // Already on session page, user is known
+		rowConfig.ShowSession = false // Already on session page
+		rowConfig.BaseURL = "/agentize/debug"
 
-			html += fmt.Sprintf(`
-<div class="list-group-item">
-    <div class="d-flex w-100 justify-content-between align-items-start mb-2">
-        <div>
-            %s%s
-        </div>
-    </div>
-    <p class="mb-2 text-justify">%s</p>
-</div>`,
-				components.RoleBadge(msg.Role),
-				toolCallBadge,
-				contentDisplay,
+		columns := components.MessageTableColumns(rowConfig)
+		html += components.TableStartWithConfig(columns, components.TableConfig{
+			Striped:     false,
+			Hover:       true,
+			Small:       true,
+			Responsive:  true,
+			AlignMiddle: true,
+		})
+
+		for i, chatMsg := range session.ArchivedMsgs {
+			// Calculate original index (since we reversed, original index is len - i - 1)
+			originalIndex := len(session.ArchivedMsgs) - i - 1
+			msg := convertExMsgToMessage(
+				chatMsg,
+				sessionID,
+				session.UserID,
+				originalIndex,
+				session.Model,
+				session.AgentType,
+				session.CreatedAt,
 			)
+			html += components.MessageTableRow(msg, rowConfig, i)
 		}
-		html += components.ListGroupEnd()
+
+		html += components.TableEnd(true)
+		html += components.MessageTableScript()
 	}
 
 	html += ui.CardEnd()

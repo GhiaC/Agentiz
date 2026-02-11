@@ -50,6 +50,8 @@ type LLMConfig struct {
 
 	// SchedulerDisableLogs if true, SessionScheduler does not emit any logs (overrides config from env)
 	SchedulerDisableLogs bool
+	// SummaryModel overrides the scheduler summarization model (from config/env) when non-empty
+	SummaryModel string
 }
 
 // ToolExecutor executes a tool call and returns the result
@@ -73,6 +75,12 @@ type Engine struct {
 	scheduler   *SessionScheduler
 	schedulerMu sync.RWMutex
 
+	// Per-session mutex for serializing message processing
+	// Ensures only one message is processed at a time per session to prevent
+	// race conditions on sequence number generation and session updates
+	sessionMutexes   map[string]*sync.Mutex
+	sessionMutexesMu sync.RWMutex
+
 	// Backup LLM chain (initialized from LLMConfig.BackupProviders)
 	backups *backupChain
 
@@ -85,6 +93,11 @@ type Engine struct {
 func (e *Engine) Init() error {
 	e.dbReadyMu.Lock()
 	defer e.dbReadyMu.Unlock()
+
+	// Initialize session mutexes map if nil
+	if e.sessionMutexes == nil {
+		e.sessionMutexes = make(map[string]*sync.Mutex)
+	}
 
 	// Try to load root node to verify repository is ready
 	_, err := e.Repo.LoadNode("root")
@@ -109,6 +122,37 @@ func (e *Engine) Init() error {
 	e.dbReady = true
 	log.Log.Infof("[Engine] ✅ Database initialized and ready (Repo + Sessions)")
 	return nil
+}
+
+// getSessionMutex returns or creates a mutex for a specific session
+// This ensures only one message is processed at a time per session
+func (e *Engine) getSessionMutex(sessionID string) *sync.Mutex {
+	// First try with read lock (fast path for existing mutexes)
+	e.sessionMutexesMu.RLock()
+	if e.sessionMutexes != nil {
+		if mu, exists := e.sessionMutexes[sessionID]; exists {
+			e.sessionMutexesMu.RUnlock()
+			return mu
+		}
+	}
+	e.sessionMutexesMu.RUnlock()
+
+	// Need to create new mutex, acquire write lock
+	e.sessionMutexesMu.Lock()
+	defer e.sessionMutexesMu.Unlock()
+
+	// Double-check after acquiring write lock
+	if e.sessionMutexes == nil {
+		e.sessionMutexes = make(map[string]*sync.Mutex)
+	}
+
+	if mu, exists := e.sessionMutexes[sessionID]; exists {
+		return mu
+	}
+
+	mu := &sync.Mutex{}
+	e.sessionMutexes[sessionID] = mu
+	return mu
 }
 
 // IsDBReady returns whether the database is ready
@@ -273,6 +317,9 @@ func (e *Engine) startScheduler(ctx context.Context, llmClient *openai.Client) e
 	if schedulerConfig.SummaryModel != "" {
 		schedulerConfigStruct.SummaryModel = schedulerConfig.SummaryModel
 	}
+	if e.llmConfig.SummaryModel != "" {
+		schedulerConfigStruct.SummaryModel = e.llmConfig.SummaryModel
+	}
 	// DisableLogs: from config (env) or from LLMConfig (programmatic, e.g. TradeAgent yaml)
 	schedulerConfigStruct.DisableLogs = schedulerConfig.DisableLogs || e.llmConfig.SchedulerDisableLogs
 
@@ -332,8 +379,18 @@ func (w *openAIClientWrapperForSessionHandler) CreateChatCompletion(ctx context.
 }
 
 // CreateSession initializes a fresh session anchored at the root node.
+// Uses store.GetNextSessionSeq for proper sequential ID generation
 func (e *Engine) CreateSession(userID string) (*model.Session, error) {
-	session := model.NewSession(userID)
+	// Get next sequence number from store (default to AgentTypeLow for Engine sessions)
+	agentType := model.AgentTypeLow
+	seq, err := e.Sessions.GetNextSessionSeq(userID, agentType)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get next session seq: %w", err)
+	}
+
+	// Create session with sequence-based ID
+	sessionID := model.GenerateSessionID(userID, agentType, seq)
+	session := model.NewSessionWithID(userID, sessionID, agentType)
 
 	rootNode, err := e.Repo.LoadNode("root")
 	if err != nil {
@@ -402,7 +459,7 @@ func (e *Engine) OpenFile(sessionID string, path string) (string, error) {
 						if node.Title != "" {
 							fileName = node.Title
 						}
-						openedFile := model.NewOpenedFile(sessionID, session.UserID, path, fileName)
+						openedFile := model.NewOpenedFile(session, path, fileName)
 						if err := sqliteStore.AddOpenedFile(openedFile); err != nil {
 							log.Log.Warnf("[Engine] ⚠️  Failed to record opened file | SessionID: %s | Path: %s | Error: %v", sessionID, path, err)
 						}
@@ -437,7 +494,7 @@ func (e *Engine) OpenFile(sessionID string, path string) (string, error) {
 			if node.Title != "" {
 				fileName = node.Title
 			}
-			openedFile := model.NewOpenedFile(sessionID, session.UserID, path, fileName)
+			openedFile := model.NewOpenedFile(session, path, fileName)
 			if err := sqliteStore.AddOpenedFile(openedFile); err != nil {
 				log.Log.Warnf("[Engine] ⚠️  Failed to record opened file | SessionID: %s | Path: %s | Error: %v", sessionID, path, err)
 			} else {
@@ -500,11 +557,18 @@ func (e *Engine) CloseFile(sessionID string, path string) error {
 }
 
 // ProcessMessage routes a user message through the LLM workflow and tool executor.
+// Uses per-session mutex to ensure only one message is processed at a time per session
 func (e *Engine) ProcessMessage(
 	ctx context.Context,
 	sessionID string,
 	userMessage string,
 ) (string, int, error) {
+	// Acquire per-session mutex to serialize message processing
+	// This prevents race conditions on sequence number generation and session updates
+	sessionMu := e.getSessionMutex(sessionID)
+	sessionMu.Lock()
+	defer sessionMu.Unlock()
+
 	log.Log.Infof("[Engine] 🚀 Processing message | SessionID: %s | Message length: %d chars", sessionID, len(userMessage))
 
 	// Check if database is ready
@@ -836,85 +900,109 @@ func (e *Engine) GetTools(session *model.Session) []openai.Tool {
 }
 
 // getConversationStateFromSession retrieves conversation state from a session object
+// Deprecated: Session fields are now flat, use session.Msgs, session.InProgress, etc. directly
 func getConversationStateFromSession(session *model.Session) *model.ConversationState {
-	if session.ConversationState == nil {
-		session.ConversationState = model.NewConversationState()
-	}
-	return session.ConversationState
+	return session.GetConversationState()
 }
 
 // setConversationStateToSession stores conversation state in a session object
+// Deprecated: Session fields are now flat, modify session.Msgs, etc. directly
 func setConversationStateToSession(session *model.Session, state *model.ConversationState) {
-	state.LastActivity = time.Now()
-	session.ConversationState = state
+	session.Msgs = state.Msgs
+	session.InProgress = state.InProgress
+	session.Queue = state.Queue
+	session.UpdatedAt = time.Now()
 }
 
 // getConversationState retrieves conversation state from session
+// Deprecated: Use getSession and access fields directly
 func (e *Engine) getConversationState(sessionID string) *model.ConversationState {
 	session, err := e.Sessions.Get(sessionID)
 	if err != nil {
 		return model.NewConversationState()
 	}
-	return getConversationStateFromSession(session)
+	return session.GetConversationState()
 }
 
 // setConversationState stores conversation state in session
+// Deprecated: Modify session fields directly and call Sessions.Put
 func (e *Engine) setConversationState(sessionID string, state *model.ConversationState) error {
 	session, err := e.Sessions.Get(sessionID)
 	if err != nil {
 		return err
 	}
-	setConversationStateToSession(session, state)
+	session.Msgs = state.Msgs
+	session.InProgress = state.InProgress
+	session.Queue = state.Queue
+	session.UpdatedAt = time.Now()
 	return e.Sessions.Put(session)
 }
 
 // getMessages retrieves messages from session
 func (e *Engine) getMessages(sessionID string) []openai.ChatCompletionMessage {
-	state := e.getConversationState(sessionID)
-	messages := make([]openai.ChatCompletionMessage, len(state.Msgs))
-	copy(messages, state.Msgs)
+	session, err := e.Sessions.Get(sessionID)
+	if err != nil {
+		return []openai.ChatCompletionMessage{}
+	}
+	messages := make([]openai.ChatCompletionMessage, len(session.Msgs))
+	copy(messages, session.Msgs)
 	return messages
 }
 
 // appendMessages adds messages to session
 func (e *Engine) appendMessages(sessionID string, messages []openai.ChatCompletionMessage) error {
-	state := e.getConversationState(sessionID)
-	state.Msgs = append(state.Msgs, messages...)
-	return e.setConversationState(sessionID, state)
+	session, err := e.Sessions.Get(sessionID)
+	if err != nil {
+		return err
+	}
+	session.Msgs = append(session.Msgs, messages...)
+	session.UpdatedAt = time.Now()
+	return e.Sessions.Put(session)
 }
 
 // queueMessage adds a message to the queue
 func (e *Engine) queueMessage(sessionID string, text string) error {
-	state := e.getConversationState(sessionID)
-	state.Queue = append(state.Queue, openai.ChatCompletionMessage{
+	session, err := e.Sessions.Get(sessionID)
+	if err != nil {
+		return err
+	}
+	session.Queue = append(session.Queue, openai.ChatCompletionMessage{
 		Role:    openai.ChatMessageRoleUser,
 		Content: text,
 	})
-	return e.setConversationState(sessionID, state)
+	session.UpdatedAt = time.Now()
+	return e.Sessions.Put(session)
 }
 
 // processQueuedMessages moves queued messages to session messages
 // This should be called after tool processing to ensure queued requests
 // are added to session at the earliest opportunity
 func (e *Engine) processQueuedMessages(sessionID string) error {
-	state := e.getConversationState(sessionID)
-	if len(state.Queue) == 0 {
+	session, err := e.Sessions.Get(sessionID)
+	if err != nil {
+		return err
+	}
+	if len(session.Queue) == 0 {
 		return nil
 	}
 
 	// Move queued messages to session messages
-	log.Log.Infof("Processing %d queued messages for session %s", len(state.Queue), sessionID)
-	state.Msgs = append(state.Msgs, state.Queue...)
-	state.Queue = []openai.ChatCompletionMessage{} // Clear the queue
+	log.Log.Infof("Processing %d queued messages for session %s", len(session.Queue), sessionID)
+	session.Msgs = append(session.Msgs, session.Queue...)
+	session.Queue = []openai.ChatCompletionMessage{} // Clear the queue
+	session.UpdatedAt = time.Now()
 
-	return e.setConversationState(sessionID, state)
+	return e.Sessions.Put(session)
 }
 
 // removeFunctionCalls removes function/tool call messages
 func (e *Engine) removeFunctionCalls(sessionID string) error {
-	state := e.getConversationState(sessionID)
+	session, err := e.Sessions.Get(sessionID)
+	if err != nil {
+		return err
+	}
 	msgs := []openai.ChatCompletionMessage{}
-	for _, msg := range state.Msgs {
+	for _, msg := range session.Msgs {
 		if msg.ToolCallID != "" || len(msg.ToolCalls) > 0 || msg.FunctionCall != nil {
 			continue
 		}
@@ -922,8 +1010,9 @@ func (e *Engine) removeFunctionCalls(sessionID string) error {
 			msgs = append(msgs, msg)
 		}
 	}
-	state.Msgs = msgs
-	return e.setConversationState(sessionID, state)
+	session.Msgs = msgs
+	session.UpdatedAt = time.Now()
+	return e.Sessions.Put(session)
 }
 
 // generateResultID generates a unique ID for tool results

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
@@ -73,6 +75,7 @@ func (s *SQLiteStore) initSchema() error {
 		session_id TEXT PRIMARY KEY,
 		user_id TEXT NOT NULL,
 		agent_type TEXT NOT NULL,
+		session_seq INTEGER NOT NULL DEFAULT 0,
 		data TEXT NOT NULL,
 		created_at INTEGER NOT NULL,
 		updated_at INTEGER NOT NULL
@@ -80,6 +83,7 @@ func (s *SQLiteStore) initSchema() error {
 	
 	CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
 	CREATE INDEX IF NOT EXISTS idx_sessions_updated_at ON sessions(updated_at);
+	CREATE INDEX IF NOT EXISTS idx_sessions_user_agent ON sessions(user_id, agent_type);
 	CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_user_core ON sessions(user_id, agent_type) WHERE agent_type = 'core';
 	
 	CREATE TABLE IF NOT EXISTS users (
@@ -204,6 +208,9 @@ func (s *SQLiteStore) initSchema() error {
 	// Migration: Add seq_id column to messages table if it doesn't exist (for existing databases)
 	_ = s.migrateAddSeqIDColumn()
 
+	// Migration: Add session_seq column to sessions table if it doesn't exist (for existing databases)
+	_ = s.migrateAddSessionSeqColumn()
+
 	return nil
 }
 
@@ -236,6 +243,18 @@ func (s *SQLiteStore) migrateAddMessageTypeColumns() error {
 func (s *SQLiteStore) migrateAddSeqIDColumn() error {
 	_, _ = s.db.Exec(`ALTER TABLE messages ADD COLUMN seq_id INTEGER DEFAULT 0`)
 	// Ignore error if column already exists
+	return nil
+}
+
+// migrateAddSessionSeqColumn adds session_seq column to sessions table if it doesn't exist
+// This is needed for backward compatibility with older databases
+// Also creates the index for (user_id, agent_type) if it doesn't exist
+func (s *SQLiteStore) migrateAddSessionSeqColumn() error {
+	// Add session_seq column
+	_, _ = s.db.Exec(`ALTER TABLE sessions ADD COLUMN session_seq INTEGER NOT NULL DEFAULT 0`)
+	// Create index for (user_id, agent_type) for efficient MAX queries
+	_, _ = s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_sessions_user_agent ON sessions(user_id, agent_type)`)
+	// Ignore errors if column/index already exists
 	return nil
 }
 
@@ -376,13 +395,17 @@ func (s *SQLiteStore) Put(session *model.Session) error {
 	createdAt := session.CreatedAt.Unix()
 	updatedAt := session.UpdatedAt.Unix()
 
+	// Extract session_seq from session_id (format: userID-agentType-s0001)
+	sessionSeq := extractSessionSeq(session.SessionID)
+
 	// Use INSERT OR REPLACE for upsert behavior
 	_, err = s.db.Exec(
-		`INSERT OR REPLACE INTO sessions (session_id, user_id, agent_type, data, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
+		`INSERT OR REPLACE INTO sessions (session_id, user_id, agent_type, session_seq, data, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		session.SessionID,
 		session.UserID,
 		string(session.AgentType),
+		sessionSeq,
 		string(data),
 		createdAt,
 		updatedAt,
@@ -393,6 +416,23 @@ func (s *SQLiteStore) Put(session *model.Session) error {
 	}
 
 	return nil
+}
+
+// extractSessionSeq extracts the sequence number from a session ID
+// Format: userID-agentType-s0001 -> 1
+// Returns 0 if the format is not recognized
+func extractSessionSeq(sessionID string) int {
+	// Find the last occurrence of "-s" and extract the number after it
+	idx := strings.LastIndex(sessionID, "-s")
+	if idx == -1 || idx+2 >= len(sessionID) {
+		return 0
+	}
+	seqStr := sessionID[idx+2:]
+	seq, err := strconv.Atoi(seqStr)
+	if err != nil {
+		return 0
+	}
+	return seq
 }
 
 // Delete removes a session
@@ -448,6 +488,27 @@ func (s *SQLiteStore) List(userID string) ([]*model.Session, error) {
 	}
 
 	return sessions, nil
+}
+
+// GetNextSessionSeq returns the next session sequence number for a user and agent type
+// Uses MAX(session_seq) to avoid duplicate IDs when sessions are deleted
+func (s *SQLiteStore) GetNextSessionSeq(userID string, agentType model.AgentType) (int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var maxSeq sql.NullInt64
+	err := s.db.QueryRow(
+		"SELECT MAX(session_seq) FROM sessions WHERE user_id = ? AND agent_type = ?",
+		userID, string(agentType),
+	).Scan(&maxSeq)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get max session seq: %w", err)
+	}
+
+	if maxSeq.Valid {
+		return int(maxSeq.Int64) + 1, nil
+	}
+	return 1, nil
 }
 
 // GetAllSessions returns all sessions grouped by userID
@@ -561,14 +622,18 @@ func (s *SQLiteStore) PutCoreSession(session *model.Session) error {
 	createdAt := session.CreatedAt.Unix()
 	updatedAt := session.UpdatedAt.Unix()
 
+	// Extract session_seq from session_id
+	sessionSeq := extractSessionSeq(session.SessionID)
+
 	// Use INSERT OR REPLACE to handle case where session_id might already exist
 	// (e.g., from a previous session with different agent_type)
 	_, err = s.db.Exec(
-		`INSERT OR REPLACE INTO sessions (session_id, user_id, agent_type, data, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
+		`INSERT OR REPLACE INTO sessions (session_id, user_id, agent_type, session_seq, data, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		session.SessionID,
 		session.UserID,
 		string(session.AgentType),
+		sessionSeq,
 		string(data),
 		createdAt,
 		updatedAt,
@@ -799,34 +864,39 @@ func (s *SQLiteStore) GetOrCreateUser(userID string) (*model.User, error) {
 
 // computeSessionSeqs computes SessionSeqs from existing sessions for backward compatibility
 // This is called when a user has no SessionSeqs (old user migrating to new format)
+// Uses MAX(session_seq) to handle cases where sessions have been deleted
 func (s *SQLiteStore) computeSessionSeqs(user *model.User) error {
 	if user == nil {
 		return nil
 	}
 
-	// Get all sessions for this user
-	sessions, err := s.List(user.UserID)
+	// Get max session_seq for each agent type
+	rows, err := s.db.Query(
+		`SELECT agent_type, MAX(session_seq) FROM sessions WHERE user_id = ? GROUP BY agent_type`,
+		user.UserID,
+	)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to query max session seqs: %w", err)
 	}
-
-	// Count sessions by agent type
-	seqCounts := make(map[model.AgentType]int)
-	for _, session := range sessions {
-		if session.AgentType != "" {
-			seqCounts[session.AgentType]++
-		}
-	}
+	defer rows.Close()
 
 	// Update user's SessionSeqs
 	if user.SessionSeqs == nil {
 		user.SessionSeqs = make(map[model.AgentType]int)
 	}
-	for agentType, count := range seqCounts {
-		user.SessionSeqs[agentType] = count
+
+	for rows.Next() {
+		var agentType string
+		var maxSeq sql.NullInt64
+		if err := rows.Scan(&agentType, &maxSeq); err != nil {
+			return fmt.Errorf("failed to scan row: %w", err)
+		}
+		if maxSeq.Valid && agentType != "" {
+			user.SessionSeqs[model.AgentType(agentType)] = int(maxSeq.Int64)
+		}
 	}
 
-	return nil
+	return rows.Err()
 }
 
 // computeActiveSessionIDs computes ActiveSessionIDs from existing sessions for backward compatibility

@@ -122,7 +122,10 @@ func ExampleNewMongoDBStoreFromURI() {
 	}
 
 	fmt.Println("MongoDB store created successfully")
-	// Output: Error creating MongoDB store: failed to ping MongoDB: server selection error: context deadline exceeded, current topology: { Type: Unknown, Servers: [{ Addr: localhost:27017, Type: Unknown, Last error: dial tcp [::1]:27017: connect: connection refused }, ] }
+	// Note: Output varies depending on MongoDB availability and configuration
+	// If MongoDB is available: "MongoDB store created successfully"
+	// If MongoDB requires auth: "Error creating MongoDB store: failed to create indexes: ..."
+	// If MongoDB is not running: "Error creating MongoDB store: failed to ping MongoDB: ..."
 }
 
 func ExampleAgentizeWithMongoDB() {

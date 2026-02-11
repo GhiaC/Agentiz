@@ -94,9 +94,8 @@ func (s *DBStore) Get(sessionID string) (*model.Session, error) {
 	s.sessionsMu.RLock()
 	if session, ok := s.sessionsCache[sessionID]; ok {
 		s.sessionsMu.RUnlock()
-		// Return a copy to prevent external modification
-		sessionCopy := *session
-		return &sessionCopy, nil
+		// Return a copy to prevent external modification (using Clone to avoid copylocks)
+		return session.Clone(), nil
 	}
 	s.sessionsMu.RUnlock()
 
@@ -108,8 +107,7 @@ func (s *DBStore) Get(sessionID string) (*model.Session, error) {
 
 	// Add to cache
 	s.sessionsMu.Lock()
-	sessionCopy := *session
-	s.sessionsCache[sessionID] = &sessionCopy
+	s.sessionsCache[sessionID] = session.Clone()
 	s.sessionsMu.Unlock()
 
 	return session, nil
@@ -123,10 +121,9 @@ func (s *DBStore) Put(session *model.Session) error {
 		return err
 	}
 
-	// Update cache
+	// Update cache (using Clone to avoid copylocks)
 	s.sessionsMu.Lock()
-	sessionCopy := *session
-	s.sessionsCache[session.SessionID] = &sessionCopy
+	s.sessionsCache[session.SessionID] = session.Clone()
 	s.sessionsMu.Unlock()
 
 	return nil
@@ -151,6 +148,12 @@ func (s *DBStore) Delete(sessionID string) error {
 // List returns all sessions for a user (delegates to SQLiteStore)
 func (s *DBStore) List(userID string) ([]*model.Session, error) {
 	return s.sqliteStore.List(userID)
+}
+
+// GetNextSessionSeq returns the next session sequence number for a user and agent type
+// Delegates to SQLiteStore
+func (s *DBStore) GetNextSessionSeq(userID string, agentType model.AgentType) (int, error) {
+	return s.sqliteStore.GetNextSessionSeq(userID, agentType)
 }
 
 // GetAllSessions returns all sessions grouped by userID (delegates to SQLiteStore)
