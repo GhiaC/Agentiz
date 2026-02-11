@@ -346,18 +346,26 @@ func (s *SQLiteStore) Get(sessionID string) (*model.Session, error) {
 
 	// Restore MessageSeq from database to ensure it's correct
 	// Use MAX(seq_id) to get the highest sequence number, not COUNT(*) which doesn't reflect actual sequences
-	maxSeqID := s.getMaxSeqIDForSessionUnsafe(sessionID)
+	maxSeqID := s.getMaxSeqIDForSession(sessionID)
 	if maxSeqID > session.MessageSeq {
 		// Ensure MessageSeq is at least as high as the highest seq_id in the database
 		session.MessageSeq = maxSeqID
 	}
 
+	// Restore ToolSeq from tool_calls so we never reuse a tool ID (ensures new tool calls are stored with unique IDs)
+	maxToolSeq := s.getMaxToolSeqForSession(sessionID)
+	if maxToolSeq > session.ToolSeq {
+		session.ToolSeq = maxToolSeq
+	}
+
 	return session, nil
 }
 
-// getMaxSeqIDForSessionUnsafe returns the maximum seq_id for a session without locking
-// Used to restore MessageSeq counter correctly from database
-func (s *SQLiteStore) getMaxSeqIDForSessionUnsafe(sessionID string) int {
+// getMaxSeqIDForSession returns the maximum seq_id for a session.
+// Used to restore MessageSeq counter correctly from database.
+func (s *SQLiteStore) getMaxSeqIDForSession(sessionID string) int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	var maxSeqID sql.NullInt64
 	err := s.db.QueryRow(
 		"SELECT MAX(seq_id) FROM messages WHERE session_id = ?",
@@ -367,6 +375,28 @@ func (s *SQLiteStore) getMaxSeqIDForSessionUnsafe(sessionID string) int {
 		return 0
 	}
 	return int(maxSeqID.Int64)
+}
+
+// getMaxToolSeqForSession returns the maximum tool sequence number for a session from tool_calls table.
+func (s *SQLiteStore) getMaxToolSeqForSession(sessionID string) int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	rows, err := s.db.Query("SELECT tool_id FROM tool_calls WHERE session_id = ?", sessionID)
+	if err != nil {
+		return 0
+	}
+	defer rows.Close()
+	maxSeq := 0
+	for rows.Next() {
+		var toolID string
+		if err := rows.Scan(&toolID); err != nil {
+			continue
+		}
+		if seq := parseToolSeqFromToolID(toolID); seq > maxSeq {
+			maxSeq = seq
+		}
+	}
+	return maxSeq
 }
 
 // Put stores or updates a session

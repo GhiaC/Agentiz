@@ -1323,115 +1323,17 @@ func (e *Engine) processChatRequest(
 			},
 		})
 
-		// Execute tools and collect results
+		// Execute tools and collect results; persistence (Put/Update) is inside executeOneToolCall so new tools need no extra code
 		toolResults := make([]openai.ChatCompletionMessage, 0, len(choice.Message.ToolCalls))
 		for _, toolCall := range choice.Message.ToolCalls {
-			// Save tool call to database (before execution); toolID is used for update later
-			toolID := e.saveToolCall(session, messageID, toolCall)
+			msg := e.executeOneToolCall(ctx, session, messageID, sessionID, toolCall)
+			toolResults = append(toolResults, msg)
+		}
 
-			// Parse arguments
-			var args map[string]interface{}
-			if err := json.Unmarshal([]byte(toolCall.Function.Arguments), &args); err != nil {
-				args = make(map[string]interface{})
-			}
-
-			// Inject context into args for tools that need user/session context
-			// This allows tools to access the current user/session without exposing it in the AI schema
-			args["__user_id__"] = session.UserID
-			args["__session_id__"] = session.SessionID
-
-			// Log tool call from LLM
-			log.Log.Infof("LLM tool call: name=%s, args=%s", toolCall.Function.Name, toolCall.Function.Arguments)
-
-			// Notify status: tool executing
-			notifyStatus(ctx, session.UserID, sessionID, StatusToolExecuting, toolCall.Function.Name)
-
-			// Callback: check limit before tool execution
-			if e.Callback != nil {
-				if cbErr := e.Callback.BeforeAction(ctx, &UsageEvent{
-					UserID:    session.UserID,
-					SessionID: sessionID,
-					EventType: EventToolCall,
-					Name:      toolCall.Function.Name,
-				}); cbErr != nil {
-					// Limit exceeded — return error as tool result so LLM can inform user
-					result := fmt.Sprintf("Tool %s blocked: %v", toolCall.Function.Name, cbErr)
-					log.Log.Infof("Tool blocked by callback: name=%s, error=%v", toolCall.Function.Name, cbErr)
-
-					e.updateToolCallResponse(toolID, result)
-					e.appendMessages(sessionID, []openai.ChatCompletionMessage{
-						{
-							Role:       openai.ChatMessageRoleTool,
-							Content:    result,
-							Name:       toolCall.Function.Name,
-							ToolCallID: toolCall.ID,
-						},
-					})
-					toolResults = append(toolResults, openai.ChatCompletionMessage{
-						Role:       openai.ChatMessageRoleTool,
-						Content:    result,
-						Name:       toolCall.Function.Name,
-						ToolCallID: toolCall.ID,
-					})
-					continue
-				}
-			}
-
-			// Execute tool
-			toolStart := time.Now()
-			result, err := e.Executor(toolCall.Function.Name, args)
-			toolDuration := time.Since(toolStart)
-			if err != nil {
-				result = fmt.Sprintf("Error executing tool %s: %v", toolCall.Function.Name, err)
-				log.Log.Infof("Tool execution error: name=%s, error=%v", toolCall.Function.Name, err)
-			} else {
-				log.Log.Infof("Tool execution result: name=%s, result_len=%d, result=%s", toolCall.Function.Name, len(result), truncateForLog(result, 500))
-			}
-
-			// Callback: record tool usage
-			if e.Callback != nil {
-				e.Callback.AfterAction(ctx, &UsageEvent{
-					UserID:    session.UserID,
-					SessionID: sessionID,
-					EventType: EventToolCall,
-					Name:      toolCall.Function.Name,
-					Duration:  toolDuration,
-					Error:     err,
-				})
-			}
-
-			// Notify status: tool done
-			notifyStatus(ctx, session.UserID, sessionID, StatusToolDone, toolCall.Function.Name)
-
-			// Process tool result (truncate if too long)
-			// Skip truncation for collect_result to avoid infinite loop
-			var processedResult string
-			if toolCall.Function.Name == "collect_result" {
-				processedResult = result
-			} else {
-				processedResult = e.processToolResult(sessionID, result)
-			}
-
-			// Update tool call response in database
-			e.updateToolCallResponse(toolID, processedResult)
-
-			// Add tool result to memory
-			e.appendMessages(sessionID, []openai.ChatCompletionMessage{
-				{
-					Role:       openai.ChatMessageRoleTool,
-					Content:    processedResult,
-					Name:       toolCall.Function.Name,
-					ToolCallID: toolCall.ID,
-				},
-			})
-
-			// Also collect for recursive call
-			toolResults = append(toolResults, openai.ChatCompletionMessage{
-				Role:       openai.ChatMessageRoleTool,
-				Content:    processedResult,
-				Name:       toolCall.Function.Name,
-				ToolCallID: toolCall.ID,
-			})
+		// Save session to persist ToolSeq (incremented by GenerateToolID during tool execution)
+		// This ensures unique ToolIDs even across recursive calls and session reloads
+		if err := e.Sessions.Put(session); err != nil {
+			log.Log.Warnf("[Engine] ⚠️  Failed to persist session ToolSeq | SessionID: %s | ToolSeq: %d | Error: %v", sessionID, session.ToolSeq, err)
 		}
 
 		// Process queued messages immediately after tool execution
@@ -1470,7 +1372,7 @@ func (e *Engine) saveMessage(
 	// Get user message content
 	content := choice.Message.Content
 	if content == "" && len(choice.Message.ToolCalls) > 0 {
-		content = fmt.Sprintf("[Tool Calls: %d]", len(choice.Message.ToolCalls))
+		content = formatToolCallsContent(choice.Message.ToolCalls)
 	}
 
 	// Create message record
@@ -1502,49 +1404,80 @@ func (e *Engine) saveMessage(
 	return msg.MessageID
 }
 
-// saveToolCall saves a tool call to the database and returns the ToolID (for use in updateToolCallResponse).
-func (e *Engine) saveToolCall(session *model.Session, messageID string, toolCall openai.ToolCall) string {
-	if sqliteStore, ok := e.Sessions.(interface {
-		PutToolCall(*model.ToolCall) error
-	}); ok {
-		now := time.Now()
-		// Generate sequential ToolID for this session
-		toolID := session.GenerateToolID()
-		tc := &model.ToolCall{
-			ToolID:       toolID,
-			ToolCallID:   toolCall.ID,
-			MessageID:    messageID,
-			SessionID:    session.SessionID,
-			UserID:       session.UserID,
-			AgentType:    model.AgentTypeLow,
-			FunctionName: toolCall.Function.Name,
-			Arguments:    toolCall.Function.Arguments,
-			Response:     "", // Will be updated after execution
-			CreatedAt:    now,
-			UpdatedAt:    now,
-		}
-		if err := sqliteStore.PutToolCall(tc); err != nil {
-			log.Log.Warnf("[Engine] ⚠️  Failed to save tool call | ToolID: %s | ToolCallID: %s | Error: %v", toolID, toolCall.ID, err)
-		} else {
-			log.Log.Infof("[Engine] 🔧 Tool call saved | ToolID: %s | ToolCallID: %s | Function: %s", toolID, toolCall.ID, toolCall.Function.Name)
-		}
-		return toolID
+// executeOneToolCall runs one tool call: saves it (Put), runs Executor, updates response (Update).
+// All UserAgent tool executions go through here so new tools registered in the registry are persisted automatically.
+func (e *Engine) executeOneToolCall(
+	ctx context.Context,
+	session *model.Session,
+	messageID, sessionID string,
+	toolCall openai.ToolCall,
+) openai.ChatCompletionMessage {
+	log.Log.Infof("[Engine] 🔄 executeOneToolCall | Function=%s | SessionID=%s | StoreType=%T", toolCall.Function.Name, sessionID, e.Sessions)
+	persister := NewToolCallPersister(e.Sessions, "Engine")
+	if persister == nil {
+		log.Log.Warnf("[Engine] ⚠️  ToolCallPersister is nil for function=%s; store type=%T", toolCall.Function.Name, e.Sessions)
 	}
-	return ""
-}
+	toolID := persister.Save(session, messageID, toolCall)
+	log.Log.Infof("[Engine] 💾 Tool call save result | Function=%s | ToolID=%s", toolCall.Function.Name, toolID)
 
-// updateToolCallResponse updates the response for a tool call by ToolID.
-func (e *Engine) updateToolCallResponse(toolID string, response string) {
-	if toolID == "" {
-		return
+	var args map[string]interface{}
+	if err := json.Unmarshal([]byte(toolCall.Function.Arguments), &args); err != nil {
+		args = make(map[string]interface{})
 	}
-	if sqliteStore, ok := e.Sessions.(interface {
-		UpdateToolCallResponse(string, string) error
-	}); ok {
-		if err := sqliteStore.UpdateToolCallResponse(toolID, response); err != nil {
-			log.Log.Warnf("[Engine] ⚠️  Failed to update tool call response | ToolID: %s | Error: %v", toolID, err)
-		} else {
-			log.Log.Infof("[Engine] ✅ Tool call response updated | ToolID: %s", toolID)
+	args["__user_id__"] = session.UserID
+	args["__session_id__"] = session.SessionID
+
+	log.Log.Infof("LLM tool call: name=%s, args=%s", toolCall.Function.Name, toolCall.Function.Arguments)
+	notifyStatus(ctx, session.UserID, sessionID, StatusToolExecuting, toolCall.Function.Name)
+
+	if e.Callback != nil {
+		if cbErr := e.Callback.BeforeAction(ctx, &UsageEvent{
+			UserID:    session.UserID,
+			SessionID: sessionID,
+			EventType: EventToolCall,
+			Name:      toolCall.Function.Name,
+		}); cbErr != nil {
+			result := fmt.Sprintf("Tool %s blocked: %v", toolCall.Function.Name, cbErr)
+			log.Log.Infof("Tool blocked by callback: name=%s, error=%v", toolCall.Function.Name, cbErr)
+			persister.Update(toolID, result)
+			e.appendMessages(sessionID, []openai.ChatCompletionMessage{{
+				Role: openai.ChatMessageRoleTool, Content: result, Name: toolCall.Function.Name, ToolCallID: toolCall.ID,
+			}})
+			return openai.ChatCompletionMessage{
+				Role: openai.ChatMessageRoleTool, Content: result, Name: toolCall.Function.Name, ToolCallID: toolCall.ID,
+			}
 		}
+	}
+
+	toolStart := time.Now()
+	result, err := e.Executor(toolCall.Function.Name, args)
+	toolDuration := time.Since(toolStart)
+	if err != nil {
+		result = fmt.Sprintf("Error executing tool %s: %v", toolCall.Function.Name, err)
+		log.Log.Infof("Tool execution error: name=%s, error=%v", toolCall.Function.Name, err)
+	} else {
+		log.Log.Infof("Tool execution result: name=%s, result_len=%d, result=%s", toolCall.Function.Name, len(result), truncateForLog(result, 500))
+	}
+
+	if e.Callback != nil {
+		e.Callback.AfterAction(ctx, &UsageEvent{
+			UserID: session.UserID, SessionID: sessionID, EventType: EventToolCall, Name: toolCall.Function.Name,
+			Duration: toolDuration, Error: err,
+		})
+	}
+	notifyStatus(ctx, session.UserID, sessionID, StatusToolDone, toolCall.Function.Name)
+
+	var processedResult string
+	if toolCall.Function.Name == "collect_result" {
+		processedResult = result
+	} else {
+		processedResult = e.processToolResult(sessionID, result)
+	}
+	persister.Update(toolID, processedResult)
+	e.appendMessages(sessionID, []openai.ChatCompletionMessage{{
+		Role: openai.ChatMessageRoleTool, Content: processedResult, Name: toolCall.Function.Name, ToolCallID: toolCall.ID,
+	}})
+	return openai.ChatCompletionMessage{
+		Role: openai.ChatMessageRoleTool, Content: processedResult, Name: toolCall.Function.Name, ToolCallID: toolCall.ID,
 	}
 }

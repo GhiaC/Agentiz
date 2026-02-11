@@ -378,6 +378,16 @@ func (s *DBStore) GetToolCallByToolID(toolID string) (*model.ToolCall, error) {
 	return s.sqliteStore.GetToolCallByToolID(toolID)
 }
 
+// PutToolCall stores a tool call (delegates to SQLiteStore)
+func (s *DBStore) PutToolCall(toolCall *model.ToolCall) error {
+	return s.sqliteStore.PutToolCall(toolCall)
+}
+
+// UpdateToolCallResponse updates the response for a tool call (delegates to SQLiteStore)
+func (s *DBStore) UpdateToolCallResponse(toolID string, response string) error {
+	return s.sqliteStore.UpdateToolCallResponse(toolID, response)
+}
+
 // SessionStore is an alias for model.SessionStore for backward compatibility
 type SessionStore = model.SessionStore
 

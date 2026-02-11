@@ -912,65 +912,12 @@ func (ch *CoreHandler) processWithTools(
 		// Add assistant message with tool calls
 		currentMessages = append(currentMessages, choice.Message)
 
-		// Execute each tool call; after the first tool response, merge all queued user messages so they get one combined answer
+		// Execute each tool call; persistence (Put/Update) is done inside executeCoreToolWithPersistence so new tools need no extra code
 		queuedMerged := false
 		for _, toolCall := range choice.Message.ToolCalls {
-			// Save tool call to database (before execution); toolID is used for update later
-			var toolID string
-			if coreSession != nil {
-				toolID = ch.saveToolCall(coreSession, messageID, toolCall)
-			}
-
-			// Notify status: tool executing
-			notifyStatus(ctx, userID, sessionID, StatusToolExecuting, toolCall.Function.Name)
-
-			// Callback: check limit before tool execution
-			if ch.Callback != nil {
-				if cbErr := ch.Callback.BeforeAction(ctx, &UsageEvent{
-					UserID:    userID,
-					SessionID: sessionID,
-					EventType: EventToolCall,
-					Name:      toolCall.Function.Name,
-				}); cbErr != nil {
-					result := fmt.Sprintf("Tool %s blocked: %v", toolCall.Function.Name, cbErr)
-					if coreSession != nil {
-						ch.updateToolCallResponse(toolID, result)
-					}
-					currentMessages = append(currentMessages, openai.ChatCompletionMessage{
-						Role:       openai.ChatMessageRoleTool,
-						Content:    result,
-						ToolCallID: toolCall.ID,
-					})
-					continue
-				}
-			}
-
-			toolStart := time.Now()
-			result, err := ch.executeCoreTool(ctx, userID, toolCall)
-			toolDuration := time.Since(toolStart)
+			result, err := ch.executeCoreToolWithPersistence(ctx, userID, sessionID, coreSession, messageID, toolCall)
 			if err != nil {
 				result = fmt.Sprintf("Error executing tool: %v", err)
-			}
-
-			// Callback: record tool usage
-			if ch.Callback != nil {
-				e := &UsageEvent{
-					UserID:    userID,
-					SessionID: sessionID,
-					EventType: EventToolCall,
-					Name:      toolCall.Function.Name,
-					Duration:  toolDuration,
-					Error:     err,
-				}
-				ch.Callback.AfterAction(ctx, e)
-			}
-
-			// Notify status: tool done
-			notifyStatus(ctx, userID, sessionID, StatusToolDone, toolCall.Function.Name)
-
-			// Update tool call response in database
-			if coreSession != nil {
-				ch.updateToolCallResponse(toolID, result)
 			}
 
 			// Add tool result
@@ -998,18 +945,74 @@ func (ch *CoreHandler) processWithTools(
 						ch.saveMessage(userMsg)
 					}
 				}
-				if coreSession != nil {
-					_ = ch.saveCoreSession(coreSession)
-				}
 			}
+		}
+
+		// Save coreSession after all tool calls to persist ToolSeq (incremented by GenerateToolID)
+		// This ensures unique ToolIDs even across loop iterations
+		if coreSession != nil {
+			_ = ch.saveCoreSession(coreSession)
 		}
 	}
 
 	return "", fmt.Errorf("max iterations reached without final response")
 }
 
-// executeCoreTool executes a Core tool and returns the result
-func (ch *CoreHandler) executeCoreTool(
+// executeCoreToolWithPersistence saves the tool call (Put), runs the tool, and updates the response (Update).
+// All tool executions go through here so new tools are persisted automatically without per-tool code.
+func (ch *CoreHandler) executeCoreToolWithPersistence(
+	ctx context.Context,
+	userID, sessionID string,
+	coreSession *model.Session,
+	messageID string,
+	toolCall openai.ToolCall,
+) (string, error) {
+	persister := ch.getToolCallPersister()
+	var toolID string
+	if coreSession != nil {
+		toolID = persister.SaveWithAgentType(coreSession, messageID, toolCall, model.AgentTypeCore)
+	}
+
+	notifyStatus(ctx, userID, sessionID, StatusToolExecuting, toolCall.Function.Name)
+
+	if ch.Callback != nil {
+		if cbErr := ch.Callback.BeforeAction(ctx, &UsageEvent{
+			UserID:    userID,
+			SessionID: sessionID,
+			EventType: EventToolCall,
+			Name:      toolCall.Function.Name,
+		}); cbErr != nil {
+			result := fmt.Sprintf("Tool %s blocked: %v", toolCall.Function.Name, cbErr)
+			persister.Update(toolID, result)
+			return result, nil
+		}
+	}
+
+	toolStart := time.Now()
+	result, err := ch.runCoreToolImpl(ctx, userID, toolCall)
+	toolDuration := time.Since(toolStart)
+	if err != nil {
+		result = fmt.Sprintf("Error executing tool: %v", err)
+	}
+
+	if ch.Callback != nil {
+		ch.Callback.AfterAction(ctx, &UsageEvent{
+			UserID:    userID,
+			SessionID: sessionID,
+			EventType: EventToolCall,
+			Name:      toolCall.Function.Name,
+			Duration:  toolDuration,
+			Error:     err,
+		})
+	}
+	notifyStatus(ctx, userID, sessionID, StatusToolDone, toolCall.Function.Name)
+
+	persister.Update(toolID, result)
+	return result, err
+}
+
+// runCoreToolImpl runs the Core tool logic (switch on tool name). Persistence is handled by executeCoreToolWithPersistence.
+func (ch *CoreHandler) runCoreToolImpl(
 	ctx context.Context,
 	userID string,
 	toolCall openai.ToolCall,
@@ -1480,7 +1483,7 @@ func (ch *CoreHandler) saveCoreMessage(
 	// Get message content
 	content := choice.Message.Content
 	if content == "" && len(choice.Message.ToolCalls) > 0 {
-		content = fmt.Sprintf("[Tool Calls: %d]", len(choice.Message.ToolCalls))
+		content = formatToolCallsContent(choice.Message.ToolCalls)
 	}
 
 	// Create message record
@@ -1517,53 +1520,9 @@ func (ch *CoreHandler) saveMessage(msg *model.Message) {
 	}
 }
 
-// saveToolCall saves a tool call to the database and returns the ToolID (for use in updateToolCallResponse).
-func (ch *CoreHandler) saveToolCall(session *model.Session, messageID string, toolCall openai.ToolCall) string {
-	store := ch.sessionHandler.GetStore()
-	if sqliteStore, ok := store.(interface {
-		PutToolCall(*model.ToolCall) error
-	}); ok {
-		now := time.Now()
-		// Generate sequential ToolID for this session
-		toolID := session.GenerateToolID()
-		tc := &model.ToolCall{
-			ToolID:       toolID,
-			ToolCallID:   toolCall.ID,
-			MessageID:    messageID,
-			SessionID:    session.SessionID,
-			UserID:       session.UserID,
-			AgentType:    model.AgentTypeCore,
-			FunctionName: toolCall.Function.Name,
-			Arguments:    toolCall.Function.Arguments,
-			Response:     "", // Will be updated after execution
-			CreatedAt:    now,
-			UpdatedAt:    now,
-		}
-		if err := sqliteStore.PutToolCall(tc); err != nil {
-			log.Log.Warnf("[CoreHandler] ⚠️  Failed to save tool call | ToolID: %s | ToolCallID: %s | Error: %v", toolID, toolCall.ID, err)
-		} else {
-			log.Log.Infof("[CoreHandler] 🔧 Tool call saved | ToolID: %s | ToolCallID: %s | Function: %s", toolID, toolCall.ID, toolCall.Function.Name)
-		}
-		return toolID
-	}
-	return ""
-}
-
-// updateToolCallResponse updates the response for a tool call by ToolID.
-func (ch *CoreHandler) updateToolCallResponse(toolID string, response string) {
-	if toolID == "" {
-		return
-	}
-	store := ch.sessionHandler.GetStore()
-	if sqliteStore, ok := store.(interface {
-		UpdateToolCallResponse(string, string) error
-	}); ok {
-		if err := sqliteStore.UpdateToolCallResponse(toolID, response); err != nil {
-			log.Log.Warnf("[CoreHandler] ⚠️  Failed to update tool call response | ToolID: %s | Error: %v", toolID, err)
-		} else {
-			log.Log.Infof("[CoreHandler] ✅ Tool call response updated | ToolID: %s", toolID)
-		}
-	}
+// getToolCallPersister returns a ToolCallPersister for the session store.
+func (ch *CoreHandler) getToolCallPersister() *ToolCallPersister {
+	return NewToolCallPersister(ch.sessionHandler.GetStore(), "CoreHandler")
 }
 
 // ============================================================================

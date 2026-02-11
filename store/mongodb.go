@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ghiac/agentize/log"
 	"github.com/ghiac/agentize/model"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -171,7 +172,7 @@ func (s *MongoDBStore) initIndexes(ctx context.Context) error {
 	// Messages Collection Indexes
 	// ============================================================================
 
-	// Index for getMaxSeqIDForSessionUnsafe and other session_id queries: session_id
+	// Index for getMaxSeqIDForSession and other session_id queries: session_id
 	// This is a simple index for efficient filtering by session_id
 	_, err = s.messagesCollection.Indexes().CreateOne(ctx, mongo.IndexModel{
 		Keys: bson.D{{Key: "session_id", Value: 1}},
@@ -181,7 +182,7 @@ func (s *MongoDBStore) initIndexes(ctx context.Context) error {
 	}
 
 	// Index for efficient MAX(seq_id) queries: session_id + seq_id
-	// This compound index optimizes aggregation pipeline in getMaxSeqIDForSessionUnsafe
+	// This compound index optimizes aggregation pipeline in getMaxSeqIDForSession
 	_, err = s.messagesCollection.Indexes().CreateOne(ctx, mongo.IndexModel{
 		Keys: bson.D{
 			{Key: "session_id", Value: 1},
@@ -377,19 +378,27 @@ func (s *MongoDBStore) Get(sessionID string) (*model.Session, error) {
 
 	// Restore MessageSeq from database to ensure it's correct
 	// Use MAX(seq_id) from messages collection to get the highest sequence number
-	maxSeqID := s.getMaxSeqIDForSessionUnsafe(ctx, sessionID)
+	maxSeqID := s.getMaxSeqIDForSession(ctx, sessionID)
 	if maxSeqID > session.MessageSeq {
 		// Ensure MessageSeq is at least as high as the highest seq_id in the database
 		session.MessageSeq = maxSeqID
 	}
 
+	// Restore ToolSeq from tool_calls so we never reuse a tool ID (ensures new tool calls are stored with unique IDs)
+	maxToolSeq := s.getMaxToolSeqForSession(ctx, sessionID)
+	if maxToolSeq > session.ToolSeq {
+		log.Log.Debugf("[MongoDBStore] Get | Restoring ToolSeq | SessionID: %s | OldToolSeq: %d | MaxToolSeq: %d", sessionID, session.ToolSeq, maxToolSeq)
+		session.ToolSeq = maxToolSeq
+	}
+	log.Log.Debugf("[MongoDBStore] Get | Final ToolSeq | SessionID: %s | ToolSeq: %d", sessionID, session.ToolSeq)
+
 	return session, nil
 }
 
-// getMaxSeqIDForSessionUnsafe returns the maximum seq_id for a session without locking
-// Used to restore MessageSeq counter correctly from database
-// Uses aggregation pipeline for efficient querying (seq_id is stored as separate field)
-func (s *MongoDBStore) getMaxSeqIDForSessionUnsafe(ctx context.Context, sessionID string) int {
+// getMaxSeqIDForSession returns the maximum seq_id for a session.
+// Used to restore MessageSeq counter correctly from database.
+// Uses aggregation pipeline for efficient querying (seq_id is stored as separate field).
+func (s *MongoDBStore) getMaxSeqIDForSession(ctx context.Context, sessionID string) int {
 	// Use aggregation pipeline to find MAX(seq_id) efficiently
 	pipeline := mongo.Pipeline{
 		{{Key: "$match", Value: bson.M{"session_id": sessionID}}},
@@ -402,7 +411,7 @@ func (s *MongoDBStore) getMaxSeqIDForSessionUnsafe(ctx context.Context, sessionI
 	cursor, err := s.messagesCollection.Aggregate(ctx, pipeline)
 	if err != nil {
 		// Fallback: if aggregation fails (e.g., old data without seq_id field), use old method
-		return s.getMaxSeqIDForSessionUnsafeFallback(ctx, sessionID)
+		return s.getMaxSeqIDForSessionFallback(ctx, sessionID)
 	}
 	defer cursor.Close(ctx)
 
@@ -418,9 +427,35 @@ func (s *MongoDBStore) getMaxSeqIDForSessionUnsafe(ctx context.Context, sessionI
 	return 0
 }
 
-// getMaxSeqIDForSessionUnsafeFallback is a fallback method for old data without seq_id field
-// Reads all messages and unmarshals JSON to find max SeqID
-func (s *MongoDBStore) getMaxSeqIDForSessionUnsafeFallback(ctx context.Context, sessionID string) int {
+// getMaxToolSeqForSession returns the maximum tool sequence number for a session from tool_calls collection.
+func (s *MongoDBStore) getMaxToolSeqForSession(ctx context.Context, sessionID string) int {
+	cursor, err := s.toolCallsCollection.Find(ctx, bson.M{"session_id": sessionID}, options.Find().SetProjection(bson.M{"_id": 1}))
+	if err != nil {
+		log.Log.Warnf("[MongoDBStore] getMaxToolSeqForSession query error | SessionID: %s | Error: %v", sessionID, err)
+		return 0
+	}
+	defer cursor.Close(ctx)
+	maxSeq := 0
+	count := 0
+	for cursor.Next(ctx) {
+		var doc struct {
+			ID string `bson:"_id"`
+		}
+		if err := cursor.Decode(&doc); err != nil {
+			continue
+		}
+		count++
+		if seq := parseToolSeqFromToolID(doc.ID); seq > maxSeq {
+			maxSeq = seq
+		}
+	}
+	log.Log.Debugf("[MongoDBStore] getMaxToolSeqForSession | SessionID: %s | Found: %d tool_calls | MaxSeq: %d", sessionID, count, maxSeq)
+	return maxSeq
+}
+
+// getMaxSeqIDForSessionFallback is a fallback method for old data without seq_id field.
+// Reads all messages and unmarshals JSON to find max SeqID.
+func (s *MongoDBStore) getMaxSeqIDForSessionFallback(ctx context.Context, sessionID string) int {
 	cursor, err := s.messagesCollection.Find(ctx, bson.M{"session_id": sessionID})
 	if err != nil {
 		return 0
@@ -620,7 +655,7 @@ func (s *MongoDBStore) GetCoreSession(userID string) (*model.Session, error) {
 
 	// Restore MessageSeq from database to ensure it's correct
 	// Use MAX(seq_id) from messages collection to get the highest sequence number
-	maxSeqID := s.getMaxSeqIDForSessionUnsafe(ctx, session.SessionID)
+	maxSeqID := s.getMaxSeqIDForSession(ctx, session.SessionID)
 	if maxSeqID > session.MessageSeq {
 		// Ensure MessageSeq is at least as high as the highest seq_id in the database
 		session.MessageSeq = maxSeqID
@@ -1308,7 +1343,7 @@ func (s *MongoDBStore) GetAllOpenedFiles() ([]*model.OpenedFile, error) {
 type toolCallDocument struct {
 	ID         string    `bson:"_id"`          // ToolID, our sequential key
 	ToolCallID string    `bson:"tool_call_id"` // LLM's ID (from OpenAI)
-	ToolID     string    `bson:"tool_id"`      // same as _id
+	ToolID     string    `bson:"tool_id"`      // same as _id, kept for backward compatibility
 	SessionID  string    `bson:"session_id"`
 	Data       string    `bson:"data"` // JSON serialized ToolCall
 	CreatedAt  time.Time `bson:"created_at"`
@@ -1459,6 +1494,9 @@ func (s *MongoDBStore) UpdateToolCallResponse(toolID string, response string) er
 	var doc toolCallDocument
 	err := s.toolCallsCollection.FindOne(ctx, bson.M{"_id": toolID}).Decode(&doc)
 	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			return fmt.Errorf("tool call not found (PutToolCall may have failed earlier): %w", err)
+		}
 		return fmt.Errorf("failed to find tool call: %w", err)
 	}
 
