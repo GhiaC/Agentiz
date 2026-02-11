@@ -1488,8 +1488,8 @@ func (s *SQLiteStore) PutToolCall(toolCall *model.ToolCall) error {
 	return nil
 }
 
-// UpdateToolCallResponse updates the response for a tool call and calculates duration
-func (s *SQLiteStore) UpdateToolCallResponse(toolCallID string, response string) error {
+// UpdateToolCallResponse updates the response for a tool call by ToolID and calculates duration
+func (s *SQLiteStore) UpdateToolCallResponse(toolID string, response string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -1497,11 +1497,11 @@ func (s *SQLiteStore) UpdateToolCallResponse(toolCallID string, response string)
 	updatedAt := now.Unix()
 	responseLength := utf8.RuneCountInString(response)
 
-	// Get created_at to calculate duration
+	// Get created_at to calculate duration (look up by tool_id)
 	var createdAtUnix int64
 	err := s.db.QueryRow(
-		"SELECT created_at FROM tool_calls WHERE tool_call_id = ?",
-		toolCallID,
+		"SELECT created_at FROM tool_calls WHERE tool_id = ?",
+		toolID,
 	).Scan(&createdAtUnix)
 
 	var durationMs int64
@@ -1513,12 +1513,12 @@ func (s *SQLiteStore) UpdateToolCallResponse(toolCallID string, response string)
 	_, err = s.db.Exec(
 		`UPDATE tool_calls 
 		 SET response = ?, response_length = ?, duration_ms = ?, updated_at = ? 
-		 WHERE tool_call_id = ?`,
+		 WHERE tool_id = ?`,
 		response,
 		responseLength,
 		durationMs,
 		updatedAt,
-		toolCallID,
+		toolID,
 	)
 
 	if err != nil {

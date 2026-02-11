@@ -81,6 +81,10 @@ type Engine struct {
 	sessionMutexes   map[string]*sync.Mutex
 	sessionMutexesMu sync.RWMutex
 
+	// Per-session progress + queue: check before locking so we can return immediately
+	// when already in progress and queue the message instead of blocking
+	sessionProgress *ProgressGuard
+
 	// Backup LLM chain (initialized from LLMConfig.BackupProviders)
 	backups *backupChain
 
@@ -97,6 +101,9 @@ func (e *Engine) Init() error {
 	// Initialize session mutexes map if nil
 	if e.sessionMutexes == nil {
 		e.sessionMutexes = make(map[string]*sync.Mutex)
+	}
+	if e.sessionProgress == nil {
+		e.sessionProgress = NewProgressGuard()
 	}
 
 	// Try to load root node to verify repository is ready
@@ -557,33 +564,31 @@ func (e *Engine) CloseFile(sessionID string, path string) error {
 }
 
 // ProcessMessage routes a user message through the LLM workflow and tool executor.
-// Uses per-session mutex to ensure only one message is processed at a time per session
+// It checks in-progress (without locking) and queues if busy; otherwise holds
+// per-session mutex and processes, then drains the queue.
 func (e *Engine) ProcessMessage(
 	ctx context.Context,
 	sessionID string,
 	userMessage string,
 ) (string, int, error) {
-	// Acquire per-session mutex to serialize message processing
-	// This prevents race conditions on sequence number generation and session updates
+	if e.sessionProgress.TryQueue(sessionID, userMessage) {
+		return "⏳ در حال پردازش درخواست قبلی هستم... لطفا صبر کنید. 📋 پیام شما صف شد و به‌ترتیب پاسخ داده می‌شود.", 0, nil
+	}
 	sessionMu := e.getSessionMutex(sessionID)
 	sessionMu.Lock()
 	defer sessionMu.Unlock()
+	e.sessionProgress.SetInProgress(sessionID, true)
+	defer e.sessionProgress.SetInProgress(sessionID, false)
 
 	log.Log.Infof("[Engine] 🚀 Processing message | SessionID: %s | Message length: %d chars", sessionID, len(userMessage))
-
-	// Check if database is ready
 	if !e.IsDBReady() {
 		return "", 0, errors.New("database is not ready. Call Init() first to ensure database is fully loaded")
 	}
-
 	if e.llmClient == nil {
 		return "", 0, errors.New("LLM client is not configured. Call UseLLMConfig first")
 	}
 
-	// Get conversation state from session
 	convState := e.getConversationState(sessionID)
-
-	// Get session for logging
 	session, err := e.Sessions.Get(sessionID)
 	if err == nil {
 		log.Log.Infof("[Engine] 🔍 Retrieved session | SessionID: %s | UserID: %s | Messages in history: %d",
@@ -591,29 +596,22 @@ func (e *Engine) ProcessMessage(
 	} else {
 		log.Log.Warnf("[Engine] ⚠️  Session not found | SessionID: %s | Error: %v", sessionID, err)
 	}
-
-	// Check if already in progress
 	if convState.InProgress {
 		if err := e.queueMessage(sessionID, userMessage); err != nil {
 			return "", 0, fmt.Errorf("failed to update session: %w", err)
 		}
-		return "در حال پردازش درخواست قبلی... لطفا صبر کنید.", 0, nil
+		return "⏳ در حال پردازش درخواست قبلی هستم... لطفا صبر کنید. 📋 پیام شما صف شد و به‌ترتیب پاسخ داده می‌شود.", 0, nil
 	}
-
-	// Set progress flag
 	convState.InProgress = true
 	if err := e.setConversationState(sessionID, convState); err != nil {
 		return "", 0, fmt.Errorf("failed to update session: %w", err)
 	}
-
 	defer func() {
-		// Get fresh state to preserve messages added during processing
 		freshState := e.getConversationState(sessionID)
 		freshState.InProgress = false
 		e.setConversationState(sessionID, freshState)
 	}()
 
-	// Clean up old function calls if last activity was more than 2 hours ago
 	if convState.LastActivity.Before(time.Now().Add(-2 * time.Hour)) {
 		if err := e.removeFunctionCalls(sessionID); err != nil {
 			return "", 0, fmt.Errorf("failed to clean up function calls: %w", err)
@@ -621,45 +619,42 @@ func (e *Engine) ProcessMessage(
 		convState = e.getConversationState(sessionID)
 	}
 
-	// Add user message
+	response, tokens, err := e.processOneMessageBody(ctx, sessionID, userMessage)
+	if err != nil {
+		log.Log.Errorf("[Engine] ❌ LLM processing failed | SessionID: %s | Error: %v", sessionID, err)
+		return "", tokens, err
+	}
+	for _, m := range e.sessionProgress.DrainQueue(sessionID) {
+		if _, _, err := e.processOneMessageBody(ctx, sessionID, m); err != nil {
+			log.Log.Warnf("[Engine] ⚠️  Queued message failed | SessionID: %s | Error: %v", sessionID, err)
+		}
+	}
+	log.Log.Infof("[Engine] ✅ Message processed successfully | SessionID: %s | Response length: %d chars | Tokens: %d",
+		sessionID, len(response), tokens)
+	return response, tokens, nil
+}
+
+// processOneMessageBody appends the user message, saves it, and runs the chat request. Caller must hold session mutex and set progress.
+func (e *Engine) processOneMessageBody(ctx context.Context, sessionID string, userMessage string) (string, int, error) {
 	if len(userMessage) > 1 {
-		// Get session to access userID
 		session, err := e.Sessions.Get(sessionID)
 		if err != nil {
 			return "", 0, fmt.Errorf("failed to get session: %w", err)
 		}
 		if err := e.appendMessages(sessionID, []openai.ChatCompletionMessage{
-			{
-				Role:    openai.ChatMessageRoleUser,
-				Content: userMessage,
-			},
+			{Role: openai.ChatMessageRoleUser, Content: userMessage},
 		}); err != nil {
 			return "", 0, fmt.Errorf("failed to add user message: %w", err)
 		}
-
-		// Save user message to database
-		// Note: User messages don't have a model - the model field stays empty for user messages
 		userMsgID, userSeqID := session.GenerateMessageIDWithSeq()
 		userMsg := model.NewUserMessage(userMsgID, userSeqID, session.UserID, sessionID, userMessage, model.ContentTypeText)
-		if sqliteStore, ok := e.Sessions.(interface {
-			PutMessage(*model.Message) error
-		}); ok {
+		if sqliteStore, ok := e.Sessions.(interface{ PutMessage(*model.Message) error }); ok {
 			if err := sqliteStore.PutMessage(userMsg); err != nil {
 				log.Log.Warnf("[Engine] ⚠️  Failed to save user message | SessionID: %s | Error: %v", sessionID, err)
 			}
 		}
 	}
-
-	response, tokens, err := e.processChatRequest(ctx, sessionID)
-	if err != nil {
-		log.Log.Errorf("[Engine] ❌ LLM processing failed | SessionID: %s | Error: %v", sessionID, err)
-		return "", tokens, fmt.Errorf("LLM processing failed: %w", err)
-	}
-
-	log.Log.Infof("[Engine] ✅ Message processed successfully | SessionID: %s | Response length: %d chars | Tokens: %d",
-		sessionID, len(response), tokens)
-
-	return response, tokens, nil
+	return e.processChatRequest(ctx, sessionID)
 }
 
 func summarizeNode(node *model.Node) model.NodeDigest {
@@ -1331,8 +1326,8 @@ func (e *Engine) processChatRequest(
 		// Execute tools and collect results
 		toolResults := make([]openai.ChatCompletionMessage, 0, len(choice.Message.ToolCalls))
 		for _, toolCall := range choice.Message.ToolCalls {
-			// Save tool call to database (before execution)
-			e.saveToolCall(session, messageID, toolCall)
+			// Save tool call to database (before execution); toolID is used for update later
+			toolID := e.saveToolCall(session, messageID, toolCall)
 
 			// Parse arguments
 			var args map[string]interface{}
@@ -1363,7 +1358,7 @@ func (e *Engine) processChatRequest(
 					result := fmt.Sprintf("Tool %s blocked: %v", toolCall.Function.Name, cbErr)
 					log.Log.Infof("Tool blocked by callback: name=%s, error=%v", toolCall.Function.Name, cbErr)
 
-					e.updateToolCallResponse(toolCall.ID, result)
+					e.updateToolCallResponse(toolID, result)
 					e.appendMessages(sessionID, []openai.ChatCompletionMessage{
 						{
 							Role:       openai.ChatMessageRoleTool,
@@ -1418,7 +1413,7 @@ func (e *Engine) processChatRequest(
 			}
 
 			// Update tool call response in database
-			e.updateToolCallResponse(toolCall.ID, processedResult)
+			e.updateToolCallResponse(toolID, processedResult)
 
 			// Add tool result to memory
 			e.appendMessages(sessionID, []openai.ChatCompletionMessage{
@@ -1507,8 +1502,8 @@ func (e *Engine) saveMessage(
 	return msg.MessageID
 }
 
-// saveToolCall saves a tool call to the database
-func (e *Engine) saveToolCall(session *model.Session, messageID string, toolCall openai.ToolCall) {
+// saveToolCall saves a tool call to the database and returns the ToolID (for use in updateToolCallResponse).
+func (e *Engine) saveToolCall(session *model.Session, messageID string, toolCall openai.ToolCall) string {
 	if sqliteStore, ok := e.Sessions.(interface {
 		PutToolCall(*model.ToolCall) error
 	}); ok {
@@ -1533,18 +1528,23 @@ func (e *Engine) saveToolCall(session *model.Session, messageID string, toolCall
 		} else {
 			log.Log.Infof("[Engine] 🔧 Tool call saved | ToolID: %s | ToolCallID: %s | Function: %s", toolID, toolCall.ID, toolCall.Function.Name)
 		}
+		return toolID
 	}
+	return ""
 }
 
-// updateToolCallResponse updates the response for a tool call
-func (e *Engine) updateToolCallResponse(toolCallID string, response string) {
+// updateToolCallResponse updates the response for a tool call by ToolID.
+func (e *Engine) updateToolCallResponse(toolID string, response string) {
+	if toolID == "" {
+		return
+	}
 	if sqliteStore, ok := e.Sessions.(interface {
 		UpdateToolCallResponse(string, string) error
 	}); ok {
-		if err := sqliteStore.UpdateToolCallResponse(toolCallID, response); err != nil {
-			log.Log.Warnf("[Engine] ⚠️  Failed to update tool call response | ToolCallID: %s | Error: %v", toolCallID, err)
+		if err := sqliteStore.UpdateToolCallResponse(toolID, response); err != nil {
+			log.Log.Warnf("[Engine] ⚠️  Failed to update tool call response | ToolID: %s | Error: %v", toolID, err)
 		} else {
-			log.Log.Infof("[Engine] ✅ Tool call response updated | ToolCallID: %s", toolCallID)
+			log.Log.Infof("[Engine] ✅ Tool call response updated | ToolID: %s", toolID)
 		}
 	}
 }

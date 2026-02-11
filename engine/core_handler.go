@@ -78,6 +78,10 @@ type CoreHandler struct {
 	userMutexes   map[string]*sync.Mutex
 	userMutexesMu sync.RWMutex
 
+	// Per-user progress + queue: check before locking so we can return immediately
+	// when already in progress and queue the message instead of blocking
+	userProgress *ProgressGuard
+
 	// Configuration
 	config CoreHandlerConfig
 
@@ -108,6 +112,7 @@ func NewCoreHandler(
 		config:         config,
 		coreSessions:   make(map[string]*model.Session),
 		userMutexes:    make(map[string]*sync.Mutex),
+		userProgress:   NewProgressGuard(),
 		coreTools:      model.NewFunctionRegistry(),
 	}
 
@@ -227,24 +232,39 @@ func (ch *CoreHandler) SetHTTPClient(client *http.Client) {
 	}
 }
 
-// ProcessMessage is the main entry point for user messages
-// It routes through the Core's orchestration logic
-// Uses per-user mutex to ensure only one message is processed at a time per user
+// ProcessMessage is the main entry point for user messages.
+// It checks in-progress (without locking) and queues if busy; otherwise holds
+// per-user mutex and processes, then drains the queue.
 func (ch *CoreHandler) ProcessMessage(
 	ctx context.Context,
 	userID string,
 	userMessage string,
 ) (string, error) {
-	// Acquire per-user mutex to serialize message processing
-	// This prevents race conditions on session creation and sequence number generation
+	if ch.userProgress.TryQueue(userID, userMessage) {
+		return "⏳ در حال پردازش درخواست قبلی هستم... لطفا صبر کنید. 📋 پیام شما صف شد و به‌ترتیب پاسخ داده می‌شود.", nil
+	}
 	userMu := ch.getUserMutex(userID)
 	userMu.Lock()
 	defer userMu.Unlock()
+	ch.userProgress.SetInProgress(userID, true)
+	defer ch.userProgress.SetInProgress(userID, false)
 
-	// Notify status: message received
+	response, err := ch.processOneMessageCore(ctx, userID, userMessage)
+	if err != nil {
+		return "", err
+	}
+	// Queued messages are merged inside processWithTools after the first tool response (one combined answer)
+	return response, nil
+}
+
+// processOneMessageCore does one full Core message flow (no mutex; caller must hold user mutex and set progress).
+func (ch *CoreHandler) processOneMessageCore(
+	ctx context.Context,
+	userID string,
+	userMessage string,
+) (string, error) {
 	notifyStatus(ctx, userID, "", StatusReceived, "")
 
-	// Get user's total sessions count before processing
 	userSessions, _ := ch.sessionHandler.ListUserSessions(userID)
 	ch.coreSessionsMu.RLock()
 	totalCoreSessions := len(ch.coreSessions)
@@ -253,115 +273,75 @@ func (ch *CoreHandler) ProcessMessage(
 	log.Log.Infof("[CoreHandler] 🚀 Processing new message | UserID: %s | Message length: %d chars | User sessions: %d | Total Core sessions: %d",
 		userID, len(userMessage), len(userSessions), totalCoreSessions)
 
-	// Check if database is ready (check both UserAgents)
 	if !ch.userAgentHigh.IsDBReady() || !ch.userAgentLow.IsDBReady() {
 		return "", fmt.Errorf("database is not ready. Call Init() on UserAgents first to ensure database is fully loaded")
 	}
-
 	if ch.llmClient == nil {
 		return "", fmt.Errorf("LLM client not configured. Call UseLLMConfig first")
 	}
 
-	// Notify status: analyzing message
 	notifyStatus(ctx, userID, "", StatusAnalyzing, "")
 
-	// Check user ban status and nonsense messages
 	var isNonsense bool
 	if ch.userModeration != nil {
-		// Check if user is banned
 		if isBanned, banMessage := ch.userModeration.CheckBanStatus(userID); isBanned {
 			return banMessage, nil
 		}
-
-		// Add user_id to context for LLM calls
 		ctx = model.WithUserID(ctx, userID)
-
-		// Check if message is nonsense and handle auto-ban
 		shouldBan, banMessage, err := ch.userModeration.ProcessNonsenseCheck(ctx, userID, userMessage)
 		if err != nil {
 			log.Log.Warnf("[CoreHandler] ⚠️  Failed to process nonsense check, proceeding anyway | UserID: %s | Error: %v", userID, err)
 		} else {
-			// Determine if message is nonsense (if banMessage is not empty, it's nonsense)
 			isNonsense = banMessage != "" || shouldBan
 			if shouldBan {
 				return banMessage, nil
-			} else if banMessage != "" {
-				// Warning message (no ban yet)
+			}
+			if banMessage != "" {
 				return banMessage, nil
 			}
 		}
 	}
 
-	// Get or create Core session for this user
 	coreSession, err := ch.getOrCreateCoreSession(userID)
 	if err != nil {
 		return "", fmt.Errorf("failed to get or create core session: %w", err)
 	}
-
-	// Build system prompts
 	systemPrompts, err := ch.buildSystemPrompts(userID)
 	if err != nil {
 		return "", fmt.Errorf("failed to build system prompts: %w", err)
 	}
 
-	// Add user message to Core's session
 	coreSession.Msgs = append(
 		coreSession.Msgs,
-		openai.ChatCompletionMessage{
-			Role:    openai.ChatMessageRoleUser,
-			Content: userMessage,
-		},
+		openai.ChatCompletionMessage{Role: openai.ChatMessageRoleUser, Content: userMessage},
 	)
-
-	// Save user message to database
-	// Note: User messages don't have a model - the model field stays empty for user messages
 	userMsgID, userSeqID := coreSession.GenerateMessageIDWithSeq()
 	userMsg := model.NewUserMessage(userMsgID, userSeqID, userID, coreSession.SessionID, userMessage, model.ContentTypeText)
-	// Set nonsense flag if detected
 	userMsg.IsNonsense = isNonsense
 	ch.saveMessage(userMsg)
-
-	// Save Core session after adding user message
 	if err := ch.saveCoreSession(coreSession); err != nil {
 		return "", fmt.Errorf("failed to save core session: %w", err)
 	}
 
-	// Build messages for LLM call
 	messages := ch.buildMessages(systemPrompts, coreSession.Msgs)
-
-	// Get Core's tools
 	tools := ch.getCoreToolsForLLM()
-
-	// Add user_id to context for LLM calls
 	ctx = model.WithUserID(ctx, userID)
-
-	// Notify status: routing to agents
 	notifyStatus(ctx, userID, coreSession.SessionID, StatusRouting, "")
 
-	// Make LLM call
 	response, err := ch.processWithTools(ctx, messages, tools, userID, coreSession)
 	if err != nil {
 		return "", fmt.Errorf("failed to process message: %w", err)
 	}
 
-	// Add assistant response to Core's session
 	coreSession.Msgs = append(
 		coreSession.Msgs,
-		openai.ChatCompletionMessage{
-			Role:    openai.ChatMessageRoleAssistant,
-			Content: response,
-		},
+		openai.ChatCompletionMessage{Role: openai.ChatMessageRoleAssistant, Content: response},
 	)
 	coreSession.UpdatedAt = time.Now()
-
-	// Save Core session after adding assistant response
 	if err := ch.saveCoreSession(coreSession); err != nil {
 		return "", fmt.Errorf("failed to save core session: %w", err)
 	}
-
-	// Notify status: completed
 	notifyStatus(ctx, userID, coreSession.SessionID, StatusCompleted, "")
-
 	return response, nil
 }
 
@@ -904,19 +884,41 @@ func (ch *CoreHandler) processWithTools(
 		}
 		messageID := ch.saveCoreMessage(userID, request, resp, choice)
 
-		// If no tool calls, return the response
+		// If no tool calls: merge any queued messages and do one more LLM turn so all get one combined answer
 		if len(choice.Message.ToolCalls) == 0 {
+			queued := ch.userProgress.DrainQueue(userID)
+			if len(queued) > 0 && coreSession != nil {
+				for _, text := range queued {
+					currentMessages = append(currentMessages, openai.ChatCompletionMessage{
+						Role:    openai.ChatMessageRoleUser,
+						Content: text,
+					})
+					coreSession.Msgs = append(coreSession.Msgs, openai.ChatCompletionMessage{
+						Role:    openai.ChatMessageRoleUser,
+						Content: text,
+					})
+					userMsgID, userSeqID := coreSession.GenerateMessageIDWithSeq()
+					userMsg := model.NewUserMessage(userMsgID, userSeqID, userID, coreSession.SessionID, text, model.ContentTypeText)
+					ch.saveMessage(userMsg)
+				}
+				_ = ch.saveCoreSession(coreSession)
+				// Continue loop to make one more LLM call with merged messages (no tools for this turn)
+				currentMessages = append(currentMessages, choice.Message)
+				continue
+			}
 			return choice.Message.Content, nil
 		}
 
 		// Add assistant message with tool calls
 		currentMessages = append(currentMessages, choice.Message)
 
-		// Execute each tool call
+		// Execute each tool call; after the first tool response, merge all queued user messages so they get one combined answer
+		queuedMerged := false
 		for _, toolCall := range choice.Message.ToolCalls {
-			// Save tool call to database (before execution)
+			// Save tool call to database (before execution); toolID is used for update later
+			var toolID string
 			if coreSession != nil {
-				ch.saveToolCall(coreSession, messageID, toolCall)
+				toolID = ch.saveToolCall(coreSession, messageID, toolCall)
 			}
 
 			// Notify status: tool executing
@@ -932,7 +934,7 @@ func (ch *CoreHandler) processWithTools(
 				}); cbErr != nil {
 					result := fmt.Sprintf("Tool %s blocked: %v", toolCall.Function.Name, cbErr)
 					if coreSession != nil {
-						ch.updateToolCallResponse(toolCall.ID, result)
+						ch.updateToolCallResponse(toolID, result)
 					}
 					currentMessages = append(currentMessages, openai.ChatCompletionMessage{
 						Role:       openai.ChatMessageRoleTool,
@@ -968,7 +970,7 @@ func (ch *CoreHandler) processWithTools(
 
 			// Update tool call response in database
 			if coreSession != nil {
-				ch.updateToolCallResponse(toolCall.ID, result)
+				ch.updateToolCallResponse(toolID, result)
 			}
 
 			// Add tool result
@@ -977,6 +979,29 @@ func (ch *CoreHandler) processWithTools(
 				Content:    result,
 				ToolCallID: toolCall.ID,
 			})
+
+			// After first tool response: merge all queued user messages into this turn so they get one combined answer
+			if !queuedMerged {
+				queuedMerged = true
+				for _, text := range ch.userProgress.DrainQueue(userID) {
+					currentMessages = append(currentMessages, openai.ChatCompletionMessage{
+						Role:    openai.ChatMessageRoleUser,
+						Content: text,
+					})
+					if coreSession != nil {
+						coreSession.Msgs = append(coreSession.Msgs, openai.ChatCompletionMessage{
+							Role:    openai.ChatMessageRoleUser,
+							Content: text,
+						})
+						userMsgID, userSeqID := coreSession.GenerateMessageIDWithSeq()
+						userMsg := model.NewUserMessage(userMsgID, userSeqID, userID, coreSession.SessionID, text, model.ContentTypeText)
+						ch.saveMessage(userMsg)
+					}
+				}
+				if coreSession != nil {
+					_ = ch.saveCoreSession(coreSession)
+				}
+			}
 		}
 	}
 
@@ -1492,8 +1517,8 @@ func (ch *CoreHandler) saveMessage(msg *model.Message) {
 	}
 }
 
-// saveToolCall saves a tool call to the database
-func (ch *CoreHandler) saveToolCall(session *model.Session, messageID string, toolCall openai.ToolCall) {
+// saveToolCall saves a tool call to the database and returns the ToolID (for use in updateToolCallResponse).
+func (ch *CoreHandler) saveToolCall(session *model.Session, messageID string, toolCall openai.ToolCall) string {
 	store := ch.sessionHandler.GetStore()
 	if sqliteStore, ok := store.(interface {
 		PutToolCall(*model.ToolCall) error
@@ -1519,19 +1544,24 @@ func (ch *CoreHandler) saveToolCall(session *model.Session, messageID string, to
 		} else {
 			log.Log.Infof("[CoreHandler] 🔧 Tool call saved | ToolID: %s | ToolCallID: %s | Function: %s", toolID, toolCall.ID, toolCall.Function.Name)
 		}
+		return toolID
 	}
+	return ""
 }
 
-// updateToolCallResponse updates the response for a tool call
-func (ch *CoreHandler) updateToolCallResponse(toolCallID string, response string) {
+// updateToolCallResponse updates the response for a tool call by ToolID.
+func (ch *CoreHandler) updateToolCallResponse(toolID string, response string) {
+	if toolID == "" {
+		return
+	}
 	store := ch.sessionHandler.GetStore()
 	if sqliteStore, ok := store.(interface {
 		UpdateToolCallResponse(string, string) error
 	}); ok {
-		if err := sqliteStore.UpdateToolCallResponse(toolCallID, response); err != nil {
-			log.Log.Warnf("[CoreHandler] ⚠️  Failed to update tool call response | ToolCallID: %s | Error: %v", toolCallID, err)
+		if err := sqliteStore.UpdateToolCallResponse(toolID, response); err != nil {
+			log.Log.Warnf("[CoreHandler] ⚠️  Failed to update tool call response | ToolID: %s | Error: %v", toolID, err)
 		} else {
-			log.Log.Infof("[CoreHandler] ✅ Tool call response updated | ToolCallID: %s", toolCallID)
+			log.Log.Infof("[CoreHandler] ✅ Tool call response updated | ToolID: %s", toolID)
 		}
 	}
 }

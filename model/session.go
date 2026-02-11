@@ -49,6 +49,7 @@ type Session struct {
 
 	// ArchivedMsgs contains messages that have been summarized and moved out of active conversation
 	// (Previously was both SummarizedMessages and ExMsgs - now unified)
+	// When Msgs is empty, the scheduler uses ArchivedMsgs for summarization (e.g. re-summarize when Summary was lost).
 	ArchivedMsgs []openai.ChatCompletionMessage
 
 	// ==================== Runtime State (not persisted to database) ====================
@@ -73,7 +74,7 @@ type Session struct {
 	// ==================== Summarization ====================
 	Tags    []string // User-defined or auto-generated tags for categorization
 	Title   string   // Session title (auto-generated or user-set)
-	Summary string   // LLM-generated summary of the conversation
+	Summary string   `json:"Summary"` // LLM-generated summary of the conversation (explicit key for persist/load)
 
 	// ==================== Sequences ====================
 	MessageSeq          int // Sequence counter for messages

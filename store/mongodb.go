@@ -1303,10 +1303,12 @@ func (s *MongoDBStore) GetAllOpenedFiles() ([]*model.OpenedFile, error) {
 	return files, cursor.Err()
 }
 
-// toolCallDocument represents a tool call document in MongoDB
+// toolCallDocument represents a tool call document in MongoDB.
+// _id is ToolID (our sequential key) so upserts and lookups use ToolID consistently.
 type toolCallDocument struct {
-	ToolCallID string    `bson:"_id"`
-	ToolID     string    `bson:"tool_id"` // Sequential tool ID
+	ID         string    `bson:"_id"`          // ToolID, our sequential key
+	ToolCallID string    `bson:"tool_call_id"` // LLM's ID (from OpenAI)
+	ToolID     string    `bson:"tool_id"`      // same as _id
 	SessionID  string    `bson:"session_id"`
 	Data       string    `bson:"data"` // JSON serialized ToolCall
 	CreatedAt  time.Time `bson:"created_at"`
@@ -1327,6 +1329,7 @@ func (s *MongoDBStore) PutToolCall(toolCall *model.ToolCall) error {
 	}
 
 	doc := toolCallDocument{
+		ID:         toolCall.ToolID,
 		ToolCallID: toolCall.ToolCallID,
 		ToolID:     toolCall.ToolID,
 		SessionID:  toolCall.SessionID,
@@ -1335,7 +1338,7 @@ func (s *MongoDBStore) PutToolCall(toolCall *model.ToolCall) error {
 	}
 
 	opts := options.Replace().SetUpsert(true)
-	_, err = s.toolCallsCollection.ReplaceOne(ctx, bson.M{"_id": toolCall.ToolCallID}, doc, opts)
+	_, err = s.toolCallsCollection.ReplaceOne(ctx, bson.M{"_id": toolCall.ToolID}, doc, opts)
 	if err != nil {
 		return fmt.Errorf("failed to store tool call: %w", err)
 	}
@@ -1445,16 +1448,16 @@ func (s *MongoDBStore) GetAllToolCalls() ([]*model.ToolCall, error) {
 	return toolCalls, cursor.Err()
 }
 
-// UpdateToolCallResponse updates the response for a tool call and calculates duration
-func (s *MongoDBStore) UpdateToolCallResponse(toolCallID string, response string) error {
+// UpdateToolCallResponse updates the response for a tool call by ToolID and calculates duration
+func (s *MongoDBStore) UpdateToolCallResponse(toolID string, response string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	now := time.Now()
 
-	// First, get the existing tool call to calculate duration
+	// First, get the existing tool call to calculate duration (_id is ToolID)
 	var doc toolCallDocument
-	err := s.toolCallsCollection.FindOne(ctx, bson.M{"_id": toolCallID}).Decode(&doc)
+	err := s.toolCallsCollection.FindOne(ctx, bson.M{"_id": toolID}).Decode(&doc)
 	if err != nil {
 		return fmt.Errorf("failed to find tool call: %w", err)
 	}
@@ -1484,7 +1487,7 @@ func (s *MongoDBStore) UpdateToolCallResponse(toolCallID string, response string
 	doc.Data = string(data)
 
 	opts := options.Replace().SetUpsert(false)
-	_, err = s.toolCallsCollection.ReplaceOne(ctx, bson.M{"_id": toolCallID}, doc, opts)
+	_, err = s.toolCallsCollection.ReplaceOne(ctx, bson.M{"_id": toolID}, doc, opts)
 	if err != nil {
 		return fmt.Errorf("failed to update tool call response: %w", err)
 	}

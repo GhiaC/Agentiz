@@ -83,10 +83,21 @@ func DefaultSessionSchedulerConfig() SessionSchedulerConfig {
 	}
 }
 
+// SummaryOffensiveContentSignal is the exact single word the LLM must return when user messages contain offensive/vulgar content. Used to trigger user ban.
+const SummaryOffensiveContentSignal = "OFFENSIVE_CONTENT"
+
+// userStore is implemented by stores that can get/save users (for ban on offensive content). Used via type assertion from session store.
+type userStore interface {
+	GetOrCreateUser(userID string) (*model.User, error)
+	PutUser(user *model.User) error
+}
+
 // DefaultSummarizationPrompts returns default prompts for summarization
 func DefaultSummarizationPrompts() SummarizationPrompts {
 	return SummarizationPrompts{
 		SummarySystemPrompt: `You are a conversation summarizer that extracts ONLY unique, specific, and personal information.
+
+CONTENT VIOLATION (check first): If the user's messages contain offensive, vulgar, abusive, or clearly inappropriate language (insults, slurs, explicit content, hate speech, etc.), you MUST respond with ONLY this exact word, nothing else: OFFENSIVE_CONTENT. No explanation, no other text, no summary.
 
 WHAT TO INCLUDE (specific/unique information):
 - Names of people, places, or entities mentioned
@@ -508,18 +519,6 @@ sessionLoop:
 // 2. First summarization (never summarized): only needs FirstSummarizationThreshold messages
 // 3. Subsequent summarizations: needs SubsequentMessageThreshold messages AND SubsequentTimeThreshold time since last summarization
 func (ss *SessionScheduler) isEligibleForSummarization(session *model.Session, now time.Time) bool {
-	// INCOMPLETE SUMMARIZATION: SummarizedAt set but Summary empty — always re-summarize (check FIRST so we don't skip due to empty Msgs)
-	// This must be checked before "no messages" check because sessions with SummarizedAt but empty Summary should be re-summarized
-	// even if their current Msgs are empty (we'll use ArchivedMsgs in summarizeSession)
-	if !session.SummarizedAt.IsZero() && session.Summary == "" {
-		msgCount := len(session.Msgs)
-		if !ss.config.DisableLogs {
-			log.Log.Infof("[SessionScheduler] 🔄 Session has SummarizedAt but empty Summary, re-summarizing | SessionID: %s | CurrentMsgs: %d (will use archived if needed)",
-				session.SessionID, msgCount)
-		}
-		return true
-	}
-
 	// Check if session has messages
 	if len(session.Msgs) == 0 {
 		return false
@@ -588,6 +587,25 @@ func (ss *SessionScheduler) summarizeSession(ctx context.Context, session *model
 		return fmt.Errorf("failed to get fresh session: %w", err)
 	}
 	session = freshSession
+
+	// TODO Remove this
+	// Repair: if session has SummarizedAt but Summary is empty, try to restore from latest summarization log
+	//if !session.SummarizedAt.IsZero() && session.Summary == "" {
+	//	if debugStore, ok := sessionStore.(debuger.DebugStore); ok {
+	//		logs, err := debugStore.GetSummarizationLogsBySession(session.SessionID)
+	//		if err == nil {
+	//			for _, l := range logs {
+	//				if l.GeneratedSummary != "" {
+	//					session.Summary = l.GeneratedSummary
+	//					if err := sessionStore.Put(session); err == nil && !ss.config.DisableLogs {
+	//						log.Log.Infof("[SessionScheduler] 🔧 Repaired session %s: restored Summary from summarization log", session.SessionID)
+	//					}
+	//					return nil
+	//				}
+	//			}
+	//		}
+	//	}
+	//}
 
 	msgCount := len(session.Msgs)
 	// When Msgs is empty but summarization is needed (e.g. SummarizedAt set but Summary empty), use ArchivedMsgs
@@ -658,17 +676,38 @@ func (ss *SessionScheduler) summarizeSession(ctx context.Context, session *model
 			log.Log.Warnf("[SessionScheduler] ⚠️  Failed to generate summary for session %s: %v", session.SessionID, err)
 		}
 		summLog.ErrorMessage = fmt.Sprintf("summary generation failed: %v", err)
-	} else if newSummary != "" {
-		session.Summary = newSummary
-		generatedSummary = newSummary
-		// Update log with response details
-		if summaryResp != nil {
-			summLog.PromptTokens = summaryResp.Usage.PromptTokens
-			summLog.CompletionTokens = summaryResp.Usage.CompletionTokens
-			summLog.TotalTokens = summaryResp.Usage.TotalTokens
-			if summaryResp.Model != "" {
-				summLog.ModelUsed = summaryResp.Model
+		summLog.MarkCompleted("failed")
+		if hasDebugStore {
+			_ = debugStore.PutSummarizationLog(summLog)
+		}
+		// Do not set SummarizedAt or move messages when summary generation failed
+		return fmt.Errorf("failed to generate summary: %w", err)
+	}
+
+	// Offensive content: LLM returned the signal word → ban user and do not save summary
+	if strings.TrimSpace(newSummary) == SummaryOffensiveContentSignal {
+		if us, ok := sessionStore.(userStore); ok {
+			user, err := us.GetOrCreateUser(session.UserID)
+			if err == nil {
+				user.Ban(0, "شما به دلیل استفاده از عبارات نامناسب محدود شده‌اید.")
+				if putErr := us.PutUser(user); putErr == nil && !ss.config.DisableLogs {
+					log.Log.Infof("[SessionScheduler] 🚫 User banned (offensive content) | UserID: %s", session.UserID)
+				}
 			}
+		}
+		// Do not save OFFENSIVE_CONTENT as summary; do not set SummarizedAt or move messages
+		return nil
+	}
+
+	// Always assign so persisted state reflects LLM response (even when empty)
+	session.Summary = newSummary
+	generatedSummary = newSummary
+	if summaryResp != nil {
+		summLog.PromptTokens = summaryResp.Usage.PromptTokens
+		summLog.CompletionTokens = summaryResp.Usage.CompletionTokens
+		summLog.TotalTokens = summaryResp.Usage.TotalTokens
+		if summaryResp.Model != "" {
+			summLog.ModelUsed = summaryResp.Model
 		}
 	}
 
@@ -711,6 +750,7 @@ func (ss *SessionScheduler) summarizeSession(ctx context.Context, session *model
 	copy(msgsToMove, session.Msgs)
 
 	var archivedMsgsBackupLen int
+	previousSummarizedAt := session.SummarizedAt
 	if len(msgsToMove) > 0 {
 		archivedMsgsBackupLen = len(session.ArchivedMsgs)
 		session.ArchivedMsgs = append(session.ArchivedMsgs, msgsToMove...)
@@ -724,12 +764,14 @@ func (ss *SessionScheduler) summarizeSession(ctx context.Context, session *model
 	summLog.MessagesAfterCount = len(session.Msgs)
 	summLog.ArchivedMessagesCount = len(session.ArchivedMsgs)
 
-	// Save session - if this fails, rollback when we had moved msgs
+	// Save session - if this fails, rollback all in-memory changes
 	if err := sessionStore.Put(session); err != nil {
 		if len(msgsToMove) > 0 {
 			session.Msgs = msgsToMove
 			session.ArchivedMsgs = session.ArchivedMsgs[:archivedMsgsBackupLen]
 		}
+		session.Summary = previousSummary
+		session.SummarizedAt = previousSummarizedAt
 		summLog.MarkCompleted("failed")
 		summLog.ErrorMessage = fmt.Sprintf("failed to save session: %v", err)
 		if hasDebugStore {
@@ -796,7 +838,7 @@ func (ss *SessionScheduler) generateImprovedSummaryWithResponse(ctx context.Cont
 			{Role: openai.ChatMessageRoleSystem, Content: systemPrompt},
 			{Role: openai.ChatMessageRoleUser, Content: userPrompt},
 		},
-		MaxTokens: 200,
+		MaxTokens: 1000,
 	}
 
 	if !ss.config.DisableLogs {
@@ -812,7 +854,7 @@ func (ss *SessionScheduler) generateImprovedSummaryWithResponse(ctx context.Cont
 		return "", nil, promptSent, fmt.Errorf("no response from LLM")
 	}
 
-	summary := strings.TrimSpace(resp.Choices[0].Message.Content)
+	summary := getMessageContentString(resp.Choices[0].Message)
 
 	if !ss.config.DisableLogs {
 		log.Log.Infof("[SessionScheduler] 📊 TOKEN USAGE >> total=%d (improved summary)", resp.Usage.TotalTokens)
@@ -872,7 +914,7 @@ func (ss *SessionScheduler) generateAndMergeTags(ctx context.Context, existingTa
 	}
 
 	// Parse tags from response - LLM handles merging intelligently via prompt
-	tagsStr := strings.TrimSpace(resp.Choices[0].Message.Content)
+	tagsStr := getMessageContentString(resp.Choices[0].Message)
 	tagsStr = strings.Trim(tagsStr, "\"'")
 	rawTags := strings.Split(tagsStr, ",")
 
@@ -924,19 +966,30 @@ func (ss *SessionScheduler) generateTitle(ctx context.Context, conversationText 
 		return "", fmt.Errorf("no response from LLM")
 	}
 
-	return strings.TrimSpace(resp.Choices[0].Message.Content), nil
+	return getMessageContentString(resp.Choices[0].Message), nil
+}
+
+// getMessageContentString returns the text content of a chat message as a trimmed string.
+// Use this when reading summary/tags/title from LLM responses so parsing can be extended
+// if the SDK or provider uses content parts (e.g. array) instead of a plain string.
+func getMessageContentString(msg openai.ChatCompletionMessage) string {
+	return strings.TrimSpace(msg.Content)
 }
 
 // formatMessagesForSummary converts messages to a readable format for summarization
 func formatMessagesForSummary(msgs []openai.ChatCompletionMessage) string {
 	var result string
 	for _, msg := range msgs {
+		// Only include user messages for summarization
+		if msg.Role != openai.ChatMessageRoleUser {
+			continue
+		}
 		// Skip tool-related messages
 		if msg.ToolCallID != "" || len(msg.ToolCalls) > 0 {
 			continue
 		}
 
-		content := msg.Content
+		content := getMessageContentString(msg)
 		if content == "" {
 			continue
 		}
