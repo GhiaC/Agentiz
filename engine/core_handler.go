@@ -1255,6 +1255,12 @@ func (ch *CoreHandler) GetUserAgentLow() *Engine {
 	return ch.userAgentLow
 }
 
+// GetCoreTools returns the function registry for Core tools (e.g. for display name resolution).
+// Do not register or replace entries from outside; Core owns this registry.
+func (ch *CoreHandler) GetCoreTools() *model.FunctionRegistry {
+	return ch.coreTools
+}
+
 // getOrCreateUser gets or creates a user from the store
 func (ch *CoreHandler) getOrCreateUser(userID string) (*model.User, error) {
 	store := ch.sessionHandler.GetStore()
