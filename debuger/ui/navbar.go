@@ -44,6 +44,15 @@ func DefaultNavItems() []NavItem {
 	}
 }
 
+// ExtraNavItems returns only the registered extra (non-default) navigation items.
+func ExtraNavItems() []NavItem {
+	navMu.RLock()
+	defer navMu.RUnlock()
+	out := make([]NavItem, len(extraNavItems))
+	copy(out, extraNavItems)
+	return out
+}
+
 // AllNavItems returns default items plus any registered extra items.
 func AllNavItems() []NavItem {
 	navMu.RLock()
@@ -53,9 +62,10 @@ func AllNavItems() []NavItem {
 	return items
 }
 
-// Navbar generates the Bootstrap navigation bar including any registered extra items.
+// Navbar generates the top navigation bar with default items only.
+// Extra items (from RegisterNavItem) are shown in the left Sidebar.
 func Navbar(currentPage string) string {
-	return NavbarWithItems(currentPage, AllNavItems())
+	return NavbarWithItems(currentPage, DefaultNavItems())
 }
 
 // NavbarWithItems generates the navigation bar with custom items

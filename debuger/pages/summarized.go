@@ -34,9 +34,7 @@ func RenderSummarized(handler *debuger.DebugHandler, page int) (string, error) {
 	startIdx, endIdx, _ := components.GetPaginationInfo(page, totalItems, components.DefaultItemsPerPage)
 	paginatedLogs := logs[startIdx:endIdx]
 
-	html := ui.Header("Agentize Debug - Summarization Logs")
-	html += ui.Navbar("/agentize/debug/summarized")
-	html += ui.ContainerStart()
+	content := ui.ContainerStart()
 
 	// Scheduler Configuration Card (if available)
 	if config != nil {
@@ -53,79 +51,79 @@ func RenderSummarized(handler *debuger.DebugHandler, page int) (string, error) {
 			{Label: "Immediate Summarization Threshold", Value: fmt.Sprintf("%d messages (triggers immediate summarization)", immediateThreshold)},
 			{Label: "Summary Model", Value: config.SummaryModel},
 		}
-		html += components.ConfigCard("Scheduler Configuration", configItems)
+		content += components.ConfigCard("Scheduler Configuration", configItems)
 	}
 
 	// Statistics Cards Row 1 - Summarization Logs
-	html += `<div class="row g-4 mb-4">`
+	content += `<div class="row g-4 mb-4">`
 
-	html += `<div class="col-md-6 col-lg-3">`
-	html += components.StatCard(
+	content += `<div class="col-md-6 col-lg-3">`
+	content += components.StatCard(
 		fmt.Sprintf("%d", sumStats.TotalLogs),
 		"Total Logs", "📝", "primary",
 	)
-	html += `</div>`
+	content += `</div>`
 
-	html += `<div class="col-md-6 col-lg-3">`
-	html += components.StatCard(
+	content += `<div class="col-md-6 col-lg-3">`
+	content += components.StatCard(
 		fmt.Sprintf("%d", sumStats.SuccessLogs),
 		"Successful", "✅", "success",
 	)
-	html += `</div>`
+	content += `</div>`
 
-	html += `<div class="col-md-6 col-lg-3">`
-	html += components.StatCard(
+	content += `<div class="col-md-6 col-lg-3">`
+	content += components.StatCard(
 		fmt.Sprintf("%d", sumStats.FailedLogs),
 		"Failed", "❌", "danger",
 	)
-	html += `</div>`
+	content += `</div>`
 
-	html += `<div class="col-md-6 col-lg-3">`
-	html += components.StatCard(
+	content += `<div class="col-md-6 col-lg-3">`
+	content += components.StatCard(
 		fmt.Sprintf("%d", sumStats.PendingLogs),
 		"Pending", "⏳", "warning",
 	)
-	html += `</div>`
+	content += `</div>`
 
-	html += `</div>`
+	content += `</div>`
 
 	// Statistics Cards Row 2 - Sessions
-	html += `<div class="row g-4 mb-4">`
+	content += `<div class="row g-4 mb-4">`
 
-	html += `<div class="col-md-6 col-lg-4">`
-	html += components.StatCard(
+	content += `<div class="col-md-6 col-lg-4">`
+	content += components.StatCard(
 		fmt.Sprintf("%d", sessStats.SummarizedSessions),
 		"Summarized Sessions", "📋", "info",
 	)
-	html += `</div>`
+	content += `</div>`
 
 	threshold := 5
 	if config != nil && config.FirstSummarizationThreshold > 0 {
 		threshold = config.FirstSummarizationThreshold
 	}
 
-	html += `<div class="col-md-6 col-lg-4">`
-	html += components.StatCardWithSubtext(
+	content += `<div class="col-md-6 col-lg-4">`
+	content += components.StatCardWithSubtext(
 		fmt.Sprintf("%d", sessStats.EligibleSessions),
 		"Eligible Sessions", "🎯", "secondary",
 		fmt.Sprintf("(>=%d messages, not summarized)", threshold),
 	)
-	html += `</div>`
+	content += `</div>`
 
-	html += `<div class="col-md-6 col-lg-4">`
-	html += components.StatCard(
+	content += `<div class="col-md-6 col-lg-4">`
+	content += components.StatCard(
 		fmt.Sprintf("%d", sessStats.TotalSessions),
 		"Total Sessions", "📊", "dark",
 	)
-	html += `</div>`
+	content += `</div>`
 
-	html += `</div>`
+	content += `</div>`
 
 	// Summarization Logs Table
-	html += ui.CardStartWithCount("All Summarization Logs", "file-text-fill", totalItems)
+	content += ui.CardStartWithCount("All Summarization Logs", "file-text-fill", totalItems)
 
 	if len(logs) == 0 {
-		html += components.InfoAlert("No summarization logs found.")
+		content += components.InfoAlert("No summarization logs found.")
 	} else {
 		columns := []components.ColumnConfig{
 			{Header: "Status", NoWrap: true},
@@ -138,7 +136,7 @@ func RenderSummarized(handler *debuger.DebugHandler, page int) (string, error) {
 			{Header: "Created At", NoWrap: true},
 			{Header: "Actions", Center: true, NoWrap: true},
 		}
-		html += components.TableStartWithConfig(columns, components.DefaultTableConfig())
+		content += components.TableStartWithConfig(columns, components.DefaultTableConfig())
 
 		for _, log := range paginatedLogs {
 			statusBadge := components.StatusBadge(log.Status)
@@ -179,7 +177,7 @@ func RenderSummarized(handler *debuger.DebugHandler, page int) (string, error) {
 				sessionDisplay = debuger.TruncateString(sessionDisplay, 20)
 			}
 
-			html += fmt.Sprintf(`<tr>
+			content += fmt.Sprintf(`<tr>
                 <td>%s</td>
                 <td class="text-center">%s</td>
                 <td class="text-nowrap">%s</td>
@@ -202,15 +200,13 @@ func RenderSummarized(handler *debuger.DebugHandler, page int) (string, error) {
 			)
 		}
 
-		html += components.TableEnd(true)
-		html += components.PaginationSimple(page, totalItems, components.DefaultItemsPerPage, "/agentize/debug/summarized")
+		content += components.TableEnd(true)
+		content += components.PaginationSimple(page, totalItems, components.DefaultItemsPerPage, "/agentize/debug/summarized")
 	}
 
-	html += ui.CardEnd()
-	html += ui.ContainerEnd()
-	html += ui.Footer()
-
-	return html, nil
+	content += ui.CardEnd()
+	content += ui.ContainerEnd()
+	return ui.Header("Agentize Debug - Summarization Logs") + ui.NavbarAndBody("/agentize/debug/summarized", content) + ui.Footer(), nil
 }
 
 // RenderSummarizedMessages generates a page showing all summarized messages from all sessions
@@ -267,52 +263,50 @@ func RenderSummarizedMessages(handler *debuger.DebugHandler) (string, error) {
 		}
 	}
 
-	html := ui.Header("Agentize Debug - Summarized Messages")
-	html += ui.Navbar("/agentize/debug/summarized")
-	html += ui.ContainerStart()
+	content := ui.ContainerStart()
 
 	// Statistics Cards
-	html += `<div class="row g-4 mb-4">`
+	content += `<div class="row g-4 mb-4">`
 
-	html += `<div class="col-md-6 col-lg-3">`
-	html += components.StatCard(
+	content += `<div class="col-md-6 col-lg-3">`
+	content += components.StatCard(
 		fmt.Sprintf("%d", totalCount),
 		"Total Messages", "📝", "primary",
 	)
-	html += `</div>`
+	content += `</div>`
 
-	html += `<div class="col-md-6 col-lg-3">`
-	html += components.StatCard(
+	content += `<div class="col-md-6 col-lg-3">`
+	content += components.StatCard(
 		fmt.Sprintf("%d", userCount),
 		"User", "👤", "info",
 	)
-	html += `</div>`
+	content += `</div>`
 
-	html += `<div class="col-md-6 col-lg-3">`
-	html += components.StatCard(
+	content += `<div class="col-md-6 col-lg-3">`
+	content += components.StatCard(
 		fmt.Sprintf("%d", assistantCount),
 		"Assistant", "🤖", "success",
 	)
-	html += `</div>`
+	content += `</div>`
 
-	html += `<div class="col-md-6 col-lg-3">`
-	html += components.StatCard(
+	content += `<div class="col-md-6 col-lg-3">`
+	content += components.StatCard(
 		fmt.Sprintf("%d", toolCount),
 		"Tool", "🔧", "warning",
 	)
-	html += `</div>`
+	content += `</div>`
 
-	html += `</div>`
+	content += `</div>`
 
 	// Messages card
-	html += ui.CardStartWithCount("All Summarized Messages", "archive-fill", len(allSummarizedMessages))
+	content += ui.CardStartWithCount("All Summarized Messages", "archive-fill", len(allSummarizedMessages))
 
 	if len(allSummarizedMessages) == 0 {
-		html += components.InfoAlert("No summarized messages found. Messages are archived here after session summarization.")
+		content += components.InfoAlert("No summarized messages found. Messages are archived here after session summarization.")
 	} else {
-		html += components.NoteAlert("Note", "These are archived messages that have been summarized and moved from active conversation state. They are kept for reference but are not used in normal operations.")
+		content += components.NoteAlert("Note", "These are archived messages that have been summarized and moved from active conversation state. They are kept for reference but are not used in normal operations.")
 
-		html += components.ListGroupStart()
+		content += components.ListGroupStart()
 
 		for _, msgInfo := range allSummarizedMessages {
 			contentDisplay := components.ExpandableWithPreview(msgInfo.Content, 500)
@@ -327,7 +321,7 @@ func RenderSummarizedMessages(handler *debuger.DebugHandler) (string, error) {
 				sessionTitle = "Untitled Session"
 			}
 
-			html += fmt.Sprintf(`
+			content += fmt.Sprintf(`
 <div class="list-group-item">
     <div class="d-flex w-100 justify-content-between align-items-start mb-2">
         <div>
@@ -348,10 +342,10 @@ func RenderSummarizedMessages(handler *debuger.DebugHandler) (string, error) {
 
 			// Show tool calls if present
 			if msgInfo.HasToolCalls && len(msgInfo.ToolCalls) > 0 {
-				html += `<div class="mt-2"><strong>Tool Calls:</strong>`
+				content += `<div class="mt-2"><strong>Tool Calls:</strong>`
 				for _, tc := range msgInfo.ToolCalls {
 					argsJSON, _ := json.MarshalIndent(tc.Function.Arguments, "", "  ")
-					html += fmt.Sprintf(`
+					content += fmt.Sprintf(`
 <div class="mt-1 p-2 bg-light rounded">
     <strong>Function:</strong> %s<br>
     <strong>Arguments:</strong>
@@ -361,24 +355,22 @@ func RenderSummarizedMessages(handler *debuger.DebugHandler) (string, error) {
 						components.PreBlock(string(argsJSON)),
 					)
 				}
-				html += `</div>`
+				content += `</div>`
 			}
 
-			html += fmt.Sprintf(`
+			content += fmt.Sprintf(`
     <small class="text-muted d-block mt-2">Session Created: %s</small>
 </div>`,
 				debuger.FormatTime(msgInfo.SessionCreatedAt),
 			)
 		}
 
-		html += components.ListGroupEnd()
+		content += components.ListGroupEnd()
 	}
 
-	html += ui.CardEnd()
-	html += ui.ContainerEnd()
-	html += ui.Footer()
-
-	return html, nil
+	content += ui.CardEnd()
+	content += ui.ContainerEnd()
+	return ui.Header("Agentize Debug - Summarized Messages") + ui.NavbarAndBody("/agentize/debug/summarized", content) + ui.Footer(), nil
 }
 
 // RenderSummarizationLogDetail generates the detail page for a single summarization log
@@ -403,12 +395,10 @@ func RenderSummarizationLogDetail(handler *debuger.DebugHandler, logID string) (
 		return "", fmt.Errorf("summarization log not found: %s", logID)
 	}
 
-	html := ui.Header("Agentize Debug - Summarization Log: " + logID)
-	html += ui.Navbar("/agentize/debug/summarized")
-	html += ui.ContainerStart()
+	content := ui.ContainerStart()
 
 	// Breadcrumb
-	html += components.Breadcrumb([]components.BreadcrumbItem{
+	content += components.Breadcrumb([]components.BreadcrumbItem{
 		{Label: "Dashboard", URL: "/agentize/debug"},
 		{Label: "Summarization Logs", URL: "/agentize/debug/summarized"},
 		{Label: debuger.TruncateString(logID, 20), Active: true},
@@ -445,7 +435,7 @@ func RenderSummarizationLogDetail(handler *debuger.DebugHandler, logID string) (
 	}
 
 	// Main info card
-	html += fmt.Sprintf(`
+	content += fmt.Sprintf(`
 <div class="card mb-4">
     <div class="card-header">
         <h4 class="mb-0"><i class="bi bi-file-text-fill me-2"></i>Summarization Log Details</h4>
@@ -518,7 +508,7 @@ func RenderSummarizationLogDetail(handler *debuger.DebugHandler, logID string) (
 	)
 
 	// Messages Info Card
-	html += fmt.Sprintf(`
+	content += fmt.Sprintf(`
 <div class="card mb-4">
     <div class="card-header">
         <h5 class="mb-0"><i class="bi bi-chat-dots-fill me-2"></i>Message Counts</h5>
@@ -552,7 +542,7 @@ func RenderSummarizationLogDetail(handler *debuger.DebugHandler, logID string) (
 	)
 
 	// Token Usage Card
-	html += fmt.Sprintf(`
+	content += fmt.Sprintf(`
 <div class="card mb-4">
     <div class="card-header">
         <h5 class="mb-0"><i class="bi bi-coin me-2"></i>Token Usage</h5>
@@ -595,7 +585,7 @@ func RenderSummarizationLogDetail(handler *debuger.DebugHandler, logID string) (
 		generatedSummary = "(No summary generated)"
 	}
 
-	html += fmt.Sprintf(`
+	content += fmt.Sprintf(`
 <div class="card mb-4">
     <div class="card-header">
         <h5 class="mb-0"><i class="bi bi-arrow-left-right me-2"></i>Summary Comparison</h5>
@@ -627,7 +617,7 @@ func RenderSummarizationLogDetail(handler *debuger.DebugHandler, logID string) (
 		generatedTags = "(No tags generated)"
 	}
 
-	html += fmt.Sprintf(`
+	content += fmt.Sprintf(`
 <div class="card mb-4">
     <div class="card-header">
         <h5 class="mb-0"><i class="bi bi-tags-fill me-2"></i>Tags Comparison</h5>
@@ -651,7 +641,7 @@ func RenderSummarizationLogDetail(handler *debuger.DebugHandler, logID string) (
 
 	// Generated Title Card (if any)
 	if log.GeneratedTitle != "" {
-		html += fmt.Sprintf(`
+		content += fmt.Sprintf(`
 <div class="card mb-4">
     <div class="card-header">
         <h5 class="mb-0"><i class="bi bi-type me-2"></i>Generated Title</h5>
@@ -666,7 +656,7 @@ func RenderSummarizationLogDetail(handler *debuger.DebugHandler, logID string) (
 
 	// Error Message Card (if any)
 	if log.ErrorMessage != "" {
-		html += fmt.Sprintf(`
+		content += fmt.Sprintf(`
 <div class="card mb-4 border-danger">
     <div class="card-header bg-danger text-white">
         <h5 class="mb-0"><i class="bi bi-exclamation-triangle-fill me-2"></i>Error Message</h5>
@@ -680,7 +670,7 @@ func RenderSummarizationLogDetail(handler *debuger.DebugHandler, logID string) (
 	}
 
 	// Prompt Sent Card
-	html += fmt.Sprintf(`
+	content += fmt.Sprintf(`
 <div class="card mb-4">
     <div class="card-header">
         <h5 class="mb-0"><i class="bi bi-send-fill me-2"></i>Prompt Sent</h5>
@@ -694,7 +684,7 @@ func RenderSummarizationLogDetail(handler *debuger.DebugHandler, logID string) (
 
 	// Response Received Card
 	if log.ResponseReceived != "" {
-		html += fmt.Sprintf(`
+		content += fmt.Sprintf(`
 <div class="card mb-4">
     <div class="card-header">
         <h5 class="mb-0"><i class="bi bi-reply-fill me-2"></i>Response Received</h5>
@@ -707,8 +697,6 @@ func RenderSummarizationLogDetail(handler *debuger.DebugHandler, logID string) (
 		)
 	}
 
-	html += ui.ContainerEnd()
-	html += ui.Footer()
-
-	return html, nil
+	content += ui.ContainerEnd()
+	return ui.Header("Agentize Debug - Summarization Log: "+logID) + ui.NavbarAndBody("/agentize/debug/summarized", content) + ui.Footer(), nil
 }

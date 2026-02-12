@@ -42,13 +42,11 @@ func RenderToolCalls(handler *debuger.DebugHandler, page int, sessionID string) 
 	startIdx, endIdx, _ := components.GetPaginationInfo(page, totalItems, components.DefaultItemsPerPage)
 	paginatedToolCalls := toolCalls[startIdx:endIdx]
 
-	html := ui.Header("Agentize Debug - Tool Calls")
-	html += ui.Navbar("/agentize/debug/tool-calls")
-	html += ui.ContainerStart()
+	content := ui.ContainerStart()
 
 	// Show breadcrumb if filtered
 	if sessionID != "" {
-		html += components.Breadcrumb([]components.BreadcrumbItem{
+		content += components.Breadcrumb([]components.BreadcrumbItem{
 			{Label: "Dashboard", URL: "/agentize/debug"},
 			{Label: "Sessions", URL: "/agentize/debug/sessions"},
 			{Label: sessionID, URL: "/agentize/debug/sessions/" + template.URLQueryEscaper(sessionID)},
@@ -56,10 +54,10 @@ func RenderToolCalls(handler *debuger.DebugHandler, page int, sessionID string) 
 		})
 	}
 
-	html += ui.CardStartWithCount(title, "tools", totalItems)
+	content += ui.CardStartWithCount(title, "tools", totalItems)
 
 	if len(toolCalls) == 0 {
-		html += components.InfoAlert("No tool calls found.")
+		content += components.InfoAlert("No tool calls found.")
 	} else {
 		// Configure tool call row display
 		rowConfig := components.DefaultToolCallRowConfig()
@@ -67,7 +65,7 @@ func RenderToolCalls(handler *debuger.DebugHandler, page int, sessionID string) 
 		rowConfig.BaseURL = "/agentize/debug"
 
 		columns := components.ToolCallTableColumns(rowConfig)
-		html += components.TableStartWithConfig(columns, components.TableConfig{
+		content += components.TableStartWithConfig(columns, components.TableConfig{
 			Striped:     false,
 			Hover:       true,
 			Small:       true,
@@ -76,19 +74,17 @@ func RenderToolCalls(handler *debuger.DebugHandler, page int, sessionID string) 
 		})
 
 		for i, tc := range paginatedToolCalls {
-			html += components.ToolCallTableRow(&tc, rowConfig, i)
+			content += components.ToolCallTableRow(&tc, rowConfig, i)
 		}
 
-		html += components.TableEnd(true)
-		html += components.ToolCallTableScript()
-		html += components.PaginationSimple(page, totalItems, components.DefaultItemsPerPage, baseURL)
+		content += components.TableEnd(true)
+		content += components.ToolCallTableScript()
+		content += components.PaginationSimple(page, totalItems, components.DefaultItemsPerPage, baseURL)
 	}
 
-	html += ui.CardEnd()
-	html += ui.ContainerEnd()
-	html += ui.Footer()
-
-	return html, nil
+	content += ui.CardEnd()
+	content += ui.ContainerEnd()
+	return ui.Header("Agentize Debug - Tool Calls") + ui.NavbarAndBody("/agentize/debug/tool-calls", content) + ui.Footer(), nil
 }
 
 // RenderToolCallDetail generates a detailed view for a single tool call
@@ -103,12 +99,10 @@ func RenderToolCallDetail(handler *debuger.DebugHandler, toolID string) (string,
 		return "", fmt.Errorf("tool call not found: %s", toolID)
 	}
 
-	html := ui.Header("Agentize Debug - Tool Call: " + tc.FunctionName)
-	html += ui.Navbar("/agentize/debug/tool-calls")
-	html += ui.ContainerStart()
+	content := ui.ContainerStart()
 
 	// Breadcrumb
-	html += components.Breadcrumb([]components.BreadcrumbItem{
+	content += components.Breadcrumb([]components.BreadcrumbItem{
 		{Label: "Dashboard", URL: "/agentize/debug"},
 		{Label: "Tool Calls", URL: "/agentize/debug/tool-calls"},
 		{Label: tc.FunctionName, Active: true},
@@ -118,60 +112,58 @@ func RenderToolCallDetail(handler *debuger.DebugHandler, toolID string) (string,
 	agentBadge := components.AgentTypeBadgeFromModel(tc.AgentType)
 
 	// Tool Call Info Card
-	html += ui.CardStart("Tool Call Details", "tools")
-	html += `<div class="row">`
+	content += ui.CardStart("Tool Call Details", "tools")
+	content += `<div class="row">`
 
 	// Left column - Basic Info
-	html += `<div class="col-md-6">`
-	html += `<table class="table table-sm">`
-	html += fmt.Sprintf(`<tr><th class="w-25">Tool ID</th><td>%s</td></tr>`, components.InlineCode(tc.ToolID))
-	html += fmt.Sprintf(`<tr><th>Tool Call ID</th><td>%s</td></tr>`, components.InlineCode(tc.ToolCallID))
-	html += fmt.Sprintf(`<tr><th>Function</th><td>%s</td></tr>`, components.InlineCode(tc.FunctionName))
-	html += fmt.Sprintf(`<tr><th>Agent Type</th><td>%s</td></tr>`, agentBadge)
-	html += fmt.Sprintf(`<tr><th>Duration</th><td>%s</td></tr>`, debuger.FormatDurationMs(tc.DurationMs))
-	html += fmt.Sprintf(`<tr><th>Created At</th><td>%s</td></tr>`, debuger.FormatTime(tc.CreatedAt))
-	html += fmt.Sprintf(`<tr><th>Updated At</th><td>%s</td></tr>`, debuger.FormatTime(tc.UpdatedAt))
-	html += `</table>`
-	html += `</div>`
+	content += `<div class="col-md-6">`
+	content += `<table class="table table-sm">`
+	content += fmt.Sprintf(`<tr><th class="w-25">Tool ID</th><td>%s</td></tr>`, components.InlineCode(tc.ToolID))
+	content += fmt.Sprintf(`<tr><th>Tool Call ID</th><td>%s</td></tr>`, components.InlineCode(tc.ToolCallID))
+	content += fmt.Sprintf(`<tr><th>Function</th><td>%s</td></tr>`, components.InlineCode(tc.FunctionName))
+	content += fmt.Sprintf(`<tr><th>Agent Type</th><td>%s</td></tr>`, agentBadge)
+	content += fmt.Sprintf(`<tr><th>Duration</th><td>%s</td></tr>`, debuger.FormatDurationMs(tc.DurationMs))
+	content += fmt.Sprintf(`<tr><th>Created At</th><td>%s</td></tr>`, debuger.FormatTime(tc.CreatedAt))
+	content += fmt.Sprintf(`<tr><th>Updated At</th><td>%s</td></tr>`, debuger.FormatTime(tc.UpdatedAt))
+	content += `</table>`
+	content += `</div>`
 
 	// Right column - Links
-	html += `<div class="col-md-6">`
-	html += `<table class="table table-sm">`
-	html += fmt.Sprintf(`<tr><th class="w-25">User</th><td>%s</td></tr>`,
+	content += `<div class="col-md-6">`
+	content += `<table class="table table-sm">`
+	content += fmt.Sprintf(`<tr><th class="w-25">User</th><td>%s</td></tr>`,
 		components.TruncatedLink(tc.UserID, "/agentize/debug/users/"+template.URLQueryEscaper(tc.UserID), 30))
-	html += fmt.Sprintf(`<tr><th>Session</th><td>%s</td></tr>`,
+	content += fmt.Sprintf(`<tr><th>Session</th><td>%s</td></tr>`,
 		components.OpenButton("/agentize/debug/sessions/"+template.URLQueryEscaper(tc.SessionID)))
-	html += fmt.Sprintf(`<tr><th>Message ID</th><td>%s</td></tr>`, components.InlineCode(tc.MessageID))
-	html += `</table>`
-	html += `</div>`
+	content += fmt.Sprintf(`<tr><th>Message ID</th><td>%s</td></tr>`, components.InlineCode(tc.MessageID))
+	content += `</table>`
+	content += `</div>`
 
-	html += `</div>`
-	html += ui.CardEnd()
+	content += `</div>`
+	content += ui.CardEnd()
 
 	// Arguments Card
-	html += ui.CardStart("Arguments", "code-slash")
-	html += `<pre class="bg-light p-3 rounded" style="white-space: pre-wrap; word-wrap: break-word; max-height: 400px; overflow-y: auto;">`
-	html += template.HTMLEscapeString(tc.Arguments)
-	html += `</pre>`
-	html += ui.CardEnd()
+	content += ui.CardStart("Arguments", "code-slash")
+	content += `<pre class="bg-light p-3 rounded" style="white-space: pre-wrap; word-wrap: break-word; max-height: 400px; overflow-y: auto;">`
+	content += template.HTMLEscapeString(tc.Arguments)
+	content += `</pre>`
+	content += ui.CardEnd()
 
 	// Response Card
 	responseTitle := "Response"
 	if tc.ResponseLength > 0 {
 		responseTitle = fmt.Sprintf("Response (%s chars)", debuger.FormatChars(tc.ResponseLength))
 	}
-	html += ui.CardStart(responseTitle, "reply")
+	content += ui.CardStart(responseTitle, "reply")
 	if tc.Response == "" {
-		html += components.InfoAlert("No response recorded yet.")
+		content += components.InfoAlert("No response recorded yet.")
 	} else {
-		html += `<pre class="bg-light p-3 rounded" style="white-space: pre-wrap; word-wrap: break-word; max-height: 400px; overflow-y: auto;">`
-		html += template.HTMLEscapeString(tc.Response)
-		html += `</pre>`
+		content += `<pre class="bg-light p-3 rounded" style="white-space: pre-wrap; word-wrap: break-word; max-height: 400px; overflow-y: auto;">`
+		content += template.HTMLEscapeString(tc.Response)
+		content += `</pre>`
 	}
-	html += ui.CardEnd()
+	content += ui.CardEnd()
 
-	html += ui.ContainerEnd()
-	html += ui.Footer()
-
-	return html, nil
+	content += ui.ContainerEnd()
+	return ui.Header("Agentize Debug - Tool Call: "+tc.FunctionName) + ui.NavbarAndBody("/agentize/debug/tool-calls", content) + ui.Footer(), nil
 }

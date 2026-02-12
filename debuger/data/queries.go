@@ -19,10 +19,13 @@ func NewDataProvider(store debuger.DebugStore) *DataProvider {
 	return &DataProvider{store: store}
 }
 
-// getSessionLastActivity returns the last activity time for a session
-// Session.UpdatedAt now serves as LastActivity
+// getSessionLastActivity returns the last activity time for a session (for sorting DESC).
+// Prefer UpdatedAt when set, otherwise CreatedAt.
 func getSessionLastActivity(s *model.Session) time.Time {
-	return s.UpdatedAt
+	if !s.UpdatedAt.IsZero() {
+		return s.UpdatedAt
+	}
+	return s.CreatedAt
 }
 
 // GetAllSessionsSorted returns all sessions grouped by userID, sorted by LastActivity (newest first)
@@ -84,16 +87,24 @@ func (dp *DataProvider) GetUserCount() (int, error) {
 	return len(users), nil
 }
 
-// GetAllUsers returns all users sorted by CreatedAt (newest first)
+// GetAllUsers returns all users sorted by UpdatedAt (newest first), fallback to CreatedAt
 func (dp *DataProvider) GetAllUsers() ([]*model.User, error) {
 	users, err := dp.store.GetAllUsers()
 	if err != nil {
 		return nil, err
 	}
 
-	// Sort by CreatedAt (newest first)
+	// Sort by UpdatedAt DESC when set, else CreatedAt DESC
 	sort.Slice(users, func(i, j int) bool {
-		return users[i].CreatedAt.After(users[j].CreatedAt)
+		ti := users[i].UpdatedAt
+		if ti.IsZero() {
+			ti = users[i].CreatedAt
+		}
+		tj := users[j].UpdatedAt
+		if tj.IsZero() {
+			tj = users[j].CreatedAt
+		}
+		return ti.After(tj)
 	})
 
 	return users, nil
@@ -227,16 +238,16 @@ func (dp *DataProvider) GetAllToolCalls() ([]*model.ToolCall, error) {
 	return toolCalls, nil
 }
 
-// GetToolCallsBySession returns tool calls for a session sorted by CreatedAt (oldest first for natural flow)
+// GetToolCallsBySession returns tool calls for a session sorted by CreatedAt (newest first)
 func (dp *DataProvider) GetToolCallsBySession(sessionID string) ([]*model.ToolCall, error) {
 	toolCalls, err := dp.store.GetToolCallsBySession(sessionID)
 	if err != nil {
 		return nil, err
 	}
 
-	// Sort by CreatedAt (oldest first for natural conversation order)
+	// Sort by CreatedAt (newest first)
 	sort.Slice(toolCalls, func(i, j int) bool {
-		return toolCalls[i].CreatedAt.Before(toolCalls[j].CreatedAt)
+		return toolCalls[i].CreatedAt.After(toolCalls[j].CreatedAt)
 	})
 
 	return toolCalls, nil

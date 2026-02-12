@@ -24,14 +24,11 @@ func RenderFiles(handler *debuger.DebugHandler, page int) (string, error) {
 	startIdx, endIdx, _ := components.GetPaginationInfo(page, totalItems, components.DefaultItemsPerPage)
 	paginatedFiles := files[startIdx:endIdx]
 
-	html := ui.Header("Agentize Debug - Opened Files")
-	html += ui.Navbar("/agentize/debug/files")
-	html += ui.ContainerStart()
-
-	html += ui.CardStartWithCount("All Opened Files", "folder-fill", totalItems)
+	content := ui.ContainerStart()
+	content += ui.CardStartWithCount("All Opened Files", "folder-fill", totalItems)
 
 	if len(files) == 0 {
-		html += components.InfoAlert("No opened files found.")
+		content += components.InfoAlert("No opened files found.")
 	} else {
 		columns := []components.ColumnConfig{
 			{Header: "File Path"},
@@ -42,7 +39,7 @@ func RenderFiles(handler *debuger.DebugHandler, page int) (string, error) {
 			{Header: "User", NoWrap: true},
 			{Header: "Session", NoWrap: true},
 		}
-		html += components.TableStartWithConfig(columns, components.DefaultTableConfig())
+		content += components.TableStartWithConfig(columns, components.DefaultTableConfig())
 
 		for _, f := range paginatedFiles {
 			status := components.BadgeWithIcon("Open", "✅", "success")
@@ -54,7 +51,7 @@ func RenderFiles(handler *debuger.DebugHandler, page int) (string, error) {
 				closedAt = debuger.FormatTime(f.ClosedAt)
 			}
 
-			html += fmt.Sprintf(`<tr>
+			content += fmt.Sprintf(`<tr>
                 <td>%s</td>
                 <td>%s</td>
                 <td class="text-center">%s</td>
@@ -73,13 +70,11 @@ func RenderFiles(handler *debuger.DebugHandler, page int) (string, error) {
 			)
 		}
 
-		html += components.TableEnd(true)
-		html += components.PaginationSimple(page, totalItems, components.DefaultItemsPerPage, "/agentize/debug/files")
+		content += components.TableEnd(true)
+		content += components.PaginationSimple(page, totalItems, components.DefaultItemsPerPage, "/agentize/debug/files")
 	}
 
-	html += ui.CardEnd()
-	html += ui.ContainerEnd()
-	html += ui.Footer()
-
-	return html, nil
+	content += ui.CardEnd()
+	content += ui.ContainerEnd()
+	return ui.Header("Agentize Debug - Opened Files") + ui.NavbarAndBody("/agentize/debug/files", content) + ui.Footer(), nil
 }

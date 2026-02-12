@@ -8,6 +8,16 @@ func GetStyles() string {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            margin: 0;
+        }
+        body > nav {
+            flex-shrink: 0;
+        }
+        body > .layout-with-sidebar,
+        body > .container {
+            flex: 1 0 auto;
         }
         .main-container {
             background: white;
@@ -121,6 +131,66 @@ func GetStyles() string {
             background-color: #f8f9fa;
             padding: 0.25rem 0.5rem;
             border-radius: 4px;
+        }
+        .layout-with-sidebar {
+            display: flex;
+            flex: 1;
+            min-height: calc(100vh - 56px);
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        }
+        .debug-sidebar {
+            width: 240px;
+            flex-shrink: 0;
+            background: linear-gradient(180deg, rgba(88, 70, 130, 0.95) 0%, rgba(68, 50, 100, 0.98) 100%);
+            box-shadow: 4px 0 20px rgba(0,0,0,0.15);
+            padding: 1.25rem 0;
+        }
+        .debug-sidebar-title {
+            padding: 0 1rem 0.75rem;
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: rgba(255,255,255,0.6);
+        }
+        .debug-sidebar-nav {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+        }
+        .debug-sidebar-link {
+            display: flex;
+            align-items: center;
+            gap: 0.6rem;
+            padding: 0.65rem 1rem;
+            color: rgba(255,255,255,0.85);
+            text-decoration: none;
+            font-size: 0.9rem;
+            transition: background 0.15s, color 0.15s;
+            border-left: 3px solid transparent;
+        }
+        .debug-sidebar-link:hover {
+            background: rgba(255,255,255,0.12);
+            color: #fff;
+        }
+        .debug-sidebar-link.active {
+            background: rgba(255,255,255,0.18);
+            color: #fff;
+            font-weight: 600;
+            border-left-color: #fff;
+        }
+        .main-content-with-sidebar {
+            flex: 1;
+            min-width: 0;
+            padding: 2rem;
+            overflow-y: auto;
+        }
+        .main-content-with-sidebar .container {
+            max-width: 100%;
+        }
+        .main-content-with-sidebar .main-container {
+            margin-top: 0;
+            margin-bottom: 0;
         }
     `
 }

@@ -31,14 +31,11 @@ func RenderUsers(handler *debuger.DebugHandler, page int) (string, error) {
 	startIdx, endIdx, _ := components.GetPaginationInfo(page, totalItems, components.DefaultItemsPerPage)
 	paginatedUsers := users[startIdx:endIdx]
 
-	html := ui.Header("Agentize Debug - Users")
-	html += ui.Navbar("/agentize/debug/users")
-	html += ui.ContainerStart()
-
-	html += ui.CardStartWithCount("All Users", "people-fill", totalItems)
+	content := ui.ContainerStart()
+	content += ui.CardStartWithCount("All Users", "people-fill", totalItems)
 
 	if len(users) == 0 {
-		html += components.InfoAlert("No users found.")
+		content += components.InfoAlert("No users found.")
 	} else {
 		columns := []components.ColumnConfig{
 			{Header: "User ID", NoWrap: true},
@@ -50,7 +47,7 @@ func RenderUsers(handler *debuger.DebugHandler, page int) (string, error) {
 			{Header: "Created At", NoWrap: true},
 			{Header: "Actions", Center: true, NoWrap: true},
 		}
-		html += components.TableStartWithConfig(columns, components.DefaultTableConfig())
+		content += components.TableStartWithConfig(columns, components.DefaultTableConfig())
 
 		for _, user := range paginatedUsers {
 			sessionCount := len(sessionsByUser[user.UserID])
@@ -75,7 +72,7 @@ func RenderUsers(handler *debuger.DebugHandler, page int) (string, error) {
 				usernameDisplay = template.HTMLEscapeString(user.Username)
 			}
 
-			html += fmt.Sprintf(`<tr>
+			content += fmt.Sprintf(`<tr>
                 <td>%s</td>
                 <td>%s</td>
                 <td>%s</td>
@@ -96,15 +93,13 @@ func RenderUsers(handler *debuger.DebugHandler, page int) (string, error) {
 			)
 		}
 
-		html += components.TableEnd(true)
-		html += components.PaginationSimple(page, totalItems, components.DefaultItemsPerPage, "/agentize/debug/users")
+		content += components.TableEnd(true)
+		content += components.PaginationSimple(page, totalItems, components.DefaultItemsPerPage, "/agentize/debug/users")
 	}
 
-	html += ui.CardEnd()
-	html += ui.ContainerEnd()
-	html += ui.Footer()
-
-	return html, nil
+	content += ui.CardEnd()
+	content += ui.ContainerEnd()
+	return ui.Header("Agentize Debug - Users") + ui.NavbarAndBody("/agentize/debug/users", content) + ui.Footer(), nil
 }
 
 // RenderUserDetail generates the user detail HTML page.
@@ -136,19 +131,17 @@ func RenderUserDetail(handler *debuger.DebugHandler, userID string, showDeletedS
 		return "", fmt.Errorf("failed to get files: %w", err)
 	}
 
-	html := ui.Header("Agentize Debug - User: " + userID)
-	html += ui.Navbar("/agentize/debug/users")
-	html += ui.ContainerStart()
+	content := ui.ContainerStart()
 
 	// Breadcrumb
-	html += components.Breadcrumb([]components.BreadcrumbItem{
+	content += components.Breadcrumb([]components.BreadcrumbItem{
 		{Label: "Dashboard", URL: "/agentize/debug"},
 		{Label: "Users", URL: "/agentize/debug/users"},
 		{Label: userID, Active: true},
 	})
 
 	if len(showDeletedSuccess) > 0 && showDeletedSuccess[0] {
-		html += components.SuccessAlert("All messages and sessions for this user have been deleted successfully.")
+		content += components.SuccessAlert("All messages and sessions for this user have been deleted successfully.")
 	}
 
 	// User info card
@@ -219,7 +212,7 @@ func RenderUserDetail(handler *debuger.DebugHandler, userID string, showDeletedS
 	// Delete user data button (form with confirmation)
 	deleteFormAction := "/agentize/debug/users/" + url.PathEscape(userID) + "/delete-data"
 
-	html += fmt.Sprintf(`
+	content += fmt.Sprintf(`
 <div class="card mb-4">
     <div class="card-header d-flex justify-content-between align-items-center">
         <h4 class="mb-0"><i class="bi bi-person-fill me-2"></i>User Information</h4>
@@ -318,12 +311,12 @@ func RenderUserDetail(handler *debuger.DebugHandler, userID string, showDeletedS
 	)
 
 	// Sessions card
-	html += ui.CardStartWithCount("Sessions", "diagram-3-fill", len(userSessions))
+	content += ui.CardStartWithCount("Sessions", "diagram-3-fill", len(userSessions))
 
 	if len(userSessions) == 0 {
-		html += components.InfoAlert("No sessions found for this user.")
+		content += components.InfoAlert("No sessions found for this user.")
 	} else {
-		html += components.ListGroupStart()
+		content += components.ListGroupStart()
 		for _, session := range userSessions {
 			title := session.Title
 			if title == "" {
@@ -345,7 +338,7 @@ func RenderUserDetail(handler *debuger.DebugHandler, userID string, showDeletedS
 				tagsDisplay = template.HTMLEscapeString(strings.Join(session.Tags, ", "))
 			}
 
-			html += fmt.Sprintf(`
+			content += fmt.Sprintf(`
 <a href="/agentize/debug/sessions/%s" class="list-group-item list-group-item-action">
     <div class="d-flex w-100 justify-content-between align-items-start">
         <div class="flex-grow-1">
@@ -373,24 +366,24 @@ func RenderUserDetail(handler *debuger.DebugHandler, userID string, showDeletedS
 				components.Badge(string(session.AgentType), "secondary"),
 			)
 		}
-		html += components.ListGroupEnd()
+		content += components.ListGroupEnd()
 	}
 
-	html += ui.CardEnd()
+	content += ui.CardEnd()
 
 	// Messages card
-	html += ui.CardStartWithAction("Messages", "chat-dots-fill", len(messages),
+	content += ui.CardStartWithAction("Messages", "chat-dots-fill", len(messages),
 		"/agentize/debug/messages?user="+template.URLQueryEscaper(userID), "View All")
 
 	if len(messages) == 0 {
-		html += components.InfoAlert("No messages found for this user.")
+		content += components.InfoAlert("No messages found for this user.")
 	} else {
 		rowConfig := components.DefaultMessageRowConfig()
 		rowConfig.ShowUser = false // Already on user page
 		rowConfig.ShowSession = true
 
 		columns := components.MessageTableColumns(rowConfig)
-		html += components.TableStartWithConfig(columns, components.TableConfig{
+		content += components.TableStartWithConfig(columns, components.TableConfig{
 			Striped:     false,
 			Hover:       true,
 			Small:       true,
@@ -401,20 +394,20 @@ func RenderUserDetail(handler *debuger.DebugHandler, userID string, showDeletedS
 		// Show first 10 messages (already sorted by CreatedAt DESC - newest first)
 		displayCount := debuger.Min(len(messages), 10)
 		for i := 0; i < displayCount; i++ {
-			html += components.MessageTableRow(messages[i], rowConfig, i)
+			content += components.MessageTableRow(messages[i], rowConfig, i)
 		}
 
-		html += components.TableEnd(true)
-		html += components.MessageTableScript()
+		content += components.TableEnd(true)
+		content += components.MessageTableScript()
 	}
 
-	html += ui.CardEnd()
+	content += ui.CardEnd()
 
 	// Files card
-	html += ui.CardStartWithCount("Opened Files", "folder-fill", len(userFiles))
+	content += ui.CardStartWithCount("Opened Files", "folder-fill", len(userFiles))
 
 	if len(userFiles) == 0 {
-		html += components.InfoAlert("No opened files found for this user.")
+		content += components.InfoAlert("No opened files found for this user.")
 	} else {
 		columns := []components.ColumnConfig{
 			{Header: "File Path"},
@@ -422,7 +415,7 @@ func RenderUserDetail(handler *debuger.DebugHandler, userID string, showDeletedS
 			{Header: "Opened At", NoWrap: true},
 			{Header: "Session", NoWrap: true},
 		}
-		html += components.TableStartWithConfig(columns, components.TableConfig{
+		content += components.TableStartWithConfig(columns, components.TableConfig{
 			Striped:     false,
 			Hover:       true,
 			Small:       true,
@@ -436,7 +429,7 @@ func RenderUserDetail(handler *debuger.DebugHandler, userID string, showDeletedS
 				status = components.BadgeWithIcon("Closed", "❌", "secondary")
 			}
 
-			html += fmt.Sprintf(`<tr>
+			content += fmt.Sprintf(`<tr>
                 <td>%s</td>
                 <td class="text-center">%s</td>
                 <td class="text-nowrap">%s</td>
@@ -449,12 +442,10 @@ func RenderUserDetail(handler *debuger.DebugHandler, userID string, showDeletedS
 			)
 		}
 
-		html += components.TableEnd(true)
+		content += components.TableEnd(true)
 	}
 
-	html += ui.CardEnd()
-	html += ui.ContainerEnd()
-	html += ui.Footer()
-
-	return html, nil
+	content += ui.CardEnd()
+	content += ui.ContainerEnd()
+	return ui.Header("Agentize Debug - User: "+userID) + ui.NavbarAndBody("/agentize/debug/users", content) + ui.Footer(), nil
 }

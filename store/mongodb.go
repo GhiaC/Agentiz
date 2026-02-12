@@ -219,7 +219,7 @@ func (s *MongoDBStore) initIndexes(ctx context.Context) error {
 	// ToolCalls Collection Indexes
 	// ============================================================================
 
-	// Index for GetToolCallsBySession: session_id + created_at ASC
+	// Index for GetToolCallsBySession: session_id + created_at (query sorts created_at DESC)
 	_, err = s.toolCallsCollection.Indexes().CreateOne(ctx, mongo.IndexModel{
 		Keys: bson.D{
 			{Key: "session_id", Value: 1},
@@ -1449,7 +1449,7 @@ func (s *MongoDBStore) GetToolCallsBySession(sessionID string) ([]*model.ToolCal
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	cursor, err := s.toolCallsCollection.Find(ctx, bson.M{"session_id": sessionID}, options.Find().SetSort(bson.D{{Key: "created_at", Value: 1}}))
+	cursor, err := s.toolCallsCollection.Find(ctx, bson.M{"session_id": sessionID}, options.Find().SetSort(bson.D{{Key: "created_at", Value: -1}}))
 	if err != nil {
 		return nil, fmt.Errorf("failed to query tool calls: %w", err)
 	}

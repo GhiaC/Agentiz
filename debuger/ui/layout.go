@@ -10,6 +10,19 @@ func RenderPage(title, navbar, content string) string {
 	return Header(title) + navbar + content + Footer()
 }
 
+// NavbarAndBody returns the top navbar plus body layout: when extra nav items
+// are registered, they appear in a left sidebar and content is in the main area;
+// otherwise only the content is rendered (no sidebar).
+func NavbarAndBody(currentPage, content string) string {
+	nav := Navbar(currentPage)
+	extra := SidebarExtra(currentPage)
+	if extra == "" {
+		return nav + content
+	}
+	return nav + `<div class="layout-with-sidebar">` + extra +
+		`<div class="main-content-with-sidebar">` + content + `</div></div>`
+}
+
 // Header generates the HTML header with Bootstrap CDN
 func Header(title string) string {
 	return fmt.Sprintf(`<!DOCTYPE html>

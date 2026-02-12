@@ -1621,7 +1621,7 @@ func (s *SQLiteStore) GetToolCallsBySession(sessionID string) ([]*model.ToolCall
 
 	rows, err := s.db.Query(
 		`SELECT tool_call_id, tool_id, message_id, session_id, user_id, agent_type, function_name, arguments, response, response_length, duration_ms, created_at, updated_at
-		FROM tool_calls WHERE session_id = ? ORDER BY created_at ASC`,
+		FROM tool_calls WHERE session_id = ? ORDER BY created_at DESC`,
 		sessionID,
 	)
 	if err != nil {

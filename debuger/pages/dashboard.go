@@ -18,61 +18,59 @@ func RenderDashboard(handler *debuger.DebugHandler) (string, error) {
 		return "", fmt.Errorf("failed to get dashboard stats: %w", err)
 	}
 
-	html := ui.Header("Agentize Debug - Dashboard")
-	html += ui.Navbar("/agentize/debug")
-	html += ui.ContainerStart()
+	content := ui.ContainerStart()
 
 	// Stats cards row
-	html += `<div class="row g-4 mb-4">`
+	content += `<div class="row g-4 mb-4">`
 
 	// Users card
-	html += `<div class="col-md-6 col-lg-4 col-xl-2">`
-	html += components.StatCardWithLink(
+	content += `<div class="col-md-6 col-lg-4 col-xl-2">`
+	content += components.StatCardWithLink(
 		fmt.Sprintf("%d", stats.TotalUsers),
 		"Users", "👤", "primary",
 		"/agentize/debug/users", "View Details",
 	)
-	html += `</div>`
+	content += `</div>`
 
 	// Sessions card
-	html += `<div class="col-md-6 col-lg-4 col-xl-2">`
-	html += components.StatCard(
+	content += `<div class="col-md-6 col-lg-4 col-xl-2">`
+	content += components.StatCard(
 		fmt.Sprintf("%d", stats.TotalSessions),
 		"Sessions", "📊", "success",
 	)
-	html += `</div>`
+	content += `</div>`
 
 	// Messages card
-	html += `<div class="col-md-6 col-lg-4 col-xl-2">`
-	html += components.StatCardWithLink(
+	content += `<div class="col-md-6 col-lg-4 col-xl-2">`
+	content += components.StatCardWithLink(
 		fmt.Sprintf("%d", stats.TotalMessages),
 		"Messages", "💬", "info",
 		"/agentize/debug/messages", "View Details",
 	)
-	html += `</div>`
+	content += `</div>`
 
 	// Files card
-	html += `<div class="col-md-6 col-lg-4 col-xl-2">`
-	html += components.StatCardWithLink(
+	content += `<div class="col-md-6 col-lg-4 col-xl-2">`
+	content += components.StatCardWithLink(
 		fmt.Sprintf("%d", stats.TotalFiles),
 		"Files", "📁", "warning",
 		"/agentize/debug/files", "View Details",
 	)
-	html += `</div>`
+	content += `</div>`
 
 	// Tool Calls card
-	html += `<div class="col-md-6 col-lg-4 col-xl-2">`
-	html += components.StatCardWithLink(
+	content += `<div class="col-md-6 col-lg-4 col-xl-2">`
+	content += components.StatCardWithLink(
 		fmt.Sprintf("%d", stats.TotalToolCalls),
 		"Tool Calls", "🔧", "danger",
 		"/agentize/debug/tool-calls", "View Details",
 	)
-	html += `</div>`
+	content += `</div>`
 
-	html += `</div>`
+	content += `</div>`
 
 	// Quick links card
-	html += `<div class="row">
+	content += `<div class="row">
     <div class="col-12">
         <div class="card">
             <div class="card-header">
@@ -82,49 +80,47 @@ func RenderDashboard(handler *debuger.DebugHandler) (string, error) {
                 <div class="row g-3">`
 
 	// Users link
-	html += `<div class="col-md-6 col-lg-3">`
-	html += components.LinkCard(
+	content += `<div class="col-md-6 col-lg-3">`
+	content += components.LinkCard(
 		"View All Users",
 		"Browse all users and their sessions with detailed information",
 		"👤", "/agentize/debug/users",
 	)
-	html += `</div>`
+	content += `</div>`
 
 	// Messages link
-	html += `<div class="col-md-6 col-lg-3">`
-	html += components.LinkCard(
+	content += `<div class="col-md-6 col-lg-3">`
+	content += components.LinkCard(
 		"View All Messages",
 		"See all messages across all sessions with full context",
 		"💬", "/agentize/debug/messages",
 	)
-	html += `</div>`
+	content += `</div>`
 
 	// Files link
-	html += `<div class="col-md-6 col-lg-3">`
-	html += components.LinkCard(
+	content += `<div class="col-md-6 col-lg-3">`
+	content += components.LinkCard(
 		"View All Opened Files",
 		"Browse all files that were opened during sessions",
 		"📁", "/agentize/debug/files",
 	)
-	html += `</div>`
+	content += `</div>`
 
 	// Tool Calls link
-	html += `<div class="col-md-6 col-lg-3">`
-	html += components.LinkCard(
+	content += `<div class="col-md-6 col-lg-3">`
+	content += components.LinkCard(
 		"View All Tool Calls",
 		"See all tool calls and their results in detail",
 		"🔧", "/agentize/debug/tool-calls",
 	)
-	html += `</div>`
+	content += `</div>`
 
-	html += `</div>
+	content += `</div>
             </div>
         </div>
     </div>
 </div>`
 
-	html += ui.ContainerEnd()
-	html += ui.Footer()
-
-	return html, nil
+	content += ui.ContainerEnd()
+	return ui.Header("Agentize Debug - Dashboard") + ui.NavbarAndBody("/agentize/debug", content) + ui.Footer(), nil
 }

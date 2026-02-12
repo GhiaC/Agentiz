@@ -27,14 +27,11 @@ func RenderSessions(handler *debuger.DebugHandler, page int) (string, error) {
 	startIdx, endIdx, _ := components.GetPaginationInfo(page, totalItems, components.DefaultItemsPerPage)
 	paginatedSessions := allSessions[startIdx:endIdx]
 
-	html := ui.Header("Agentize Debug - Sessions")
-	html += ui.Navbar("/agentize/debug/sessions")
-	html += ui.ContainerStart()
-
-	html += ui.CardStartWithCount("All Sessions", "diagram-3-fill", totalItems)
+	content := ui.ContainerStart()
+	content += ui.CardStartWithCount("All Sessions", "diagram-3-fill", totalItems)
 
 	if len(allSessions) == 0 {
-		html += components.InfoAlert("No sessions found.")
+		content += components.InfoAlert("No sessions found.")
 	} else {
 		// Configure session row display
 		rowConfig := components.DefaultSessionRowConfig()
@@ -45,7 +42,7 @@ func RenderSessions(handler *debuger.DebugHandler, page int) (string, error) {
 		}
 
 		columns := components.SessionTableColumns(rowConfig)
-		html += components.TableStartWithConfig(columns, components.TableConfig{
+		content += components.TableStartWithConfig(columns, components.TableConfig{
 			Striped:     false,
 			Hover:       true,
 			Small:       true,
@@ -54,19 +51,17 @@ func RenderSessions(handler *debuger.DebugHandler, page int) (string, error) {
 		})
 
 		for i, session := range paginatedSessions {
-			html += components.SessionTableRow(session, rowConfig, i)
+			content += components.SessionTableRow(session, rowConfig, i)
 		}
 
-		html += components.TableEnd(true)
-		html += components.SessionTableScript()
-		html += components.PaginationSimple(page, totalItems, components.DefaultItemsPerPage, "/agentize/debug/sessions")
+		content += components.TableEnd(true)
+		content += components.SessionTableScript()
+		content += components.PaginationSimple(page, totalItems, components.DefaultItemsPerPage, "/agentize/debug/sessions")
 	}
 
-	html += ui.CardEnd()
-	html += ui.ContainerEnd()
-	html += ui.Footer()
-
-	return html, nil
+	content += ui.CardEnd()
+	content += ui.ContainerEnd()
+	return ui.Header("Agentize Debug - Sessions") + ui.NavbarAndBody("/agentize/debug/sessions", content) + ui.Footer(), nil
 }
 
 // convertExMsgToMessage converts an openai.ChatCompletionMessage to model.Message for display
@@ -100,24 +95,23 @@ func RenderSessionDetail(handler *debuger.DebugHandler, sessionID string) (strin
 		return "", fmt.Errorf("session not found: %s", sessionID)
 	}
 
-	allMessages, err := dp.GetMessagesBySession(sessionID)
+	// Messages for this session: newest first (created_at DESC) for listing
+	allMessages, err := dp.GetMessagesBySessionDesc(sessionID)
 	if err != nil {
 		return "", fmt.Errorf("failed to get messages: %w", err)
 	}
 
 	// Filter to only show active (non-archived) messages
-	// Active messages count is based on session.Msgs
-	// Since messages are sorted oldest-first, we take the last N messages where N is the active count
+	// Active messages count is based on session.Msgs; allMessages is sorted newest-first (DESC)
+	// So active messages are the first activeCount (newest) messages
 	activeCount := len(session.Msgs)
 
-	// If activeCount is 0 or greater than all messages, show nothing or all respectively
 	var messages []*model.Message
 	if activeCount > 0 && len(allMessages) > 0 {
 		if activeCount >= len(allMessages) {
 			messages = allMessages
 		} else {
-			// Take only the last activeCount messages (the non-archived ones)
-			messages = allMessages[len(allMessages)-activeCount:]
+			messages = allMessages[:activeCount]
 		}
 	}
 
@@ -130,12 +124,10 @@ func RenderSessionDetail(handler *debuger.DebugHandler, sessionID string) (strin
 	dbToolCalls, _ := dp.GetToolCallsBySession(sessionID)
 	toolCalls := data.ConvertToolCallsToInfo(dbToolCalls)
 
-	html := ui.Header("Agentize Debug - Session: " + sessionID)
-	html += ui.Navbar("/agentize/debug")
-	html += ui.ContainerStart()
+	content := ui.ContainerStart()
 
 	// Breadcrumb
-	html += components.Breadcrumb([]components.BreadcrumbItem{
+	content += components.Breadcrumb([]components.BreadcrumbItem{
 		{Label: "Dashboard", URL: "/agentize/debug"},
 		{Label: "Users", URL: "/agentize/debug/users"},
 		{Label: session.UserID, URL: "/agentize/debug/users/" + template.URLQueryEscaper(session.UserID)},
@@ -185,7 +177,7 @@ func RenderSessionDetail(handler *debuger.DebugHandler, sessionID string) (strin
 		tagsDisplay = components.TagBadges(session.Tags)
 	}
 
-	html += fmt.Sprintf(`
+	content += fmt.Sprintf(`
 <div class="card mb-4">
     <div class="card-header">
         <h4 class="mb-0"><i class="bi bi-diagram-3-fill me-2"></i>Session Information</h4>
@@ -289,30 +281,30 @@ func RenderSessionDetail(handler *debuger.DebugHandler, sessionID string) (strin
 	}
 
 	if len(systemPrompts) > 0 {
-		html += ui.CardStartWithCount("System Prompts", "gear-fill", len(systemPrompts))
+		content += ui.CardStartWithCount("System Prompts", "gear-fill", len(systemPrompts))
 		for i, prompt := range systemPrompts {
 			promptDisplay := debuger.TruncateString(prompt, 500)
-			html += fmt.Sprintf(`
+			content += fmt.Sprintf(`
 <div class="mb-3">
     <strong class="d-block mb-2">System Prompt #%d:</strong>
     %s
 </div>`, i+1, components.ExpandablePre(promptDisplay, 300))
 		}
-		html += ui.CardEnd()
+		content += ui.CardEnd()
 	}
 
 	// Messages card
-	html += ui.CardStartWithCount("Messages", "chat-dots-fill", len(messages))
+	content += ui.CardStartWithCount("Messages", "chat-dots-fill", len(messages))
 
 	if len(messages) == 0 {
-		html += components.InfoAlert("No messages found for this session.")
+		content += components.InfoAlert("No messages found for this session.")
 	} else {
 		rowConfig := components.DefaultMessageRowConfig()
 		rowConfig.ShowUser = false    // Already on session page, user is known
 		rowConfig.ShowSession = false // Already on session page
 
 		columns := components.MessageTableColumns(rowConfig)
-		html += components.TableStartWithConfig(columns, components.TableConfig{
+		content += components.TableStartWithConfig(columns, components.TableConfig{
 			Striped:     false,
 			Hover:       true,
 			Small:       true,
@@ -321,18 +313,18 @@ func RenderSessionDetail(handler *debuger.DebugHandler, sessionID string) (strin
 		})
 
 		for i, msg := range messages {
-			html += components.MessageTableRow(msg, rowConfig, i)
+			content += components.MessageTableRow(msg, rowConfig, i)
 		}
 
-		html += components.TableEnd(true)
-		html += components.MessageTableScript()
+		content += components.TableEnd(true)
+		content += components.MessageTableScript()
 	}
 
-	html += ui.CardEnd()
+	content += ui.CardEnd()
 
 	// ArchivedMsgs card (previously ExMsgs)
 	archivedCount := len(session.ArchivedMsgs)
-	html += fmt.Sprintf(`
+	content += fmt.Sprintf(`
 <div class="card mb-4">
     <div class="card-header">
         <h5 class="mb-0"><i class="bi bi-archive-fill me-2"></i>Archived Messages (%d) <small class="text-muted">(Debug Only)</small></h5>
@@ -340,9 +332,9 @@ func RenderSessionDetail(handler *debuger.DebugHandler, sessionID string) (strin
     <div class="card-body">`, archivedCount)
 
 	if archivedCount == 0 {
-		html += components.InfoAlert("No archived messages found for this session.")
+		content += components.InfoAlert("No archived messages found for this session.")
 	} else {
-		html += components.NoteAlert("Note", "ArchivedMsgs are messages moved from Msgs after summarization. They are only displayed here for debugging purposes and are not used in normal operations.")
+		content += components.NoteAlert("Note", "ArchivedMsgs are messages moved from Msgs after summarization. They are only displayed here for debugging purposes and are not used in normal operations.")
 
 		// ArchivedMsgs are already sorted by CreatedAt DESC in GetSession
 		rowConfig := components.DefaultMessageRowConfig()
@@ -351,7 +343,7 @@ func RenderSessionDetail(handler *debuger.DebugHandler, sessionID string) (strin
 		rowConfig.BaseURL = "/agentize/debug"
 
 		columns := components.MessageTableColumns(rowConfig)
-		html += components.TableStartWithConfig(columns, components.TableConfig{
+		content += components.TableStartWithConfig(columns, components.TableConfig{
 			Striped:     false,
 			Hover:       true,
 			Small:       true,
@@ -371,29 +363,29 @@ func RenderSessionDetail(handler *debuger.DebugHandler, sessionID string) (strin
 				session.AgentType,
 				session.CreatedAt,
 			)
-			html += components.MessageTableRow(msg, rowConfig, i)
+			content += components.MessageTableRow(msg, rowConfig, i)
 		}
 
-		html += components.TableEnd(true)
-		html += components.MessageTableScript()
+		content += components.TableEnd(true)
+		content += components.MessageTableScript()
 	}
 
-	html += ui.CardEnd()
+	content += ui.CardEnd()
 
 	// Summarization Logs card
-	html += ui.CardStartWithCount("Summarization Logs", "file-text-fill", len(summarizationLogs))
+	content += ui.CardStartWithCount("Summarization Logs", "file-text-fill", len(summarizationLogs))
 
 	if len(summarizationLogs) == 0 {
-		html += components.InfoAlert("No summarization logs found for this session.")
+		content += components.InfoAlert("No summarization logs found for this session.")
 	} else {
-		html += components.ListGroupStart()
+		content += components.ListGroupStart()
 		for _, log := range summarizationLogs {
 			statusBadge := components.StatusBadge(log.Status)
 
 			promptDisplay := components.ExpandableWithPreview(log.PromptSent, 500)
 			responseDisplay := components.ExpandableWithPreview(log.ResponseReceived, 500)
 
-			html += fmt.Sprintf(`
+			content += fmt.Sprintf(`
 <div class="list-group-item">
     <div class="d-flex w-100 justify-content-between align-items-start mb-2">
         <div>
@@ -415,7 +407,7 @@ func RenderSessionDetail(handler *debuger.DebugHandler, sessionID string) (strin
 			)
 
 			if log.Status == "success" && log.ResponseReceived != "" {
-				html += fmt.Sprintf(`
+				content += fmt.Sprintf(`
     <div class="mb-2">
         <strong>Response Received:</strong>
         <div class="p-2 bg-success bg-opacity-10 rounded mt-1" style="white-space: pre-wrap; word-wrap: break-word; font-size: 0.9em;">%s</div>
@@ -425,7 +417,7 @@ func RenderSessionDetail(handler *debuger.DebugHandler, sessionID string) (strin
 			}
 
 			if log.Status == "failed" && log.ErrorMessage != "" {
-				html += fmt.Sprintf(`
+				content += fmt.Sprintf(`
     <div class="mb-2">
         <strong>Error:</strong>
         %s
@@ -434,23 +426,23 @@ func RenderSessionDetail(handler *debuger.DebugHandler, sessionID string) (strin
 				)
 			}
 
-			html += fmt.Sprintf(`
+			content += fmt.Sprintf(`
     <small class="text-muted">Log ID: %s</small>
 </div>`,
 				components.InlineCode(log.LogID),
 			)
 		}
-		html += components.ListGroupEnd()
+		content += components.ListGroupEnd()
 	}
 
-	html += ui.CardEnd()
+	content += ui.CardEnd()
 
 	// Tool Calls card
-	html += ui.CardStartWithAction("Tool Calls", "tools", len(toolCalls),
+	content += ui.CardStartWithAction("Tool Calls", "tools", len(toolCalls),
 		"/agentize/debug/tool-calls?session="+template.URLQueryEscaper(sessionID), "View All")
 
 	if len(toolCalls) == 0 {
-		html += components.InfoAlert("No tool calls found for this session.")
+		content += components.InfoAlert("No tool calls found for this session.")
 	} else {
 		columns := []components.ColumnConfig{
 			{Header: "Agent", Center: true, NoWrap: true},
@@ -460,7 +452,7 @@ func RenderSessionDetail(handler *debuger.DebugHandler, sessionID string) (strin
 			{Header: "Time", NoWrap: true},
 			{Header: "", Center: true, NoWrap: true},
 		}
-		html += components.TableStartWithConfig(columns, components.TableConfig{
+		content += components.TableStartWithConfig(columns, components.TableConfig{
 			Striped:     false,
 			Hover:       true,
 			Small:       true,
@@ -473,7 +465,7 @@ func RenderSessionDetail(handler *debuger.DebugHandler, sessionID string) (strin
 			resultDisplay := components.ExpandableWithPreview(tc.Result, 150)
 			agentBadge := components.AgentTypeBadgeFromString(tc.AgentType)
 
-			html += fmt.Sprintf(`<tr>
+			content += fmt.Sprintf(`<tr>
                 <td class="text-center">%s</td>
                 <td class="text-nowrap">%s</td>
                 <td><div class="mb-0" style="max-width: 300px; white-space: pre-wrap; word-wrap: break-word;">%s</div></td>
@@ -490,16 +482,16 @@ func RenderSessionDetail(handler *debuger.DebugHandler, sessionID string) (strin
 			)
 		}
 
-		html += components.TableEnd(true)
+		content += components.TableEnd(true)
 	}
 
-	html += ui.CardEnd()
+	content += ui.CardEnd()
 
 	// Files card
-	html += ui.CardStartWithCount("Opened Files", "folder-fill", len(files))
+	content += ui.CardStartWithCount("Opened Files", "folder-fill", len(files))
 
 	if len(files) == 0 {
-		html += components.InfoAlert("No opened files found for this session.")
+		content += components.InfoAlert("No opened files found for this session.")
 	} else {
 		columns := []components.ColumnConfig{
 			{Header: "File Path"},
@@ -508,7 +500,7 @@ func RenderSessionDetail(handler *debuger.DebugHandler, sessionID string) (strin
 			{Header: "Opened At", NoWrap: true},
 			{Header: "Closed At", NoWrap: true},
 		}
-		html += components.TableStartWithConfig(columns, components.TableConfig{
+		content += components.TableStartWithConfig(columns, components.TableConfig{
 			Striped:     false,
 			Hover:       true,
 			Small:       true,
@@ -526,7 +518,7 @@ func RenderSessionDetail(handler *debuger.DebugHandler, sessionID string) (strin
 				closedAt = debuger.FormatTime(f.ClosedAt)
 			}
 
-			html += fmt.Sprintf(`<tr>
+			content += fmt.Sprintf(`<tr>
                 <td>%s</td>
                 <td>%s</td>
                 <td class="text-center">%s</td>
@@ -541,12 +533,10 @@ func RenderSessionDetail(handler *debuger.DebugHandler, sessionID string) (strin
 			)
 		}
 
-		html += components.TableEnd(true)
+		content += components.TableEnd(true)
 	}
 
-	html += ui.CardEnd()
-	html += ui.ContainerEnd()
-	html += ui.Footer()
-
-	return html, nil
+	content += ui.CardEnd()
+	content += ui.ContainerEnd()
+	return ui.Header("Agentize Debug - Session: "+sessionID) + ui.NavbarAndBody("/agentize/debug", content) + ui.Footer(), nil
 }
