@@ -151,6 +151,8 @@ func ContentTypeBadgeFromModel(contentType model.ContentType) string {
 		return BadgeWithIcon("Audio", "🎵", "warning text-dark")
 	case model.ContentTypeImage:
 		return BadgeWithIcon("Image", "🖼️", "info")
+	case model.ContentTypePDF:
+		return BadgeWithIcon("PDF", "📄", "secondary")
 	default:
 		if contentType == "" {
 			return Badge("-", "secondary")

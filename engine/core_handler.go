@@ -240,6 +240,16 @@ func (ch *CoreHandler) ProcessMessage(
 	userID string,
 	userMessage string,
 ) (string, error) {
+	return ch.ProcessMessageWithContentType(ctx, userID, userMessage, model.ContentTypeText)
+}
+
+// ProcessMessageWithContentType is like ProcessMessage but stores the user message with the given content type (e.g. pdf).
+func (ch *CoreHandler) ProcessMessageWithContentType(
+	ctx context.Context,
+	userID string,
+	userMessage string,
+	contentType model.ContentType,
+) (string, error) {
 	if ch.userProgress.TryQueue(userID, userMessage) {
 		return "⏳ Processing previous request... Please wait. 📋 Your message was queued and will be answered in order.", nil
 	}
@@ -249,7 +259,7 @@ func (ch *CoreHandler) ProcessMessage(
 	ch.userProgress.SetInProgress(userID, true)
 	defer ch.userProgress.SetInProgress(userID, false)
 
-	response, err := ch.processOneMessageCore(ctx, userID, userMessage)
+	response, err := ch.processOneMessageCore(ctx, userID, userMessage, contentType)
 	if err != nil {
 		return "", err
 	}
@@ -262,6 +272,7 @@ func (ch *CoreHandler) processOneMessageCore(
 	ctx context.Context,
 	userID string,
 	userMessage string,
+	contentType model.ContentType,
 ) (string, error) {
 	notifyStatus(ctx, userID, "", StatusReceived, "")
 
@@ -316,7 +327,7 @@ func (ch *CoreHandler) processOneMessageCore(
 		openai.ChatCompletionMessage{Role: openai.ChatMessageRoleUser, Content: userMessage},
 	)
 	userMsgID, userSeqID := coreSession.GenerateMessageIDWithSeq()
-	userMsg := model.NewUserMessage(userMsgID, userSeqID, userID, coreSession.SessionID, userMessage, model.ContentTypeText)
+	userMsg := model.NewUserMessage(userMsgID, userSeqID, userID, coreSession.SessionID, userMessage, contentType)
 	userMsg.IsNonsense = isNonsense
 	ch.saveMessage(userMsg)
 	if err := ch.saveCoreSession(coreSession); err != nil {

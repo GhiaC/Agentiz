@@ -13,6 +13,7 @@ const (
 	ContentTypeText  ContentType = "text"
 	ContentTypeAudio ContentType = "audio"
 	ContentTypeImage ContentType = "image"
+	ContentTypePDF   ContentType = "pdf"
 )
 
 // Message represents a stored message with LLM usage information
@@ -26,7 +27,7 @@ type Message struct {
 	// AgentType indicates which type of agent created this message (core, low, high)
 	AgentType AgentType
 
-	// ContentType indicates the type of content (text, audio, image)
+	// ContentType indicates the type of content (text, audio, image, pdf)
 	ContentType ContentType
 
 	// UserID identifies the user who sent/received this message
