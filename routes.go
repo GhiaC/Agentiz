@@ -122,7 +122,14 @@ func (ag *Agentize) createDebugHandler() (*debuger.DebugHandler, error) {
 		}
 	}
 
-	return debuger.NewDebugHandlerWithConfig(sessionStore, schedulerConfig)
+	handler, err := debuger.NewDebugHandlerWithConfig(sessionStore, schedulerConfig)
+	if err != nil {
+		return nil, err
+	}
+	if ag.userBillingHTMLProvider != nil {
+		handler.SetUserBillingHTMLProvider(ag.userBillingHTMLProvider)
+	}
+	return handler, nil
 }
 
 // getPageParam extracts page number from query params (defaults to 1)
@@ -217,6 +224,13 @@ func (ag *Agentize) handleDebugUserDeleteData(c *gin.Context) {
 	if err := handler.GetStore().DeleteUserData(userID); err != nil {
 		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to delete user data: %v", err)})
 		return
+	}
+
+	if ag.userDeleteDataHook != nil {
+		if err := ag.userDeleteDataHook(userID); err != nil {
+			c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to delete user billing/quota data: %v", err)})
+			return
+		}
 	}
 
 	c.Redirect(302, "/agentize/debug/users/"+url.PathEscape(userID)+"?deleted=1")

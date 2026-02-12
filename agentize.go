@@ -8,6 +8,7 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/ghiac/agentize/debuger"
 	"github.com/ghiac/agentize/debuger/ui"
 	"github.com/ghiac/agentize/engine"
 	"github.com/ghiac/agentize/fsrepo"
@@ -48,6 +49,12 @@ type Agentize struct {
 
 	// Extra debug pages registered by applications
 	extraDebugPages []DebugPage
+
+	// Optional: provider for user billing/credit HTML on debug user detail page
+	userBillingHTMLProvider debuger.UserBillingHTMLProvider
+
+	// Optional: hook called after DeleteUserData (sessions/messages) so app can delete quota/consumption etc.
+	userDeleteDataHook func(userID string) error
 }
 
 // Options allows configuring Agentize behavior
@@ -362,6 +369,18 @@ func (ag *Agentize) AddDebugPage(page DebugPage) {
 	ag.extraDebugPages = append(ag.extraDebugPages, page)
 	// Also register in the global UI navbar so it shows on all debugger pages
 	ui.RegisterNavItem(ui.NavItem{URL: page.Path, Icon: page.Icon, Text: page.Title})
+}
+
+// SetUserBillingHTMLProvider sets the optional provider for billing/credit HTML on the user detail page (/agentize/debug/users/:userID).
+// When set, the returned HTML is rendered on the user detail page below the user info card.
+func (ag *Agentize) SetUserBillingHTMLProvider(fn debuger.UserBillingHTMLProvider) {
+	ag.userBillingHTMLProvider = fn
+}
+
+// SetUserDeleteDataHook sets an optional hook called after DeleteUserData (sessions, messages) for a user.
+// The application can use it to delete quota usage, consumption records, balance, etc. for that user.
+func (ag *Agentize) SetUserDeleteDataHook(fn func(userID string) error) {
+	ag.userDeleteDataHook = fn
 }
 
 // GetDebugNavItems returns the full set of navigation items including extra pages.
