@@ -2,6 +2,7 @@ package agentize
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -23,6 +24,7 @@ func (ag *Agentize) RegisterRoutes(router *gin.Engine) {
 	router.GET("/agentize/debug", ag.handleDebug)
 	router.GET("/agentize/debug/users", ag.handleDebugUsers)
 	router.GET("/agentize/debug/users/:userID", ag.handleDebugUserDetail)
+	router.POST("/agentize/debug/users/:userID/delete-data", ag.handleDebugUserDeleteData)
 	router.GET("/agentize/debug/sessions", ag.handleDebugSessions)
 	router.GET("/agentize/debug/sessions/:sessionID", ag.handleDebugSessionDetail)
 	router.GET("/agentize/debug/messages", ag.handleDebugMessages)
@@ -187,7 +189,8 @@ func (ag *Agentize) handleDebugUserDetail(c *gin.Context) {
 		return
 	}
 
-	html, err := pages.RenderUserDetail(handler, userID)
+	showDeleted := c.Query("deleted") == "1"
+	html, err := pages.RenderUserDetail(handler, userID, showDeleted)
 	if err != nil {
 		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to generate user detail page: %v", err)})
 		return
@@ -195,6 +198,28 @@ func (ag *Agentize) handleDebugUserDetail(c *gin.Context) {
 
 	c.Header("Content-Type", "text/html; charset=utf-8")
 	c.String(200, html)
+}
+
+// handleDebugUserDeleteData deletes all sessions and messages for a user
+func (ag *Agentize) handleDebugUserDeleteData(c *gin.Context) {
+	userID := c.Param("userID")
+	if userID == "" {
+		c.JSON(400, gin.H{"error": "userID parameter is required"})
+		return
+	}
+
+	handler, err := ag.createDebugHandler()
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+
+	if err := handler.GetStore().DeleteUserData(userID); err != nil {
+		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to delete user data: %v", err)})
+		return
+	}
+
+	c.Redirect(302, "/agentize/debug/users/"+url.PathEscape(userID)+"?deleted=1")
 }
 
 // handleDebugSessions handles sessions list page requests

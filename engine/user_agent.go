@@ -261,7 +261,7 @@ func (e *Engine) callLLM(ctx context.Context, model string, messages []openai.Ch
 		if resp.Usage.PromptTokensDetails != nil {
 			cacheTokens = resp.Usage.PromptTokensDetails.CachedTokens
 		}
-		log.Log.Infof("[Engine] 📊 TOKEN USAGE >> Model: %s | prompt=%d | completion=%d | total=%d | cache=%d (ورودی=prompt، خروجی=completion، مجموع=total، کش‌پرامپت=cache)",
+		log.Log.Infof("[Engine] 📊 TOKEN USAGE >> Model: %s | prompt=%d | completion=%d | total=%d | cache=%d (input=prompt, output=completion, total=total, cache=cache)",
 			model, resp.Usage.PromptTokens, resp.Usage.CompletionTokens, resp.Usage.TotalTokens, cacheTokens)
 	}
 	return resp, err
@@ -417,9 +417,12 @@ func (e *Engine) CreateSession(userID string) (*model.Session, error) {
 
 // SetProgress sets the progress state for a session
 func (e *Engine) SetProgress(sessionID string, inProgress bool) error {
-	state := e.getConversationState(sessionID)
-	state.InProgress = inProgress
-	return e.setConversationState(sessionID, state)
+	session, err := e.Sessions.Get(sessionID)
+	if err != nil {
+		return err
+	}
+	session.InProgress = inProgress
+	return e.Sessions.Put(session)
 }
 
 // OpenFile opens a node by path and adds it to the session's opened nodes.
@@ -571,89 +574,97 @@ func (e *Engine) ProcessMessage(
 	sessionID string,
 	userMessage string,
 ) (string, int, error) {
+	// Check if already processing - queue if busy
 	if e.sessionProgress.TryQueue(sessionID, userMessage) {
-		return "⏳ در حال پردازش درخواست قبلی هستم... لطفا صبر کنید. 📋 پیام شما صف شد و به‌ترتیب پاسخ داده می‌شود.", 0, nil
+		return "⏳ Processing previous request... Please wait. 📋 Your message was queued and will be answered in order.", 0, nil
 	}
+
+	// Lock session mutex
 	sessionMu := e.getSessionMutex(sessionID)
 	sessionMu.Lock()
 	defer sessionMu.Unlock()
+
 	e.sessionProgress.SetInProgress(sessionID, true)
 	defer e.sessionProgress.SetInProgress(sessionID, false)
 
-	log.Log.Infof("[Engine] 🚀 Processing message | SessionID: %s | Message length: %d chars", sessionID, len(userMessage))
+	log.Log.Infof("[Engine] 🚀 ProcessMessage | SessionID: %s | MsgLen: %d", sessionID, len(userMessage))
+
+	// Validate prerequisites
 	if !e.IsDBReady() {
-		return "", 0, errors.New("database is not ready. Call Init() first to ensure database is fully loaded")
+		return "", 0, errors.New("database is not ready. Call Init() first")
 	}
 	if e.llmClient == nil {
 		return "", 0, errors.New("LLM client is not configured. Call UseLLMConfig first")
 	}
 
-	convState := e.getConversationState(sessionID)
+	// Get session
 	session, err := e.Sessions.Get(sessionID)
-	if err == nil {
-		log.Log.Infof("[Engine] 🔍 Retrieved session | SessionID: %s | UserID: %s | Messages in history: %d",
-			sessionID, session.UserID, len(convState.Msgs))
-	} else {
-		log.Log.Warnf("[Engine] ⚠️  Session not found | SessionID: %s | Error: %v", sessionID, err)
+	if err != nil {
+		return "", 0, fmt.Errorf("failed to get session: %w", err)
 	}
-	if convState.InProgress {
-		if err := e.queueMessage(sessionID, userMessage); err != nil {
-			return "", 0, fmt.Errorf("failed to update session: %w", err)
-		}
-		return "⏳ در حال پردازش درخواست قبلی هستم... لطفا صبر کنید. 📋 پیام شما صف شد و به‌ترتیب پاسخ داده می‌شود.", 0, nil
-	}
-	convState.InProgress = true
-	if err := e.setConversationState(sessionID, convState); err != nil {
-		return "", 0, fmt.Errorf("failed to update session: %w", err)
-	}
-	defer func() {
-		freshState := e.getConversationState(sessionID)
-		freshState.InProgress = false
-		e.setConversationState(sessionID, freshState)
-	}()
 
-	if convState.LastActivity.Before(time.Now().Add(-2 * time.Hour)) {
+	log.Log.Infof("[Engine] 🔍 Session loaded | SessionID: %s | UserID: %s | Messages: %d",
+		sessionID, session.UserID, len(session.Msgs))
+
+	// Clean old function calls if session is stale (> 2 hours)
+	if session.UpdatedAt.Before(time.Now().Add(-2 * time.Hour)) {
 		if err := e.removeFunctionCalls(sessionID); err != nil {
-			return "", 0, fmt.Errorf("failed to clean up function calls: %w", err)
+			log.Log.Warnf("[Engine] ⚠️  Failed to clean function calls | Error: %v", err)
 		}
-		convState = e.getConversationState(sessionID)
 	}
 
+	// Process the message
 	response, tokens, err := e.processOneMessageBody(ctx, sessionID, userMessage)
 	if err != nil {
-		log.Log.Errorf("[Engine] ❌ LLM processing failed | SessionID: %s | Error: %v", sessionID, err)
+		log.Log.Errorf("[Engine] ❌ Processing failed | SessionID: %s | Error: %v", sessionID, err)
 		return "", tokens, err
 	}
+
+	// Process any queued messages
 	for _, m := range e.sessionProgress.DrainQueue(sessionID) {
-		if _, _, err := e.processOneMessageBody(ctx, sessionID, m); err != nil {
-			log.Log.Warnf("[Engine] ⚠️  Queued message failed | SessionID: %s | Error: %v", sessionID, err)
+		if _, _, qErr := e.processOneMessageBody(ctx, sessionID, m); qErr != nil {
+			log.Log.Warnf("[Engine] ⚠️  Queued message failed | Error: %v", qErr)
 		}
 	}
-	log.Log.Infof("[Engine] ✅ Message processed successfully | SessionID: %s | Response length: %d chars | Tokens: %d",
+
+	log.Log.Infof("[Engine] ✅ Done | SessionID: %s | ResponseLen: %d | Tokens: %d",
 		sessionID, len(response), tokens)
+
 	return response, tokens, nil
 }
 
-// processOneMessageBody appends the user message, saves it, and runs the chat request. Caller must hold session mutex and set progress.
+// processOneMessageBody appends the user message to session and runs the chat request.
+// Caller must hold session mutex.
 func (e *Engine) processOneMessageBody(ctx context.Context, sessionID string, userMessage string) (string, int, error) {
-	if len(userMessage) > 1 {
+	// Add user message to session if not empty
+	if len(userMessage) > 0 {
 		session, err := e.Sessions.Get(sessionID)
 		if err != nil {
 			return "", 0, fmt.Errorf("failed to get session: %w", err)
 		}
-		if err := e.appendMessages(sessionID, []openai.ChatCompletionMessage{
-			{Role: openai.ChatMessageRoleUser, Content: userMessage},
-		}); err != nil {
-			return "", 0, fmt.Errorf("failed to add user message: %w", err)
+
+		// Append user message
+		session.Msgs = append(session.Msgs, openai.ChatCompletionMessage{
+			Role:    openai.ChatMessageRoleUser,
+			Content: userMessage,
+		})
+		session.UpdatedAt = time.Now()
+
+		// Save session
+		if err := e.Sessions.Put(session); err != nil {
+			return "", 0, fmt.Errorf("failed to save session: %w", err)
 		}
+
+		// Save user message to messages table
 		userMsgID, userSeqID := session.GenerateMessageIDWithSeq()
 		userMsg := model.NewUserMessage(userMsgID, userSeqID, session.UserID, sessionID, userMessage, model.ContentTypeText)
 		if sqliteStore, ok := e.Sessions.(interface{ PutMessage(*model.Message) error }); ok {
 			if err := sqliteStore.PutMessage(userMsg); err != nil {
-				log.Log.Warnf("[Engine] ⚠️  Failed to save user message | SessionID: %s | Error: %v", sessionID, err)
+				log.Log.Warnf("[Engine] ⚠️  Failed to save user message | Error: %v", err)
 			}
 		}
 	}
+
 	return e.processChatRequest(ctx, sessionID)
 }
 
@@ -894,102 +905,6 @@ func (e *Engine) GetTools(session *model.Session) []openai.Tool {
 	return tools
 }
 
-// getConversationStateFromSession retrieves conversation state from a session object
-// Deprecated: Session fields are now flat, use session.Msgs, session.InProgress, etc. directly
-func getConversationStateFromSession(session *model.Session) *model.ConversationState {
-	return session.GetConversationState()
-}
-
-// setConversationStateToSession stores conversation state in a session object
-// Deprecated: Session fields are now flat, modify session.Msgs, etc. directly
-func setConversationStateToSession(session *model.Session, state *model.ConversationState) {
-	session.Msgs = state.Msgs
-	session.InProgress = state.InProgress
-	session.Queue = state.Queue
-	session.UpdatedAt = time.Now()
-}
-
-// getConversationState retrieves conversation state from session
-// Deprecated: Use getSession and access fields directly
-func (e *Engine) getConversationState(sessionID string) *model.ConversationState {
-	session, err := e.Sessions.Get(sessionID)
-	if err != nil {
-		return model.NewConversationState()
-	}
-	return session.GetConversationState()
-}
-
-// setConversationState stores conversation state in session
-// Deprecated: Modify session fields directly and call Sessions.Put
-func (e *Engine) setConversationState(sessionID string, state *model.ConversationState) error {
-	session, err := e.Sessions.Get(sessionID)
-	if err != nil {
-		return err
-	}
-	session.Msgs = state.Msgs
-	session.InProgress = state.InProgress
-	session.Queue = state.Queue
-	session.UpdatedAt = time.Now()
-	return e.Sessions.Put(session)
-}
-
-// getMessages retrieves messages from session
-func (e *Engine) getMessages(sessionID string) []openai.ChatCompletionMessage {
-	session, err := e.Sessions.Get(sessionID)
-	if err != nil {
-		return []openai.ChatCompletionMessage{}
-	}
-	messages := make([]openai.ChatCompletionMessage, len(session.Msgs))
-	copy(messages, session.Msgs)
-	return messages
-}
-
-// appendMessages adds messages to session
-func (e *Engine) appendMessages(sessionID string, messages []openai.ChatCompletionMessage) error {
-	session, err := e.Sessions.Get(sessionID)
-	if err != nil {
-		return err
-	}
-	session.Msgs = append(session.Msgs, messages...)
-	session.UpdatedAt = time.Now()
-	return e.Sessions.Put(session)
-}
-
-// queueMessage adds a message to the queue
-func (e *Engine) queueMessage(sessionID string, text string) error {
-	session, err := e.Sessions.Get(sessionID)
-	if err != nil {
-		return err
-	}
-	session.Queue = append(session.Queue, openai.ChatCompletionMessage{
-		Role:    openai.ChatMessageRoleUser,
-		Content: text,
-	})
-	session.UpdatedAt = time.Now()
-	return e.Sessions.Put(session)
-}
-
-// processQueuedMessages moves queued messages to session messages
-// This should be called after tool processing to ensure queued requests
-// are added to session at the earliest opportunity
-func (e *Engine) processQueuedMessages(sessionID string) error {
-	session, err := e.Sessions.Get(sessionID)
-	if err != nil {
-		return err
-	}
-	if len(session.Queue) == 0 {
-		return nil
-	}
-
-	// Move queued messages to session messages
-	log.Log.Infof("Processing %d queued messages for session %s", len(session.Queue), sessionID)
-	session.Msgs = append(session.Msgs, session.Queue...)
-	session.Queue = []openai.ChatCompletionMessage{} // Clear the queue
-	session.UpdatedAt = time.Now()
-
-	return e.Sessions.Put(session)
-}
-
 // removeFunctionCalls removes function/tool call messages
 func (e *Engine) removeFunctionCalls(sessionID string) error {
 	session, err := e.Sessions.Get(sessionID)
@@ -1211,155 +1126,151 @@ func formatLLMError(err error) error {
 	return fmt.Errorf("LLM request failed: %w", err)
 }
 
-// processChatRequest processes an LLM chat request with support for tool calls and memory management.
-// It handles the full flow including:
-// - Building the request with system prompt and memory
-// - Making the OpenAI API call
-// - Handling tool calls recursively
-// - Managing memory state
-//
-// Returns the text response and total token usage.
+// processChatRequest processes an LLM chat request with support for tool calls.
+// SIMPLIFIED: Uses a single session object and local messages list throughout the loop.
+// Only saves to DB at key points (after tool calls, and at the end).
 func (e *Engine) processChatRequest(
 	ctx context.Context,
 	sessionID string,
 ) (string, int, error) {
-	// Get session for system prompt and tools
+	const maxIterations = 10
+	totalTokenUsage := 0
+
+	// Load session once at the start
 	session, err := e.Sessions.Get(sessionID)
 	if err != nil {
 		return "", 0, fmt.Errorf("failed to get session: %w", err)
 	}
 
-	// Get system prompts and tools from session
+	// Get system prompts and tools (these don't change during the loop)
 	systemPrompts := e.GetSystemPrompts(session)
 	openaiTools := e.GetTools(session)
 
-	// Set default model
+	// Set model
 	modelName := e.llmConfig.Model
 	if modelName == "" {
 		modelName = "openai/gpt-5-nano"
 	}
-
-	// Update session model if different from stored model
 	if session.Model != modelName {
 		session.Model = modelName
-		// Save session to persist model name
-		if err := e.Sessions.Put(session); err != nil {
-			log.Log.Warnf("[Engine] ⚠️  Failed to update session model | SessionID: %s | Error: %v", sessionID, err)
-		}
 	}
-
-	// Build request messages with system prompts (one message per node for AI caching)
-	reqMessages := make([]openai.ChatCompletionMessage, 0)
-	for _, prompt := range systemPrompts {
-		if prompt != "" {
-			reqMessages = append(reqMessages, openai.ChatCompletionMessage{
-				Role:    openai.ChatMessageRoleSystem,
-				Content: prompt,
-			})
-		}
-	}
-
-	// Add memory messages
-	reqMessages = append(reqMessages, e.getMessages(sessionID)...)
 
 	// Ensure user_id is in context
 	if session.UserID != "" {
 		ctx = model.WithUserID(ctx, session.UserID)
 	}
 
-	log.Log.Infof("LLM request: system_prompts=%d, tools=%d, messages=%d",
-		len(systemPrompts), len(openaiTools), len(reqMessages))
+	// Work with a local copy of messages - this is the single source of truth for this request
+	localMsgs := append([]openai.ChatCompletionMessage{}, session.Msgs...)
 
-	// Notify status: thinking (model name only in metadata, not exposed to user)
-	notifyStatus(ctx, session.UserID, sessionID, StatusThinking, "")
+	for i := 0; i < maxIterations; i++ {
+		// Build request messages: system prompts + local messages
+		reqMessages := make([]openai.ChatCompletionMessage, 0, len(systemPrompts)+len(localMsgs))
+		for _, prompt := range systemPrompts {
+			if prompt != "" {
+				reqMessages = append(reqMessages, openai.ChatCompletionMessage{
+					Role:    openai.ChatMessageRoleSystem,
+					Content: prompt,
+				})
+			}
+		}
+		reqMessages = append(reqMessages, localMsgs...)
 
-	// Make LLM call (tries backup provider first, then falls back to OpenAI)
-	llmStart := time.Now()
-	resp, err := e.callLLM(ctx, modelName, reqMessages, openaiTools)
-	llmDuration := time.Since(llmStart)
+		log.Log.Infof("[Engine] LLM request | iteration=%d/%d | messages=%d | tools=%d",
+			i+1, maxIterations, len(reqMessages), len(openaiTools))
 
-	if err != nil {
-		return "", 0, formatLLMError(err)
-	}
+		notifyStatus(ctx, session.UserID, sessionID, StatusThinking, "")
 
-	if len(resp.Choices) == 0 {
-		return "", resp.Usage.TotalTokens, fmt.Errorf("no choices in LLM response")
-	}
-
-	choice := resp.Choices[0]
-	tokenUsage := resp.Usage.TotalTokens
-
-	// Callback: record LLM usage
-	if e.Callback != nil {
-		e.Callback.AfterAction(ctx, &UsageEvent{
-			UserID:    session.UserID,
-			SessionID: sessionID,
-			EventType: EventLLMCall,
-			Name:      modelName,
-			Tokens:    tokenUsage,
-			Duration:  llmDuration,
-		})
-	}
-
-	// Save message to database
-	request := openai.ChatCompletionRequest{
-		Model:    modelName,
-		Messages: reqMessages,
-		Tools:    openaiTools,
-	}
-	messageID := e.saveMessage(session, request, resp, choice)
-
-	// Handle tool calls
-	if choice.FinishReason == openai.FinishReasonToolCalls {
-		if e.Executor == nil {
-			return "", tokenUsage, fmt.Errorf("tool calls received but no executor provided")
+		// Call LLM
+		llmStart := time.Now()
+		resp, err := e.callLLM(ctx, modelName, reqMessages, openaiTools)
+		llmDuration := time.Since(llmStart)
+		if err != nil {
+			return "", totalTokenUsage, formatLLMError(err)
 		}
 
-		// Add assistant message with tool calls to memory
-		e.appendMessages(sessionID, []openai.ChatCompletionMessage{
-			{
+		if len(resp.Choices) == 0 {
+			return "", totalTokenUsage, fmt.Errorf("no choices in LLM response")
+		}
+
+		choice := resp.Choices[0]
+		totalTokenUsage += resp.Usage.TotalTokens
+
+		// Record usage callback
+		if e.Callback != nil {
+			ev := &UsageEvent{
+				UserID:       session.UserID,
+				SessionID:    sessionID,
+				EventType:    EventLLMCall,
+				Name:         modelName,
+				Tokens:       resp.Usage.TotalTokens,
+				InputTokens:  resp.Usage.PromptTokens,
+				OutputTokens: resp.Usage.CompletionTokens,
+				Model:        modelName,
+				Duration:     llmDuration,
+			}
+			if resp.Usage.PromptTokensDetails != nil {
+				ev.CachedInputTokens = resp.Usage.PromptTokensDetails.CachedTokens
+			}
+			e.Callback.AfterAction(ctx, ev)
+		}
+
+		// Save LLM message to DB
+		request := openai.ChatCompletionRequest{Model: modelName, Messages: reqMessages, Tools: openaiTools}
+		messageID := e.saveMessage(session, request, resp, choice)
+
+		// Handle tool calls
+		if choice.FinishReason == openai.FinishReasonToolCalls {
+			if e.Executor == nil {
+				return "", totalTokenUsage, fmt.Errorf("tool calls received but no executor provided")
+			}
+
+			// Add assistant message with tool calls to local messages
+			localMsgs = append(localMsgs, openai.ChatCompletionMessage{
 				Role:      openai.ChatMessageRoleAssistant,
 				ToolCalls: choice.Message.ToolCalls,
-			},
-		})
+			})
 
-		// Execute tools and collect results; persistence (Put/Update) is inside executeOneToolCall so new tools need no extra code
-		toolResults := make([]openai.ChatCompletionMessage, 0, len(choice.Message.ToolCalls))
-		for _, toolCall := range choice.Message.ToolCalls {
-			msg := e.executeOneToolCall(ctx, session, messageID, sessionID, toolCall)
-			toolResults = append(toolResults, msg)
+			// Execute each tool and add results to local messages
+			for _, toolCall := range choice.Message.ToolCalls {
+				result := e.executeTool(ctx, session, messageID, toolCall)
+				localMsgs = append(localMsgs, openai.ChatCompletionMessage{
+					Role:       openai.ChatMessageRoleTool,
+					Content:    result,
+					Name:       toolCall.Function.Name,
+					ToolCallID: toolCall.ID,
+				})
+			}
+
+			// Save session with updated messages after tool execution
+			session.Msgs = localMsgs
+			session.UpdatedAt = time.Now()
+			if err := e.Sessions.Put(session); err != nil {
+				log.Log.Warnf("[Engine] ⚠️  Failed to save session after tools | SessionID: %s | Error: %v", sessionID, err)
+			}
+
+			// Continue loop to process tool results
+			continue
 		}
 
-		// Save session to persist ToolSeq (incremented by GenerateToolID during tool execution)
-		// This ensures unique ToolIDs even across recursive calls and session reloads
-		if err := e.Sessions.Put(session); err != nil {
-			log.Log.Warnf("[Engine] ⚠️  Failed to persist session ToolSeq | SessionID: %s | ToolSeq: %d | Error: %v", sessionID, session.ToolSeq, err)
-		}
-
-		// Process queued messages immediately after tool execution
-		// This ensures queued requests are added to session at the earliest opportunity
-		if err := e.processQueuedMessages(sessionID); err != nil {
-			log.Log.Warnf("Failed to process queued messages: %v", err)
-		}
-
-		// Recursively call again to process tool results
-		recursiveResponse, recursiveTokenUsage, err := e.processChatRequest(ctx, sessionID)
-		if err != nil {
-			return recursiveResponse, tokenUsage + recursiveTokenUsage, err
-		}
-		return recursiveResponse, tokenUsage + recursiveTokenUsage, nil
-	}
-
-	// Handle text response
-	textResponse := choice.Message.Content
-	e.appendMessages(sessionID, []openai.ChatCompletionMessage{
-		{
+		// Text response - we're done
+		textResponse := choice.Message.Content
+		localMsgs = append(localMsgs, openai.ChatCompletionMessage{
 			Role:    openai.ChatMessageRoleAssistant,
 			Content: textResponse,
-		},
-	})
+		})
 
-	return textResponse, tokenUsage, nil
+		// Save final session state
+		session.Msgs = localMsgs
+		session.UpdatedAt = time.Now()
+		if err := e.Sessions.Put(session); err != nil {
+			log.Log.Warnf("[Engine] ⚠️  Failed to save session | SessionID: %s | Error: %v", sessionID, err)
+		}
+
+		return textResponse, totalTokenUsage, nil
+	}
+
+	return "", totalTokenUsage, fmt.Errorf("max iterations (%d) reached without final response", maxIterations)
 }
 
 // saveMessage saves a message to the database and returns the messageID
@@ -1404,32 +1315,36 @@ func (e *Engine) saveMessage(
 	return msg.MessageID
 }
 
-// executeOneToolCall runs one tool call: saves it (Put), runs Executor, updates response (Update).
-// All UserAgent tool executions go through here so new tools registered in the registry are persisted automatically.
-func (e *Engine) executeOneToolCall(
+// executeTool executes a single tool and returns the result string.
+// SIMPLIFIED: Does not modify session messages - caller is responsible for that.
+func (e *Engine) executeTool(
 	ctx context.Context,
 	session *model.Session,
-	messageID, sessionID string,
+	messageID string,
 	toolCall openai.ToolCall,
-) openai.ChatCompletionMessage {
-	log.Log.Infof("[Engine] 🔄 executeOneToolCall | Function=%s | SessionID=%s | StoreType=%T", toolCall.Function.Name, sessionID, e.Sessions)
-	persister := NewToolCallPersister(e.Sessions, "Engine")
-	if persister == nil {
-		log.Log.Warnf("[Engine] ⚠️  ToolCallPersister is nil for function=%s; store type=%T", toolCall.Function.Name, e.Sessions)
-	}
-	toolID := persister.Save(session, messageID, toolCall)
-	log.Log.Infof("[Engine] 💾 Tool call save result | Function=%s | ToolID=%s", toolCall.Function.Name, toolID)
+) string {
+	sessionID := session.SessionID
 
+	log.Log.Infof("[Engine] 🔧 executeTool | Function=%s | SessionID=%s", toolCall.Function.Name, sessionID)
+
+	// Save tool call to DB
+	persister := NewToolCallPersister(e.Sessions, "Engine")
+	toolID := ""
+	if persister != nil {
+		toolID = persister.Save(session, messageID, toolCall)
+	}
+
+	// Parse args
 	var args map[string]interface{}
 	if err := json.Unmarshal([]byte(toolCall.Function.Arguments), &args); err != nil {
 		args = make(map[string]interface{})
 	}
 	args["__user_id__"] = session.UserID
-	args["__session_id__"] = session.SessionID
+	args["__session_id__"] = sessionID
 
-	log.Log.Infof("LLM tool call: name=%s, args=%s", toolCall.Function.Name, toolCall.Function.Arguments)
 	notifyStatus(ctx, session.UserID, sessionID, StatusToolExecuting, toolCall.Function.Name)
 
+	// Check callback before execution
 	if e.Callback != nil {
 		if cbErr := e.Callback.BeforeAction(ctx, &UsageEvent{
 			UserID:    session.UserID,
@@ -1438,46 +1353,68 @@ func (e *Engine) executeOneToolCall(
 			Name:      toolCall.Function.Name,
 		}); cbErr != nil {
 			result := fmt.Sprintf("Tool %s blocked: %v", toolCall.Function.Name, cbErr)
-			log.Log.Infof("Tool blocked by callback: name=%s, error=%v", toolCall.Function.Name, cbErr)
-			persister.Update(toolID, result)
-			e.appendMessages(sessionID, []openai.ChatCompletionMessage{{
-				Role: openai.ChatMessageRoleTool, Content: result, Name: toolCall.Function.Name, ToolCallID: toolCall.ID,
-			}})
-			return openai.ChatCompletionMessage{
-				Role: openai.ChatMessageRoleTool, Content: result, Name: toolCall.Function.Name, ToolCallID: toolCall.ID,
+			if persister != nil {
+				persister.Update(toolID, result)
 			}
+			return result
 		}
 	}
 
+	// Execute tool
 	toolStart := time.Now()
 	result, err := e.Executor(toolCall.Function.Name, args)
 	toolDuration := time.Since(toolStart)
+
 	if err != nil {
 		result = fmt.Sprintf("Error executing tool %s: %v", toolCall.Function.Name, err)
-		log.Log.Infof("Tool execution error: name=%s, error=%v", toolCall.Function.Name, err)
+		log.Log.Warnf("[Engine] Tool error | name=%s | error=%v", toolCall.Function.Name, err)
 	} else {
-		log.Log.Infof("Tool execution result: name=%s, result_len=%d, result=%s", toolCall.Function.Name, len(result), truncateForLog(result, 500))
+		log.Log.Infof("[Engine] Tool result | name=%s | len=%d", toolCall.Function.Name, len(result))
 	}
 
+	// Callback after execution
 	if e.Callback != nil {
 		e.Callback.AfterAction(ctx, &UsageEvent{
-			UserID: session.UserID, SessionID: sessionID, EventType: EventToolCall, Name: toolCall.Function.Name,
-			Duration: toolDuration, Error: err,
+			UserID:    session.UserID,
+			SessionID: sessionID,
+			EventType: EventToolCall,
+			Name:      toolCall.Function.Name,
+			Duration:  toolDuration,
+			Error:     err,
 		})
 	}
+
 	notifyStatus(ctx, session.UserID, sessionID, StatusToolDone, toolCall.Function.Name)
 
+	// Process result (truncate if needed)
 	var processedResult string
 	if toolCall.Function.Name == "collect_result" {
 		processedResult = result
 	} else {
 		processedResult = e.processToolResult(sessionID, result)
 	}
-	persister.Update(toolID, processedResult)
-	e.appendMessages(sessionID, []openai.ChatCompletionMessage{{
-		Role: openai.ChatMessageRoleTool, Content: processedResult, Name: toolCall.Function.Name, ToolCallID: toolCall.ID,
-	}})
+
+	// Update persister with result
+	if persister != nil {
+		persister.Update(toolID, processedResult)
+	}
+
+	return processedResult
+}
+
+// executeOneToolCall is kept for backward compatibility but deprecated.
+// Use executeTool instead.
+func (e *Engine) executeOneToolCall(
+	ctx context.Context,
+	session *model.Session,
+	messageID, sessionID string,
+	toolCall openai.ToolCall,
+) openai.ChatCompletionMessage {
+	result := e.executeTool(ctx, session, messageID, toolCall)
 	return openai.ChatCompletionMessage{
-		Role: openai.ChatMessageRoleTool, Content: processedResult, Name: toolCall.Function.Name, ToolCallID: toolCall.ID,
+		Role:       openai.ChatMessageRoleTool,
+		Content:    result,
+		Name:       toolCall.Function.Name,
+		ToolCallID: toolCall.ID,
 	}
 }

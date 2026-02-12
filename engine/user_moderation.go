@@ -48,7 +48,7 @@ func (um *UserModeration) CheckBanStatus(userID string) (isBanned bool, banMessa
 
 	banMessage = user.BanMessage
 	if banMessage == "" {
-		banMessage = "شما به دلیل ارسال پیام‌های نامربوط موقتاً محدود شده‌اید. لطفاً بعداً تلاش کنید."
+		banMessage = "You have been temporarily restricted due to irrelevant messages. Please try again later."
 	}
 
 	log.Log.Infof("[UserModeration] 🚫 User is banned | UserID: %s | BanUntil: %v", userID, user.BanUntil)
@@ -124,12 +124,12 @@ func (um *UserModeration) ProcessNonsenseCheck(ctx context.Context, userID strin
 func (um *UserModeration) calculateBanDuration(nonsenseCount int) (time.Duration, string) {
 	switch {
 	case nonsenseCount >= 7:
-		return 24 * time.Hour, "شما به دلیل ارسال مکرر پیام‌های نامربوط به مدت 24 ساعت محدود شده‌اید."
+		return 24 * time.Hour, "You have been restricted for 24 hours due to repeated irrelevant messages."
 	case nonsenseCount >= 5:
-		return 6 * time.Hour, "شما به دلیل ارسال مکرر پیام‌های نامربوط به مدت 6 ساعت محدود شده‌اید."
+		return 6 * time.Hour, "You have been restricted for 6 hours due to repeated irrelevant messages."
 	case nonsenseCount >= 3:
-		return 1 * time.Hour, "شما به دلیل ارسال مکرر پیام‌های نامربوط به مدت 1 ساعت محدود شده‌اید."
+		return 1 * time.Hour, "You have been restricted for 1 hour due to repeated irrelevant messages."
 	default:
-		return 0, "لطفاً پیام‌های معنی‌دار ارسال کنید."
+		return 0, "Please send meaningful messages."
 	}
 }

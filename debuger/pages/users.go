@@ -3,6 +3,7 @@ package pages
 import (
 	"fmt"
 	"html/template"
+	"net/url"
 	"strings"
 
 	"github.com/ghiac/agentize/debuger"
@@ -106,8 +107,9 @@ func RenderUsers(handler *debuger.DebugHandler, page int) (string, error) {
 	return html, nil
 }
 
-// RenderUserDetail generates the user detail HTML page
-func RenderUserDetail(handler *debuger.DebugHandler, userID string) (string, error) {
+// RenderUserDetail generates the user detail HTML page.
+// If showDeletedSuccess is true, shows a success alert for "data deleted".
+func RenderUserDetail(handler *debuger.DebugHandler, userID string, showDeletedSuccess ...bool) (string, error) {
 	dp := data.NewDataProvider(handler.GetStore())
 
 	user, err := dp.GetUser(userID)
@@ -144,6 +146,10 @@ func RenderUserDetail(handler *debuger.DebugHandler, userID string) (string, err
 		{Label: "Users", URL: "/agentize/debug/users"},
 		{Label: userID, Active: true},
 	})
+
+	if len(showDeletedSuccess) > 0 && showDeletedSuccess[0] {
+		html += components.SuccessAlert("All messages and sessions for this user have been deleted successfully.")
+	}
 
 	// User info card
 	banStatus := "✅ Active"
@@ -210,10 +216,16 @@ func RenderUserDetail(handler *debuger.DebugHandler, userID string) (string, err
 		banMessageDisplay = template.HTMLEscapeString(user.BanMessage)
 	}
 
+	// Delete user data button (form with confirmation)
+	deleteFormAction := "/agentize/debug/users/" + url.PathEscape(userID) + "/delete-data"
+
 	html += fmt.Sprintf(`
 <div class="card mb-4">
-    <div class="card-header">
+    <div class="card-header d-flex justify-content-between align-items-center">
         <h4 class="mb-0"><i class="bi bi-person-fill me-2"></i>User Information</h4>
+        <form method="POST" action="%s" onsubmit="return confirm('Are you sure? All messages and sessions for this user will be deleted.');" class="d-inline">
+            <button type="submit" class="btn btn-sm btn-outline-danger"><i class="bi bi-trash me-1"></i>Delete all messages and sessions</button>
+        </form>
     </div>
     <div class="card-body p-0">
         <div class="row g-0">
@@ -288,6 +300,7 @@ func RenderUserDetail(handler *debuger.DebugHandler, userID string) (string, err
         </div>
     </div>
 </div>`,
+		deleteFormAction,
 		components.CodeBlock(template.HTMLEscapeString(user.UserID)),
 		nameDisplay,
 		usernameDisplay,

@@ -478,6 +478,62 @@ func (s *SQLiteStore) Delete(sessionID string) error {
 	return nil
 }
 
+// DeleteUserData deletes all sessions, messages, tool calls, summarization logs,
+// and opened files for a user. Resets user's ActiveSessionIDs and SessionSeqs.
+func (s *SQLiteStore) DeleteUserData(userID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Delete in order (child tables first, then sessions, then update user)
+	if _, err := tx.Exec("DELETE FROM messages WHERE user_id = ?", userID); err != nil {
+		return fmt.Errorf("failed to delete messages: %w", err)
+	}
+	if _, err := tx.Exec("DELETE FROM tool_calls WHERE user_id = ?", userID); err != nil {
+		return fmt.Errorf("failed to delete tool_calls: %w", err)
+	}
+	if _, err := tx.Exec("DELETE FROM summarization_logs WHERE user_id = ?", userID); err != nil {
+		return fmt.Errorf("failed to delete summarization_logs: %w", err)
+	}
+	if _, err := tx.Exec("DELETE FROM opened_files WHERE user_id = ?", userID); err != nil {
+		return fmt.Errorf("failed to delete opened_files: %w", err)
+	}
+	if _, err := tx.Exec("DELETE FROM sessions WHERE user_id = ?", userID); err != nil {
+		return fmt.Errorf("failed to delete sessions: %w", err)
+	}
+
+	// Reset user's ActiveSessionIDs and SessionSeqs
+	var data string
+	var createdAt, updatedAt int64
+	scanErr := tx.QueryRow(
+		"SELECT data, created_at, updated_at FROM users WHERE user_id = ?",
+		userID,
+	).Scan(&data, &createdAt, &updatedAt)
+	if scanErr == nil {
+		user := &model.User{}
+		if json.Unmarshal([]byte(data), user) == nil {
+			user.ActiveSessionIDs = make(map[model.AgentType]string)
+			user.SessionSeqs = make(map[model.AgentType]int)
+			user.UpdatedAt = time.Now()
+			if userData, err := json.Marshal(user); err == nil {
+				now := user.UpdatedAt.Unix()
+				_, _ = tx.Exec(
+					`INSERT OR REPLACE INTO users (user_id, data, created_at, updated_at) VALUES (?, ?, ?, ?)`,
+					userID, string(userData), createdAt, now,
+				)
+			}
+		}
+	}
+	// Ignore "user not found" - user might not exist yet
+
+	return tx.Commit()
+}
+
 // List returns all sessions for a user
 func (s *SQLiteStore) List(userID string) ([]*model.Session, error) {
 	s.mu.RLock()

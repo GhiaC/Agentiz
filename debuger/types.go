@@ -25,6 +25,10 @@ type DebugStore interface {
 	PutSummarizationLog(log *model.SummarizationLog) error
 	GetSummarizationLogsBySession(sessionID string) ([]*model.SummarizationLog, error)
 	GetAllSummarizationLogs() ([]*model.SummarizationLog, error)
+
+	// DeleteUserData deletes all sessions, messages, tool calls, summarization logs,
+	// and opened files for a user. Resets user's ActiveSessionIDs and SessionSeqs.
+	DeleteUserData(userID string) error
 }
 
 // SchedulerConfig holds scheduler configuration for display in debug pages

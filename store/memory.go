@@ -388,6 +388,31 @@ func (s *DBStore) UpdateToolCallResponse(toolID string, response string) error {
 	return s.sqliteStore.UpdateToolCallResponse(toolID, response)
 }
 
+// DeleteUserData deletes all sessions, messages, tool calls, summarization logs,
+// and opened files for a user (delegates to SQLiteStore and clears caches)
+func (s *DBStore) DeleteUserData(userID string) error {
+	// Get sessions before delete to clear cache
+	sessions, _ := s.sqliteStore.List(userID)
+
+	if err := s.sqliteStore.DeleteUserData(userID); err != nil {
+		return err
+	}
+
+	// Clear session cache for deleted sessions
+	s.sessionsMu.Lock()
+	for _, sess := range sessions {
+		delete(s.sessionsCache, sess.SessionID)
+	}
+	s.sessionsMu.Unlock()
+
+	// Clear user cache
+	s.usersMu.Lock()
+	delete(s.usersCache, userID)
+	s.usersMu.Unlock()
+
+	return nil
+}
+
 // SessionStore is an alias for model.SessionStore for backward compatibility
 type SessionStore = model.SessionStore
 

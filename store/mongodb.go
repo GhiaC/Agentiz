@@ -545,6 +545,69 @@ func (s *MongoDBStore) Delete(sessionID string) error {
 	return nil
 }
 
+// DeleteUserData deletes all sessions, messages, tool calls, summarization logs,
+// and opened files for a user. Resets user's ActiveSessionIDs and SessionSeqs.
+func (s *MongoDBStore) DeleteUserData(userID string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	userFilter := bson.M{"user_id": userID}
+
+	// Get session IDs for this user (needed for collections that use session_id)
+	sessions, err := s.List(userID)
+	if err != nil {
+		return fmt.Errorf("failed to list sessions: %w", err)
+	}
+	sessionIDs := make([]string, 0, len(sessions))
+	for _, sess := range sessions {
+		sessionIDs = append(sessionIDs, sess.SessionID)
+	}
+
+	// Delete messages by user_id
+	if _, err := s.messagesCollection.DeleteMany(ctx, userFilter); err != nil {
+		return fmt.Errorf("failed to delete messages: %w", err)
+	}
+
+	// Delete tool_calls and summarization_logs by session_id (these don't have user_id at top level)
+	if len(sessionIDs) > 0 {
+		sessionFilter := bson.M{"session_id": bson.M{"$in": sessionIDs}}
+		if _, err := s.toolCallsCollection.DeleteMany(ctx, sessionFilter); err != nil {
+			return fmt.Errorf("failed to delete tool_calls: %w", err)
+		}
+		if _, err := s.summarizationLogsCollection.DeleteMany(ctx, sessionFilter); err != nil {
+			return fmt.Errorf("failed to delete summarization_logs: %w", err)
+		}
+		if _, err := s.openedFilesCollection.DeleteMany(ctx, sessionFilter); err != nil {
+			return fmt.Errorf("failed to delete opened_files: %w", err)
+		}
+	}
+
+	// Delete sessions
+	if _, err := s.collection.DeleteMany(ctx, userFilter); err != nil {
+		return fmt.Errorf("failed to delete sessions: %w", err)
+	}
+
+	// Reset user's ActiveSessionIDs and SessionSeqs
+	var doc userDocument
+	err = s.usersCollection.FindOne(ctx, bson.M{"_id": userID}).Decode(&doc)
+	if err == nil {
+		user := &model.User{}
+		if json.Unmarshal([]byte(doc.Data), user) == nil {
+			user.ActiveSessionIDs = make(map[model.AgentType]string)
+			user.SessionSeqs = make(map[model.AgentType]int)
+			user.UpdatedAt = time.Now()
+			if userData, err := json.Marshal(user); err == nil {
+				opts := options.Replace().SetUpsert(true)
+				doc.Data = string(userData)
+				doc.UpdatedAt = user.UpdatedAt
+				_, _ = s.usersCollection.ReplaceOne(ctx, bson.M{"_id": userID}, doc, opts)
+			}
+		}
+	}
+
+	return nil
+}
+
 // List returns all sessions for a user
 func (s *MongoDBStore) List(userID string) ([]*model.Session, error) {
 	// MongoDB is thread-safe, no mutex needed

@@ -66,10 +66,15 @@ type UsageEvent struct {
 	SessionID string
 	EventType EventType
 	Name      string // tool name, model name, or agent type
-	Tokens    int    // token count (for LLM calls)
-	Duration  time.Duration
-	Error     error
-	Metadata  map[string]interface{}
+	Tokens    int    // token count (for LLM calls) - deprecated, use Input/Output/Cached
+	// Detailed token counts for LLM calls (Credit+Usage billing)
+	InputTokens       int
+	OutputTokens      int
+	CachedInputTokens int
+	Model             string
+	Duration          time.Duration
+	Error             error
+	Metadata          map[string]interface{}
 }
 
 // EventType classifies the kind of metered action

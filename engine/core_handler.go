@@ -219,7 +219,7 @@ func (ch *CoreHandler) callLLM(ctx context.Context, model string, messages []ope
 		if resp.Usage.PromptTokensDetails != nil {
 			cacheTokens = resp.Usage.PromptTokensDetails.CachedTokens
 		}
-		log.Log.Infof("[CoreHandler] 📊 TOKEN USAGE >> Model: %s | prompt=%d | completion=%d | total=%d | cache=%d (ورودی=prompt، خروجی=completion، مجموع=total، کش‌پرامپت=cache)",
+		log.Log.Infof("[CoreHandler] 📊 TOKEN USAGE >> Model: %s | prompt=%d | completion=%d | total=%d | cache=%d (input=prompt, output=completion, total=total, cache=cache)",
 			model, resp.Usage.PromptTokens, resp.Usage.CompletionTokens, resp.Usage.TotalTokens, cacheTokens)
 	}
 	return resp, err
@@ -241,7 +241,7 @@ func (ch *CoreHandler) ProcessMessage(
 	userMessage string,
 ) (string, error) {
 	if ch.userProgress.TryQueue(userID, userMessage) {
-		return "⏳ در حال پردازش درخواست قبلی هستم... لطفا صبر کنید. 📋 پیام شما صف شد و به‌ترتیب پاسخ داده می‌شود.", nil
+		return "⏳ Processing previous request... Please wait. 📋 Your message was queued and will be answered in order.", nil
 	}
 	userMu := ch.getUserMutex(userID)
 	userMu.Lock()
@@ -812,7 +812,9 @@ func (ch *CoreHandler) getCoreToolsForLLM() []openai.Tool {
 	return tools
 }
 
-// processWithTools handles the LLM call and tool execution loop
+// processWithTools handles the LLM call and tool execution loop.
+// SIMPLIFIED: Only uses currentMessages for the LLM loop. coreSession.Msgs is NOT updated here.
+// The caller (processOneMessageCore) is responsible for updating coreSession.Msgs with the final response.
 func (ch *CoreHandler) processWithTools(
 	ctx context.Context,
 	messages []openai.ChatCompletionMessage,
@@ -820,20 +822,19 @@ func (ch *CoreHandler) processWithTools(
 	userID string,
 	coreSession *model.Session,
 ) (string, error) {
-	maxIterations := 10
+	const maxIterations = 10
 	currentMessages := messages
 
-	// Update Core session model if different from stored model (only once before the loop)
+	// Set model name
 	modelName := ch.llmConfig.Model
 	if modelName == "" {
 		modelName = "openai/gpt-5-nano"
 	}
+
+	// Update session model if needed (once before loop)
 	if coreSession != nil && coreSession.Model != modelName {
 		coreSession.Model = modelName
-		// Save session to persist model name
-		if err := ch.saveCoreSession(coreSession); err != nil {
-			log.Log.Warnf("[CoreHandler] ⚠️  Failed to update Core session model | SessionID: %s | Error: %v", coreSession.SessionID, err)
-		}
+		_ = ch.saveCoreSession(coreSession)
 	}
 
 	// Ensure user_id is in context
@@ -847,10 +848,12 @@ func (ch *CoreHandler) processWithTools(
 	}
 
 	for i := 0; i < maxIterations; i++ {
-		// Notify status: thinking (model name only in metadata, not exposed to user)
+		log.Log.Infof("[CoreHandler] 🔄 processWithTools iteration %d/%d | UserID: %s | Messages: %d",
+			i+1, maxIterations, userID, len(currentMessages))
+
 		notifyStatus(ctx, userID, sessionID, StatusThinking, "")
 
-		// Make LLM call (tries backup provider first, then falls back to OpenAI)
+		// Call LLM
 		llmStart := time.Now()
 		resp, err := ch.callLLM(ctx, modelName, currentMessages, tools)
 		llmDuration := time.Since(llmStart)
@@ -864,109 +867,71 @@ func (ch *CoreHandler) processWithTools(
 
 		choice := resp.Choices[0]
 
-		// Callback: record LLM usage
+		// Record usage
 		if ch.Callback != nil {
-			ch.Callback.AfterAction(ctx, &UsageEvent{
-				UserID:    userID,
-				SessionID: sessionID,
-				EventType: EventLLMCall,
-				Name:      modelName,
-				Tokens:    resp.Usage.TotalTokens,
-				Duration:  llmDuration,
-			})
+			ev := &UsageEvent{
+				UserID:       userID,
+				SessionID:    sessionID,
+				EventType:    EventLLMCall,
+				Name:         modelName,
+				Tokens:       resp.Usage.TotalTokens,
+				InputTokens:  resp.Usage.PromptTokens,
+				OutputTokens: resp.Usage.CompletionTokens,
+				Model:        modelName,
+				Duration:     llmDuration,
+			}
+			if resp.Usage.PromptTokensDetails != nil {
+				ev.CachedInputTokens = resp.Usage.PromptTokensDetails.CachedTokens
+			}
+			ch.Callback.AfterAction(ctx, ev)
 		}
 
-		// Save message to database
-		request := openai.ChatCompletionRequest{
-			Model:    modelName,
-			Messages: currentMessages,
-			Tools:    tools,
-		}
+		// Save message to DB
+		request := openai.ChatCompletionRequest{Model: modelName, Messages: currentMessages, Tools: tools}
 		messageID := ch.saveCoreMessage(userID, request, resp, choice)
 
-		// If no tool calls: merge any queued messages and do one more LLM turn so all get one combined answer
+		log.Log.Infof("[CoreHandler] 📊 LLM response | Iteration: %d | FinishReason: %s | ToolCalls: %d | ContentLen: %d",
+			i+1, choice.FinishReason, len(choice.Message.ToolCalls), len(choice.Message.Content))
+
+		// No tool calls = final response
 		if len(choice.Message.ToolCalls) == 0 {
-			queued := ch.userProgress.DrainQueue(userID)
-			if len(queued) > 0 && coreSession != nil {
-				for _, text := range queued {
-					currentMessages = append(currentMessages, openai.ChatCompletionMessage{
-						Role:    openai.ChatMessageRoleUser,
-						Content: text,
-					})
-					coreSession.Msgs = append(coreSession.Msgs, openai.ChatCompletionMessage{
-						Role:    openai.ChatMessageRoleUser,
-						Content: text,
-					})
-					userMsgID, userSeqID := coreSession.GenerateMessageIDWithSeq()
-					userMsg := model.NewUserMessage(userMsgID, userSeqID, userID, coreSession.SessionID, text, model.ContentTypeText)
-					ch.saveMessage(userMsg)
-				}
-				_ = ch.saveCoreSession(coreSession)
-				// Continue loop to make one more LLM call with merged messages (no tools for this turn)
-				currentMessages = append(currentMessages, choice.Message)
-				continue
-			}
 			return choice.Message.Content, nil
 		}
 
-		// Add assistant message with tool calls
+		// Has tool calls - add assistant message to currentMessages
 		currentMessages = append(currentMessages, choice.Message)
 
-		// Execute each tool call; persistence (Put/Update) is done inside executeCoreToolWithPersistence so new tools need no extra code
-		queuedMerged := false
+		// Execute each tool
 		for _, toolCall := range choice.Message.ToolCalls {
-			result, err := ch.executeCoreToolWithPersistence(ctx, userID, sessionID, coreSession, messageID, toolCall)
-			if err != nil {
-				result = fmt.Sprintf("Error executing tool: %v", err)
-			}
+			result := ch.executeCoreTool(ctx, userID, sessionID, coreSession, messageID, toolCall)
 
-			// Add tool result
+			log.Log.Infof("[CoreHandler] 🔧 Tool executed | Name: %s | ResultLen: %d",
+				toolCall.Function.Name, len(result))
+
+			// Add tool result to currentMessages
 			currentMessages = append(currentMessages, openai.ChatCompletionMessage{
 				Role:       openai.ChatMessageRoleTool,
 				Content:    result,
 				ToolCallID: toolCall.ID,
 			})
-
-			// After first tool response: merge all queued user messages into this turn so they get one combined answer
-			if !queuedMerged {
-				queuedMerged = true
-				for _, text := range ch.userProgress.DrainQueue(userID) {
-					currentMessages = append(currentMessages, openai.ChatCompletionMessage{
-						Role:    openai.ChatMessageRoleUser,
-						Content: text,
-					})
-					if coreSession != nil {
-						coreSession.Msgs = append(coreSession.Msgs, openai.ChatCompletionMessage{
-							Role:    openai.ChatMessageRoleUser,
-							Content: text,
-						})
-						userMsgID, userSeqID := coreSession.GenerateMessageIDWithSeq()
-						userMsg := model.NewUserMessage(userMsgID, userSeqID, userID, coreSession.SessionID, text, model.ContentTypeText)
-						ch.saveMessage(userMsg)
-					}
-				}
-			}
 		}
 
-		// Save coreSession after all tool calls to persist ToolSeq (incremented by GenerateToolID)
-		// This ensures unique ToolIDs even across loop iterations
-		if coreSession != nil {
-			_ = ch.saveCoreSession(coreSession)
-		}
+		// Continue loop to process tool results
 	}
 
-	return "", fmt.Errorf("max iterations reached without final response")
+	return "", fmt.Errorf("max iterations (%d) reached without final response", maxIterations)
 }
 
-// executeCoreToolWithPersistence saves the tool call (Put), runs the tool, and updates the response (Update).
-// All tool executions go through here so new tools are persisted automatically without per-tool code.
-func (ch *CoreHandler) executeCoreToolWithPersistence(
+// executeCoreTool executes a Core tool and returns the result string.
+// Handles persistence, callbacks, and status notifications.
+func (ch *CoreHandler) executeCoreTool(
 	ctx context.Context,
 	userID, sessionID string,
 	coreSession *model.Session,
 	messageID string,
 	toolCall openai.ToolCall,
-) (string, error) {
+) string {
+	// Save tool call to DB
 	persister := ch.getToolCallPersister()
 	var toolID string
 	if coreSession != nil {
@@ -975,6 +940,7 @@ func (ch *CoreHandler) executeCoreToolWithPersistence(
 
 	notifyStatus(ctx, userID, sessionID, StatusToolExecuting, toolCall.Function.Name)
 
+	// Check callback before execution
 	if ch.Callback != nil {
 		if cbErr := ch.Callback.BeforeAction(ctx, &UsageEvent{
 			UserID:    userID,
@@ -984,10 +950,11 @@ func (ch *CoreHandler) executeCoreToolWithPersistence(
 		}); cbErr != nil {
 			result := fmt.Sprintf("Tool %s blocked: %v", toolCall.Function.Name, cbErr)
 			persister.Update(toolID, result)
-			return result, nil
+			return result
 		}
 	}
 
+	// Execute tool
 	toolStart := time.Now()
 	result, err := ch.runCoreToolImpl(ctx, userID, toolCall)
 	toolDuration := time.Since(toolStart)
@@ -995,6 +962,7 @@ func (ch *CoreHandler) executeCoreToolWithPersistence(
 		result = fmt.Sprintf("Error executing tool: %v", err)
 	}
 
+	// Callback after execution
 	if ch.Callback != nil {
 		ch.Callback.AfterAction(ctx, &UsageEvent{
 			UserID:    userID,
@@ -1005,10 +973,11 @@ func (ch *CoreHandler) executeCoreToolWithPersistence(
 			Error:     err,
 		})
 	}
-	notifyStatus(ctx, userID, sessionID, StatusToolDone, toolCall.Function.Name)
 
+	notifyStatus(ctx, userID, sessionID, StatusToolDone, toolCall.Function.Name)
 	persister.Update(toolID, result)
-	return result, err
+
+	return result
 }
 
 // runCoreToolImpl runs the Core tool logic (switch on tool name). Persistence is handled by executeCoreToolWithPersistence.
@@ -1145,14 +1114,6 @@ func (ch *CoreHandler) callUserAgent(
 		sessionID, len(response))
 
 	return response, nil
-}
-
-// getSessionTitleForLog returns session title or "Untitled"
-func getSessionTitleForLog(s *model.Session) string {
-	if s.Title != "" {
-		return s.Title
-	}
-	return "Untitled"
 }
 
 // createSessionTool creates a new session
@@ -1425,9 +1386,9 @@ func (ch *CoreHandler) banUserTool(_ context.Context, userID string, args map[st
 	message, _ := args["message"].(string)
 	if message == "" {
 		if durationHours == 0 {
-			message = "شما به صورت دائمی محدود شده‌اید."
+			message = "You have been permanently restricted."
 		} else {
-			message = fmt.Sprintf("شما به مدت %.0f ساعت محدود شده‌اید.", durationHours)
+			message = fmt.Sprintf("You have been restricted for %.0f hours.", durationHours)
 		}
 	}
 
@@ -1634,9 +1595,9 @@ func (ch *CoreHandler) ProcessMessageWithImage(
 	// Use a user-friendly message instead of technical MIME type
 	historyContent := userMessage
 	if historyContent == "" {
-		historyContent = "(کاربر یک تصویر ارسال کرد)"
+		historyContent = "(User sent an image)"
 	} else {
-		historyContent = fmt.Sprintf("(کاربر یک تصویر ارسال کرد) %s", userMessage)
+		historyContent = fmt.Sprintf("(User sent an image) %s", userMessage)
 	}
 	coreSession.Msgs = append(
 		coreSession.Msgs,
