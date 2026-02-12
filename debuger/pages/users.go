@@ -141,7 +141,7 @@ func RenderUserDetail(handler *debuger.DebugHandler, userID string, showDeletedS
 	})
 
 	if len(showDeletedSuccess) > 0 && showDeletedSuccess[0] {
-		content += components.SuccessAlert("All messages, sessions, quota and consumption for this user have been deleted successfully.")
+		content += components.SuccessAlert("All messages, sessions, quota, consumption and invoices for this user have been deleted successfully.")
 	}
 
 	// User info card
@@ -216,8 +216,8 @@ func RenderUserDetail(handler *debuger.DebugHandler, userID string, showDeletedS
 <div class="card mb-4">
     <div class="card-header d-flex justify-content-between align-items-center">
         <h4 class="mb-0"><i class="bi bi-person-fill me-2"></i>User Information</h4>
-        <form method="POST" action="%s" onsubmit="return confirm('Are you sure? All messages, sessions, quota usage and consumption for this user will be deleted.');" class="d-inline">
-            <button type="submit" class="btn btn-sm btn-outline-danger"><i class="bi bi-trash me-1"></i>Delete all user data (messages, sessions, quota, consumption)</button>
+        <form method="POST" action="%s" onsubmit="return confirm('Are you sure? All messages, sessions, quota, consumption and invoices for this user will be deleted.');" class="d-inline">
+            <button type="submit" class="btn btn-sm btn-outline-danger"><i class="bi bi-trash me-1"></i>Delete all user data (messages, sessions, quota, consumption, invoices)</button>
         </form>
     </div>
     <div class="card-body p-0">

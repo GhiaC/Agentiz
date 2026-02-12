@@ -9,7 +9,7 @@ func TestFunctionRegistry(t *testing.T) {
 	registry := NewFunctionRegistry()
 
 	// Test Register
-	err := registry.Register("test_tool", func(args map[string]interface{}) (string, error) {
+	err := registry.Register("test_tool", "", func(args map[string]interface{}) (string, error) {
 		return "success", nil
 	})
 	if err != nil {
@@ -17,7 +17,7 @@ func TestFunctionRegistry(t *testing.T) {
 	}
 
 	// Test duplicate registration
-	err = registry.Register("test_tool", func(args map[string]interface{}) (string, error) {
+	err = registry.Register("test_tool", "", func(args map[string]interface{}) (string, error) {
 		return "duplicate", nil
 	})
 	if err == nil {
@@ -92,10 +92,10 @@ func TestFunctionRegistryValidation(t *testing.T) {
 	toolRegistry := NewToolRegistry(MergeStrategyOverride)
 
 	// Register some functions
-	funcRegistry.MustRegister("tool1", func(args map[string]interface{}) (string, error) {
+	funcRegistry.MustRegister("tool1", "", func(args map[string]interface{}) (string, error) {
 		return "ok", nil
 	})
-	funcRegistry.MustRegister("tool2", func(args map[string]interface{}) (string, error) {
+	funcRegistry.MustRegister("tool2", "", func(args map[string]interface{}) (string, error) {
 		return "ok", nil
 	})
 
@@ -143,7 +143,7 @@ func TestFunctionRegistryValidation(t *testing.T) {
 	}
 
 	// Register missing function and validate again
-	funcRegistry.MustRegister("tool3", func(args map[string]interface{}) (string, error) {
+	funcRegistry.MustRegister("tool3", "", func(args map[string]interface{}) (string, error) {
 		return "ok", nil
 	})
 
@@ -158,7 +158,7 @@ func TestFunctionRegistryWithDisabledTools(t *testing.T) {
 	toolRegistry := NewToolRegistry(MergeStrategyOverride)
 
 	// Register function for active tool
-	funcRegistry.MustRegister("active_tool", func(args map[string]interface{}) (string, error) {
+	funcRegistry.MustRegister("active_tool", "", func(args map[string]interface{}) (string, error) {
 		return "ok", nil
 	})
 
@@ -209,7 +209,7 @@ func TestFunctionRegistry_DisableToolTemporarily(t *testing.T) {
 	fn1 := func(args map[string]interface{}) (string, error) {
 		return "working", nil
 	}
-	if err := registry.Register("test_tool", fn1); err != nil {
+	if err := registry.Register("test_tool", "", fn1); err != nil {
 		t.Fatalf("Failed to register: %v", err)
 	}
 

@@ -1342,7 +1342,13 @@ func (e *Engine) executeTool(
 	args["__user_id__"] = session.UserID
 	args["__session_id__"] = sessionID
 
-	notifyStatus(ctx, session.UserID, sessionID, StatusToolExecuting, toolCall.Function.Name)
+	toolDetail := toolCall.Function.Name
+	if e.Functions != nil {
+		if d := e.Functions.GetDisplayName(toolCall.Function.Name); d != "" {
+			toolDetail = d
+		}
+	}
+	notifyStatus(ctx, session.UserID, sessionID, StatusToolExecuting, toolDetail)
 
 	// Check callback before execution
 	if e.Callback != nil {
@@ -1384,7 +1390,7 @@ func (e *Engine) executeTool(
 		})
 	}
 
-	notifyStatus(ctx, session.UserID, sessionID, StatusToolDone, toolCall.Function.Name)
+	notifyStatus(ctx, session.UserID, sessionID, StatusToolDone, toolDetail)
 
 	// Process result (truncate if needed)
 	var processedResult string

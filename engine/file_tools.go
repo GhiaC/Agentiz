@@ -23,8 +23,8 @@ func (e *Engine) RegisterFileTools(registry *model.FunctionRegistry) {
 		return
 	}
 
-	registry.Register("open_file", e.createOpenFileFunction())
-	registry.Register("close_file", e.createCloseFileFunction())
+	registry.Register("open_file", "Open File", e.createOpenFileFunction())
+	registry.Register("close_file", "Close File", e.createCloseFileFunction())
 }
 
 // createOpenFileFunction creates the open_file tool function

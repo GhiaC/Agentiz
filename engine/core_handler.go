@@ -938,7 +938,11 @@ func (ch *CoreHandler) executeCoreTool(
 		toolID = persister.SaveWithAgentType(coreSession, messageID, toolCall, model.AgentTypeCore)
 	}
 
-	notifyStatus(ctx, userID, sessionID, StatusToolExecuting, toolCall.Function.Name)
+	toolDetail := ch.coreTools.GetDisplayName(toolCall.Function.Name)
+	if toolDetail == "" {
+		toolDetail = toolCall.Function.Name
+	}
+	notifyStatus(ctx, userID, sessionID, StatusToolExecuting, toolDetail)
 
 	// Check callback before execution
 	if ch.Callback != nil {
@@ -974,7 +978,7 @@ func (ch *CoreHandler) executeCoreTool(
 		})
 	}
 
-	notifyStatus(ctx, userID, sessionID, StatusToolDone, toolCall.Function.Name)
+	notifyStatus(ctx, userID, sessionID, StatusToolDone, toolDetail)
 	persister.Update(toolID, result)
 
 	return result
@@ -1219,10 +1223,21 @@ func (ch *CoreHandler) listSessionsTool(userID string) (string, error) {
 	return ch.sessionHandler.GetSessionsPrompt(userID)
 }
 
-// registerCoreTools registers the Core's internal tools
+// coreToolNoOp is a no-op used only for display-name registration; execution is in runCoreToolImpl switch
+var coreToolNoOp = func(args map[string]interface{}) (string, error) { return "", nil }
+
+// registerCoreTools registers the Core's internal tools with display names for status/UI.
+// The actual tool logic is in runCoreToolImpl; these registrations only provide GetDisplayName.
 func (ch *CoreHandler) registerCoreTools() {
-	// These are used internally by processWithTools
-	// The actual tool functions are handled in executeCoreTool
+	ch.coreTools.MustRegister("call_user_agent_high", "هوش سطح بالا", coreToolNoOp)
+	ch.coreTools.MustRegister("call_user_agent_low", "هوش سطح پایین", coreToolNoOp)
+	ch.coreTools.MustRegister("update_status", "به‌روزرسانی وضعیت", coreToolNoOp)
+	ch.coreTools.MustRegister("create_session", "ایجاد نشست", coreToolNoOp)
+	ch.coreTools.MustRegister("change_session", "تغییر نشست", coreToolNoOp)
+	ch.coreTools.MustRegister("list_sessions", "لیست نشست‌ها", coreToolNoOp)
+	ch.coreTools.MustRegister("ban_user", "مسدود کاربر", coreToolNoOp)
+	ch.coreTools.MustRegister("web_search", "جستجوی وب", coreToolNoOp)
+	ch.coreTools.MustRegister("web_search_deepresearch", "جستجوی وب (عمیق)", coreToolNoOp)
 }
 
 // GetSessionHandler returns the session handler for external access

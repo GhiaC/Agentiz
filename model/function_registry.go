@@ -9,28 +9,37 @@ import (
 // It receives a map of arguments and returns a result string and error
 type ToolFunction func(args map[string]interface{}) (string, error)
 
+// registeredEntry holds a tool function and its optional display name for UI/status
+type registeredEntry struct {
+	Fn          ToolFunction
+	DisplayName string
+}
+
 // FunctionRegistry manages the mapping between tool names and their Go functions
 // This registry must be populated at application startup with all available functions
 type FunctionRegistry struct {
 	mu        sync.RWMutex
-	functions map[string]ToolFunction // tool name -> function
+	functions map[string]registeredEntry // tool name -> function + display name
 }
 
 // NewFunctionRegistry creates a new function registry
 func NewFunctionRegistry() *FunctionRegistry {
 	return &FunctionRegistry{
-		functions: make(map[string]ToolFunction),
+		functions: make(map[string]registeredEntry),
 	}
 }
 
-// Register registers a function for a tool name
-// This should be called at application startup for all available tools
-func (fr *FunctionRegistry) Register(toolName string, fn ToolFunction) error {
+// Register registers a function for a tool name with an optional display name for UI/status.
+// If displayName is empty, toolName is used as the display name.
+func (fr *FunctionRegistry) Register(toolName string, displayName string, fn ToolFunction) error {
 	if toolName == "" {
 		return fmt.Errorf("tool name cannot be empty")
 	}
 	if fn == nil {
 		return fmt.Errorf("function cannot be nil for tool: %s", toolName)
+	}
+	if displayName == "" {
+		displayName = toolName
 	}
 
 	fr.mu.Lock()
@@ -40,31 +49,30 @@ func (fr *FunctionRegistry) Register(toolName string, fn ToolFunction) error {
 		return fmt.Errorf("function already registered for tool: %s", toolName)
 	}
 
-	fr.functions[toolName] = fn
+	fr.functions[toolName] = registeredEntry{Fn: fn, DisplayName: displayName}
 	return nil
 }
 
-// RegisterBatch registers multiple functions at once
+// RegisterBatch registers multiple functions at once (display name defaults to tool name)
 func (fr *FunctionRegistry) RegisterBatch(registrations map[string]ToolFunction) error {
 	for toolName, fn := range registrations {
-		if err := fr.Register(toolName, fn); err != nil {
+		if err := fr.Register(toolName, toolName, fn); err != nil {
 			return fmt.Errorf("failed to register %s: %w", toolName, err)
 		}
 	}
 	return nil
 }
 
-// MustRegister registers a function and panics if there's an error
-// Useful for initialization code where failures should be fatal
-func (fr *FunctionRegistry) MustRegister(toolName string, fn ToolFunction) {
-	if err := fr.Register(toolName, fn); err != nil {
+// MustRegister registers a function with an optional display name and panics if there's an error
+func (fr *FunctionRegistry) MustRegister(toolName string, displayName string, fn ToolFunction) {
+	if err := fr.Register(toolName, displayName, fn); err != nil {
 		panic(fmt.Sprintf("failed to register tool function %s: %v", toolName, err))
 	}
 }
 
-// RegisterOrReplace registers a function, replacing any existing registration
-// This is useful for runtime updates (e.g., disabling a tool due to quota)
-func (fr *FunctionRegistry) RegisterOrReplace(toolName string, fn ToolFunction) error {
+// RegisterOrReplace registers a function, replacing any existing registration.
+// If displayName is empty and the tool already exists, the existing display name is preserved.
+func (fr *FunctionRegistry) RegisterOrReplace(toolName string, displayName string, fn ToolFunction) error {
 	if toolName == "" {
 		return fmt.Errorf("tool name cannot be empty")
 	}
@@ -75,7 +83,15 @@ func (fr *FunctionRegistry) RegisterOrReplace(toolName string, fn ToolFunction) 
 	fr.mu.Lock()
 	defer fr.mu.Unlock()
 
-	fr.functions[toolName] = fn
+	entry := registeredEntry{Fn: fn, DisplayName: displayName}
+	if displayName == "" {
+		if existing, ok := fr.functions[toolName]; ok {
+			entry.DisplayName = existing.DisplayName
+		} else {
+			entry.DisplayName = toolName
+		}
+	}
+	fr.functions[toolName] = entry
 	return nil
 }
 
@@ -105,7 +121,21 @@ func (fr *FunctionRegistry) DisableToolTemporarily(toolName string, reason Disab
 		}
 	}
 
-	return fr.RegisterOrReplace(toolName, disabledFn)
+	return fr.RegisterOrReplace(toolName, "", disabledFn)
+}
+
+// GetDisplayName returns the display name for a tool, or toolName if not set, or empty if not registered
+func (fr *FunctionRegistry) GetDisplayName(toolName string) string {
+	fr.mu.RLock()
+	defer fr.mu.RUnlock()
+	entry, ok := fr.functions[toolName]
+	if !ok {
+		return ""
+	}
+	if entry.DisplayName != "" {
+		return entry.DisplayName
+	}
+	return toolName
 }
 
 // Get retrieves a function for a tool name
@@ -113,8 +143,8 @@ func (fr *FunctionRegistry) Get(toolName string) (ToolFunction, bool) {
 	fr.mu.RLock()
 	defer fr.mu.RUnlock()
 
-	fn, ok := fr.functions[toolName]
-	return fn, ok
+	entry, ok := fr.functions[toolName]
+	return entry.Fn, ok
 }
 
 // Execute executes a tool function by name
