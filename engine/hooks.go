@@ -65,7 +65,7 @@ type UsageEvent struct {
 	UserID    string
 	SessionID string
 	EventType EventType
-	Name      string // tool name, model name, or agent type
+	Name      string // for LLM: use EventNameLLMCall; for tool_call: tool name; for agent_routing: agent type (e.g. high, low)
 	Tokens    int    // token count (for LLM calls) - deprecated, use Input/Output/Cached
 	// Detailed token counts for LLM calls (Credit+Usage billing)
 	InputTokens       int
@@ -86,6 +86,9 @@ const (
 	EventAgentRouting EventType = "agent_routing"
 )
 
+// EventNameLLMCall is the fixed Name for UsageEvent when EventType is EventLLMCall. Use Model for the actual model id.
+const EventNameLLMCall = "llm_call"
+
 // Callback is the global hook interface for billing and usage metering.
 // Set once on CoreHandler/Engine at initialization.
 type Callback interface {
@@ -95,4 +98,13 @@ type Callback interface {
 
 	// AfterAction is called after completion for recording usage.
 	AfterAction(ctx context.Context, event *UsageEvent)
+}
+
+// FormatBlockedActionResult returns the string to use as the result when BeforeAction blocks.
+// The callback error message is returned as-is so the app (e.g. Billing) can use a consistent template.
+func FormatBlockedActionResult(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }

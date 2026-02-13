@@ -864,6 +864,19 @@ func (ch *CoreHandler) processWithTools(
 
 		notifyStatus(ctx, userID, sessionID, StatusThinking, "")
 
+		// BeforeAction: check quota/credit before LLM call (block without consuming tokens)
+		if ch.Callback != nil {
+			if cbErr := ch.Callback.BeforeAction(ctx, &UsageEvent{
+				UserID:    userID,
+				SessionID: sessionID,
+				EventType: EventLLMCall,
+				Name:      EventNameLLMCall,
+				Model:     modelName,
+			}); cbErr != nil {
+				return cbErr.Error(), nil
+			}
+		}
+
 		// Call LLM
 		llmStart := time.Now()
 		resp, err := ch.callLLM(ctx, modelName, currentMessages, tools)
@@ -884,7 +897,7 @@ func (ch *CoreHandler) processWithTools(
 				UserID:       userID,
 				SessionID:    sessionID,
 				EventType:    EventLLMCall,
-				Name:         modelName,
+				Name:         EventNameLLMCall,
 				Tokens:       resp.Usage.TotalTokens,
 				InputTokens:  resp.Usage.PromptTokens,
 				OutputTokens: resp.Usage.CompletionTokens,
@@ -963,7 +976,7 @@ func (ch *CoreHandler) executeCoreTool(
 			EventType: EventToolCall,
 			Name:      toolCall.Function.Name,
 		}); cbErr != nil {
-			result := fmt.Sprintf("Tool %s blocked: %v", toolCall.Function.Name, cbErr)
+			result := FormatBlockedActionResult(cbErr)
 			persister.Update(toolID, result)
 			return result
 		}
@@ -971,7 +984,7 @@ func (ch *CoreHandler) executeCoreTool(
 
 	// Execute tool
 	toolStart := time.Now()
-	result, err := ch.runCoreToolImpl(ctx, userID, toolCall)
+	result, err := ch.runCoreToolImpl(ctx, userID, sessionID, toolCall)
 	toolDuration := time.Since(toolStart)
 	if err != nil {
 		result = fmt.Sprintf("Error executing tool: %v", err)
@@ -998,7 +1011,7 @@ func (ch *CoreHandler) executeCoreTool(
 // runCoreToolImpl runs the Core tool logic (switch on tool name). Persistence is handled by executeCoreToolWithPersistence.
 func (ch *CoreHandler) runCoreToolImpl(
 	ctx context.Context,
-	userID string,
+	userID, sessionID string,
 	toolCall openai.ToolCall,
 ) (string, error) {
 	var args map[string]interface{}
@@ -1008,33 +1021,35 @@ func (ch *CoreHandler) runCoreToolImpl(
 
 	switch toolCall.Function.Name {
 	case "call_user_agent_high":
-		notifyStatus(ctx, userID, "", StatusAgentCalling, "high")
+		agentType := model.AgentTypeHigh
+		notifyStatus(ctx, userID, "", StatusAgentCalling, string(agentType))
 		if ch.Callback != nil {
 			if cbErr := ch.Callback.BeforeAction(ctx, &UsageEvent{
-				UserID: userID, EventType: EventAgentRouting, Name: "high",
+				UserID: userID, EventType: EventAgentRouting, Name: string(agentType),
 			}); cbErr != nil {
-				return fmt.Sprintf("Agent high blocked: %v", cbErr), nil
+				return FormatBlockedActionResult(cbErr), nil
 			}
 		}
-		result, err := ch.callUserAgent(ctx, userID, args, ch.userAgentHigh, model.AgentTypeHigh)
+		result, err := ch.callUserAgent(ctx, userID, args, ch.userAgentHigh, agentType)
 		if ch.Callback != nil {
 			ch.Callback.AfterAction(ctx, &UsageEvent{
-				UserID: userID, EventType: EventAgentRouting, Name: "high", Error: err,
+				UserID: userID, SessionID: sessionID, EventType: EventAgentRouting, Name: string(agentType), Error: err,
 			})
 		}
-		notifyStatus(ctx, userID, "", StatusAgentDone, "high")
+		notifyStatus(ctx, userID, "", StatusAgentDone, string(agentType))
 		return result, err
 
 	case "call_user_agent_low":
-		notifyStatus(ctx, userID, "", StatusAgentCalling, "low")
+		agentType := model.AgentTypeLow
+		notifyStatus(ctx, userID, "", StatusAgentCalling, string(agentType))
 		if ch.Callback != nil {
 			if cbErr := ch.Callback.BeforeAction(ctx, &UsageEvent{
-				UserID: userID, EventType: EventAgentRouting, Name: "low",
+				UserID: userID, EventType: EventAgentRouting, Name: string(agentType),
 			}); cbErr != nil {
-				return fmt.Sprintf("Agent low blocked: %v", cbErr), nil
+				return FormatBlockedActionResult(cbErr), nil
 			}
 		}
-		result, err := ch.callUserAgent(ctx, userID, args, ch.userAgentLow, model.AgentTypeLow)
+		result, err := ch.callUserAgent(ctx, userID, args, ch.userAgentLow, agentType)
 		if err != nil {
 			return "", err
 		}
@@ -1042,26 +1057,26 @@ func (ch *CoreHandler) runCoreToolImpl(
 		if strings.HasPrefix(strings.TrimSpace(result), "ESCALATE:") {
 			if ch.Callback != nil {
 				ch.Callback.AfterAction(ctx, &UsageEvent{
-					UserID: userID, EventType: EventAgentRouting, Name: "low",
+					UserID: userID, SessionID: sessionID, EventType: EventAgentRouting, Name: string(agentType),
 				})
 			}
-			notifyStatus(ctx, userID, "", StatusAgentCalling, "high (escalated)")
+			notifyStatus(ctx, userID, "", StatusAgentCalling, string(model.AgentTypeHigh)+" (escalated)")
 			// Auto-escalate to high model
 			result, err = ch.callUserAgent(ctx, userID, args, ch.userAgentHigh, model.AgentTypeHigh)
 			if ch.Callback != nil {
 				ch.Callback.AfterAction(ctx, &UsageEvent{
-					UserID: userID, EventType: EventAgentRouting, Name: "high", Error: err,
+					UserID: userID, SessionID: sessionID, EventType: EventAgentRouting, Name: string(model.AgentTypeHigh), Error: err,
 				})
 			}
-			notifyStatus(ctx, userID, "", StatusAgentDone, "high")
+			notifyStatus(ctx, userID, "", StatusAgentDone, string(model.AgentTypeHigh))
 			return result, err
 		}
 		if ch.Callback != nil {
 			ch.Callback.AfterAction(ctx, &UsageEvent{
-				UserID: userID, EventType: EventAgentRouting, Name: "low",
+				UserID: userID, SessionID: sessionID, EventType: EventAgentRouting, Name: string(agentType),
 			})
 		}
-		notifyStatus(ctx, userID, "", StatusAgentDone, "low")
+		notifyStatus(ctx, userID, "", StatusAgentDone, string(agentType))
 		return result, nil
 
 	case "update_status":

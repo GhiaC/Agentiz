@@ -1181,6 +1181,19 @@ func (e *Engine) processChatRequest(
 
 		notifyStatus(ctx, session.UserID, sessionID, StatusThinking, "")
 
+		// BeforeAction: check quota/credit before LLM call (block without consuming tokens)
+		if e.Callback != nil {
+			if cbErr := e.Callback.BeforeAction(ctx, &UsageEvent{
+				UserID:    session.UserID,
+				SessionID: sessionID,
+				EventType: EventLLMCall,
+				Name:      EventNameLLMCall,
+				Model:     modelName,
+			}); cbErr != nil {
+				return cbErr.Error(), totalTokenUsage, nil
+			}
+		}
+
 		// Call LLM
 		llmStart := time.Now()
 		resp, err := e.callLLM(ctx, modelName, reqMessages, openaiTools)
@@ -1202,7 +1215,7 @@ func (e *Engine) processChatRequest(
 				UserID:       session.UserID,
 				SessionID:    sessionID,
 				EventType:    EventLLMCall,
-				Name:         modelName,
+				Name:         EventNameLLMCall,
 				Tokens:       resp.Usage.TotalTokens,
 				InputTokens:  resp.Usage.PromptTokens,
 				OutputTokens: resp.Usage.CompletionTokens,
@@ -1358,7 +1371,7 @@ func (e *Engine) executeTool(
 			EventType: EventToolCall,
 			Name:      toolCall.Function.Name,
 		}); cbErr != nil {
-			result := fmt.Sprintf("Tool %s blocked: %v", toolCall.Function.Name, cbErr)
+			result := FormatBlockedActionResult(cbErr)
 			if persister != nil {
 				persister.Update(toolID, result)
 			}
