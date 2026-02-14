@@ -1470,6 +1470,10 @@ func (ch *CoreHandler) webSearchWithModelTool(ctx context.Context, userID string
 		return "", fmt.Errorf("web search failed: %w", err)
 	}
 	log.Log.Infof("[CoreHandler] ✅ Web search completed | UserID: %s | Query: %s | Result length: %d chars", userID, query, len(result))
+	if result != "" {
+		initialMessage := FormatWebSearchInitialMessage(result, 0)
+		notifyStatus(ctx, userID, "", StatusCustom, initialMessage, OptSendAsNewMessage())
+	}
 	return result, nil
 }
 

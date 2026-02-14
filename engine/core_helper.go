@@ -105,6 +105,35 @@ func IsNonsenseMessageFast(message string) bool {
 	return false
 }
 
+// Default max runes for the initial web search message shown to the user.
+const webSearchInitialMaxRunes = 1024
+
+// FormatWebSearchInitialMessage builds a short, user-facing "initial result" message from a full search result.
+// If maxRunes <= 0, webSearchInitialMaxRunes is used. Truncation prefers word/sentence boundaries and appends "…" when truncated.
+func FormatWebSearchInitialMessage(result string, maxRunes int) string {
+	const header = "🔍 نتیجه اولیه جستجو\n\n"
+	trimmed := strings.TrimSpace(result)
+	if trimmed == "" {
+		return header + "—"
+	}
+	if maxRunes <= 0 {
+		maxRunes = webSearchInitialMaxRunes
+	}
+	runes := []rune(trimmed)
+	if len(runes) <= maxRunes {
+		return header + trimmed
+	}
+	// Prefer cut at last space before limit; otherwise hard cut
+	cut := maxRunes
+	for i := cut - 1; i >= 0 && i < len(runes); i-- {
+		if runes[i] == ' ' || runes[i] == '\n' || runes[i] == '.' || runes[i] == '۔' {
+			cut = i + 1
+			break
+		}
+	}
+	return header + string(runes[:cut]) + "…"
+}
+
 // Search model names for web search capability
 const (
 	DefaultSearchModel            = "openai/gpt-4o-mini-search-preview"

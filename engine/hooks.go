@@ -31,6 +31,16 @@ type StatusUpdate struct {
 	Phase     StatusPhase
 	Detail    string                 // human-readable detail: tool name, model name, etc.
 	Metadata  map[string]interface{} // extensible
+	// SendAsNewMessage: when true, the receiver should send a new message instead of editing the status message.
+	SendAsNewMessage bool
+}
+
+// NotifyOption modifies a StatusUpdate before it is passed to the StatusFunc.
+type NotifyOption func(*StatusUpdate)
+
+// OptSendAsNewMessage sets SendAsNewMessage on the StatusUpdate so the client sends a new message instead of editing.
+func OptSendAsNewMessage() NotifyOption {
+	return func(s *StatusUpdate) { s.SendAsNewMessage = true }
 }
 
 // StatusFunc is a per-request callback for real-time status updates.
@@ -47,14 +57,19 @@ func WithStatusFunc(ctx context.Context, fn StatusFunc) context.Context {
 
 // notifyStatus is the internal helper called throughout the engine.
 // Safe to call even if no StatusFunc is set (no-op).
-func notifyStatus(ctx context.Context, userID, sessionID string, phase StatusPhase, detail string) {
+// Optional opts are applied to the StatusUpdate before passing to the callback.
+func notifyStatus(ctx context.Context, userID, sessionID string, phase StatusPhase, detail string, opts ...NotifyOption) {
 	if fn, ok := ctx.Value(statusCtxKey{}).(StatusFunc); ok && fn != nil {
-		fn(&StatusUpdate{
+		su := &StatusUpdate{
 			UserID:    userID,
 			SessionID: sessionID,
 			Phase:     phase,
 			Detail:    detail,
-		})
+		}
+		for _, opt := range opts {
+			opt(su)
+		}
+		fn(su)
 	}
 }
 
