@@ -1373,7 +1373,7 @@ func (e *Engine) executeTool(
 		}); cbErr != nil {
 			result := FormatBlockedActionResult(cbErr)
 			if persister != nil {
-				persister.Update(toolID, result)
+				persister.Update(toolID, result, cbErr)
 			}
 			return result
 		}
@@ -1415,7 +1415,7 @@ func (e *Engine) executeTool(
 
 	// Update persister with result
 	if persister != nil {
-		persister.Update(toolID, processedResult)
+		persister.Update(toolID, processedResult, err)
 	}
 
 	return processedResult

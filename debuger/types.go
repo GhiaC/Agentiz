@@ -55,6 +55,8 @@ type ToolCallInfo struct {
 	Result       string
 	ResultLength int
 	DurationMs   int64
+	Status       string // pending, success, failed
+	Error        string // error message when status=failed
 	CreatedAt    time.Time
 }
 

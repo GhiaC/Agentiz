@@ -407,6 +407,8 @@ func ConvertToolCallsToInfo(toolCalls []*model.ToolCall) []debuger.ToolCallInfo 
 			Result:       tc.Response,
 			ResultLength: tc.ResponseLength,
 			DurationMs:   tc.DurationMs,
+			Status:       tc.Status,
+			Error:        tc.Error,
 			CreatedAt:    tc.CreatedAt,
 		}
 	}

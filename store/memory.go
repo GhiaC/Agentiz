@@ -384,8 +384,8 @@ func (s *DBStore) PutToolCall(toolCall *model.ToolCall) error {
 }
 
 // UpdateToolCallResponse updates the response for a tool call (delegates to SQLiteStore)
-func (s *DBStore) UpdateToolCallResponse(toolID string, response string) error {
-	return s.sqliteStore.UpdateToolCallResponse(toolID, response)
+func (s *DBStore) UpdateToolCallResponse(toolID string, response string, execErr error) error {
+	return s.sqliteStore.UpdateToolCallResponse(toolID, response, execErr)
 }
 
 // DeleteUserData deletes all sessions, messages, tool calls, summarization logs,

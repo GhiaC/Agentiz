@@ -233,6 +233,9 @@ func (s *SQLiteStore) migrateAddMessageTypeColumns() error {
 	_, _ = s.db.Exec(`ALTER TABLE tool_calls ADD COLUMN duration_ms INTEGER DEFAULT 0`)
 	// Add tool_id to tool_calls table (for sequential tool IDs)
 	_, _ = s.db.Exec(`ALTER TABLE tool_calls ADD COLUMN tool_id TEXT DEFAULT ''`)
+	// Add status and error to tool_calls table (pending|success|failed)
+	_, _ = s.db.Exec(`ALTER TABLE tool_calls ADD COLUMN status TEXT DEFAULT 'pending'`)
+	_, _ = s.db.Exec(`ALTER TABLE tool_calls ADD COLUMN error TEXT DEFAULT ''`)
 	// Ignore errors if columns already exist
 	return nil
 }
@@ -1547,11 +1550,15 @@ func (s *SQLiteStore) PutToolCall(toolCall *model.ToolCall) error {
 	createdAt := toolCall.CreatedAt.Unix()
 	updatedAt := toolCall.UpdatedAt.Unix()
 
+	status := toolCall.Status
+	if status == "" {
+		status = model.ToolCallStatusPending
+	}
 	// Use INSERT OR REPLACE for upsert behavior
 	_, err := s.db.Exec(
 		`INSERT OR REPLACE INTO tool_calls (
-			tool_call_id, tool_id, message_id, session_id, user_id, agent_type, function_name, arguments, response, response_length, duration_ms, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			tool_call_id, tool_id, message_id, session_id, user_id, agent_type, function_name, arguments, response, response_length, duration_ms, status, error, created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		toolCall.ToolCallID,
 		toolCall.ToolID,
 		toolCall.MessageID,
@@ -1563,6 +1570,8 @@ func (s *SQLiteStore) PutToolCall(toolCall *model.ToolCall) error {
 		toolCall.Response,
 		toolCall.ResponseLength,
 		toolCall.DurationMs,
+		status,
+		toolCall.Error,
 		createdAt,
 		updatedAt,
 	)
@@ -1574,14 +1583,22 @@ func (s *SQLiteStore) PutToolCall(toolCall *model.ToolCall) error {
 	return nil
 }
 
-// UpdateToolCallResponse updates the response for a tool call by ToolID and calculates duration
-func (s *SQLiteStore) UpdateToolCallResponse(toolID string, response string) error {
+// UpdateToolCallResponse updates the response for a tool call by ToolID and calculates duration.
+// When execErr != nil, sets status='failed' and error=execErr.Error().
+func (s *SQLiteStore) UpdateToolCallResponse(toolID string, response string, execErr error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	now := time.Now()
 	updatedAt := now.Unix()
 	responseLength := utf8.RuneCountInString(response)
+
+	status := model.ToolCallStatusSuccess
+	errorMsg := ""
+	if execErr != nil {
+		status = model.ToolCallStatusFailed
+		errorMsg = execErr.Error()
+	}
 
 	// Get created_at to calculate duration (look up by tool_id)
 	var createdAtUnix int64
@@ -1598,11 +1615,13 @@ func (s *SQLiteStore) UpdateToolCallResponse(toolID string, response string) err
 
 	_, err = s.db.Exec(
 		`UPDATE tool_calls 
-		 SET response = ?, response_length = ?, duration_ms = ?, updated_at = ? 
+		 SET response = ?, response_length = ?, duration_ms = ?, status = ?, error = ?, updated_at = ? 
 		 WHERE tool_id = ?`,
 		response,
 		responseLength,
 		durationMs,
+		status,
+		errorMsg,
 		updatedAt,
 		toolID,
 	)
@@ -1620,7 +1639,7 @@ func (s *SQLiteStore) GetToolCallsBySession(sessionID string) ([]*model.ToolCall
 	defer s.mu.RUnlock()
 
 	rows, err := s.db.Query(
-		`SELECT tool_call_id, tool_id, message_id, session_id, user_id, agent_type, function_name, arguments, response, response_length, duration_ms, created_at, updated_at
+		`SELECT tool_call_id, tool_id, message_id, session_id, user_id, agent_type, function_name, arguments, response, response_length, duration_ms, status, error, created_at, updated_at
 		FROM tool_calls WHERE session_id = ? ORDER BY created_at DESC`,
 		sessionID,
 	)
@@ -1647,6 +1666,8 @@ func (s *SQLiteStore) GetToolCallsBySession(sessionID string) ([]*model.ToolCall
 			&tc.Response,
 			&tc.ResponseLength,
 			&tc.DurationMs,
+			&tc.Status,
+			&tc.Error,
 			&createdAt,
 			&updatedAt,
 		)
@@ -1673,7 +1694,7 @@ func (s *SQLiteStore) GetAllToolCalls() ([]*model.ToolCall, error) {
 	defer s.mu.RUnlock()
 
 	rows, err := s.db.Query(
-		`SELECT tool_call_id, tool_id, message_id, session_id, user_id, agent_type, function_name, arguments, response, response_length, duration_ms, created_at, updated_at
+		`SELECT tool_call_id, tool_id, message_id, session_id, user_id, agent_type, function_name, arguments, response, response_length, duration_ms, status, error, created_at, updated_at
 		FROM tool_calls ORDER BY created_at DESC`,
 	)
 	if err != nil {
@@ -1699,6 +1720,8 @@ func (s *SQLiteStore) GetAllToolCalls() ([]*model.ToolCall, error) {
 			&tc.Response,
 			&tc.ResponseLength,
 			&tc.DurationMs,
+			&tc.Status,
+			&tc.Error,
 			&createdAt,
 			&updatedAt,
 		)
@@ -1725,7 +1748,7 @@ func (s *SQLiteStore) GetToolCallByID(toolCallID string) (*model.ToolCall, error
 	defer s.mu.RUnlock()
 
 	row := s.db.QueryRow(
-		`SELECT tool_call_id, tool_id, message_id, session_id, user_id, agent_type, function_name, arguments, response, response_length, duration_ms, created_at, updated_at
+		`SELECT tool_call_id, tool_id, message_id, session_id, user_id, agent_type, function_name, arguments, response, response_length, duration_ms, status, error, created_at, updated_at
 		FROM tool_calls WHERE tool_call_id = ?`,
 		toolCallID,
 	)
@@ -1746,6 +1769,8 @@ func (s *SQLiteStore) GetToolCallByID(toolCallID string) (*model.ToolCall, error
 		&tc.Response,
 		&tc.ResponseLength,
 		&tc.DurationMs,
+		&tc.Status,
+		&tc.Error,
 		&createdAt,
 		&updatedAt,
 	)
@@ -1766,7 +1791,7 @@ func (s *SQLiteStore) GetToolCallByToolID(toolID string) (*model.ToolCall, error
 	defer s.mu.RUnlock()
 
 	row := s.db.QueryRow(
-		`SELECT tool_call_id, tool_id, message_id, session_id, user_id, agent_type, function_name, arguments, response, response_length, duration_ms, created_at, updated_at
+		`SELECT tool_call_id, tool_id, message_id, session_id, user_id, agent_type, function_name, arguments, response, response_length, duration_ms, status, error, created_at, updated_at
 		FROM tool_calls WHERE tool_id = ?`,
 		toolID,
 	)
@@ -1787,6 +1812,8 @@ func (s *SQLiteStore) GetToolCallByToolID(toolID string) (*model.ToolCall, error
 		&tc.Response,
 		&tc.ResponseLength,
 		&tc.DurationMs,
+		&tc.Status,
+		&tc.Error,
 		&createdAt,
 		&updatedAt,
 	)

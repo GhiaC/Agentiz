@@ -68,11 +68,22 @@ func ToolCallTableRow(tc *debuger.ToolCallInfo, config ToolCallRowConfig, rowInd
 	durationDisplay := debuger.FormatDurationMs(tc.DurationMs)
 
 	// Status badge
-	statusBadge := BadgeWithIcon("Success", "✅", "success")
-	if tc.Result == "" {
+	var statusBadge string
+	switch tc.Status {
+	case "failed":
+		statusBadge = BadgeWithIcon("Failed", "❌", "danger")
+	case "success":
+		statusBadge = BadgeWithIcon("Success", "✅", "success")
+	case "pending":
 		statusBadge = Badge("Pending", "warning text-dark")
-	} else if len(tc.Result) > 0 && tc.ResultLength == 0 {
-		statusBadge = Badge("Empty", "secondary")
+	default:
+		if tc.Result == "" {
+			statusBadge = Badge("Pending", "warning text-dark")
+		} else if len(tc.Result) > 0 && tc.ResultLength == 0 {
+			statusBadge = Badge("Empty", "secondary")
+		} else {
+			statusBadge = BadgeWithIcon("Success", "✅", "success")
+		}
 	}
 
 	// Build the collapsed row
@@ -138,6 +149,11 @@ func ToolCallTableRow(tc *debuger.ToolCallInfo, config ToolCallRowConfig, rowInd
 	// Format created/updated times
 	createdAtDisplay := formatDateTime(tc.CreatedAt)
 
+	errorRow := ""
+	if tc.Error != "" {
+		errorRow = fmt.Sprintf(`<tr><th class="text-muted text-danger">Error</th><td class="text-danger">%s</td></tr>`, template.HTMLEscapeString(tc.Error))
+	}
+
 	html += fmt.Sprintf(`<tr id="%s-details" style="display: none;" class="table-light">
 		<td colspan="%d">
 			<div class="p-3">
@@ -159,6 +175,7 @@ func ToolCallTableRow(tc *debuger.ToolCallInfo, config ToolCallRowConfig, rowInd
 							<tr><th class="text-muted">Duration</th><td>%s</td></tr>
 							<tr><th class="text-muted">Result Length</th><td>%s</td></tr>
 							<tr><th class="text-muted">Status</th><td>%s</td></tr>
+							%s
 						</table>
 					</div>
 				</div>
@@ -190,6 +207,7 @@ func ToolCallTableRow(tc *debuger.ToolCallInfo, config ToolCallRowConfig, rowInd
 		durationDisplay,
 		resultLenDisplay,
 		statusBadge,
+		errorRow,
 		template.HTMLEscapeString(tc.Arguments),
 		template.HTMLEscapeString(tc.Result),
 		config.BaseURL, template.URLQueryEscaper(tc.ToolID),

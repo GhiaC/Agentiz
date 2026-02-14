@@ -31,7 +31,7 @@ func formatToolCallsContent(toolCalls []openai.ToolCall) string {
 // Implemented by store.MongoDBStore and store.SQLiteStore.
 type ToolCallStore interface {
 	PutToolCall(*model.ToolCall) error
-	UpdateToolCallResponse(toolID string, response string) error
+	UpdateToolCallResponse(toolID string, response string, err error) error
 }
 
 // ToolCallPersister provides tool call persistence functionality.
@@ -83,6 +83,7 @@ func (p *ToolCallPersister) Save(
 		FunctionName: toolCall.Function.Name,
 		Arguments:    toolCall.Function.Arguments,
 		Response:     "",
+		Status:       model.ToolCallStatusPending,
 		CreatedAt:    now,
 		UpdatedAt:    now,
 	}
@@ -121,6 +122,7 @@ func (p *ToolCallPersister) SaveWithAgentType(
 		FunctionName: toolCall.Function.Name,
 		Arguments:    toolCall.Function.Arguments,
 		Response:     "",
+		Status:       model.ToolCallStatusPending,
 		CreatedAt:    now,
 		UpdatedAt:    now,
 	}
@@ -137,17 +139,22 @@ func (p *ToolCallPersister) SaveWithAgentType(
 }
 
 // Update updates the response for a tool call by ToolID.
+// When execErr != nil: sets Status=failed, Error=execErr.Error(), Response=response (error message).
 // Does nothing if toolID is empty.
-func (p *ToolCallPersister) Update(toolID, response string) {
+func (p *ToolCallPersister) Update(toolID, response string, execErr error) {
 	if p == nil || p.store == nil || toolID == "" {
 		return
 	}
 
-	if err := p.store.UpdateToolCallResponse(toolID, response); err != nil {
+	if err := p.store.UpdateToolCallResponse(toolID, response, execErr); err != nil {
 		log.Log.Warnf("[%s] ⚠️  Failed to update tool call response | ToolID: %s | Error: %v",
 			p.logger, toolID, err)
 	} else {
-		log.Log.Infof("[%s] ✅ Tool call response updated | ToolID: %s", p.logger, toolID)
+		if execErr != nil {
+			log.Log.Infof("[%s] ⚠️ Tool call failed, saved status | ToolID: %s | Err: %v", p.logger, toolID, execErr)
+		} else {
+			log.Log.Infof("[%s] ✅ Tool call response updated | ToolID: %s", p.logger, toolID)
+		}
 	}
 }
 

@@ -71,7 +71,7 @@ func TestToolCallPersister_IntegrationWithSQLite(t *testing.T) {
 	t.Logf("Saved tool call with ID: %s", toolID)
 
 	// Update the response
-	persister.Update(toolID, `{"price": 50000, "currency": "USD"}`)
+	persister.Update(toolID, `{"price": 50000, "currency": "USD"}`, nil)
 
 	// Retrieve and verify
 	savedToolCalls, err := sqliteStore.GetAllToolCalls()
@@ -109,6 +109,7 @@ type mockToolCallStore struct {
 type updateCall struct {
 	toolID   string
 	response string
+	execErr  error
 }
 
 func (m *mockToolCallStore) PutToolCall(tc *model.ToolCall) error {
@@ -120,12 +121,12 @@ func (m *mockToolCallStore) PutToolCall(tc *model.ToolCall) error {
 	return nil
 }
 
-func (m *mockToolCallStore) UpdateToolCallResponse(toolID, response string) error {
+func (m *mockToolCallStore) UpdateToolCallResponse(toolID, response string, execErr error) error {
 	m.updateCallCount++
 	if m.updateErr != nil {
 		return m.updateErr
 	}
-	m.updateCalls = append(m.updateCalls, updateCall{toolID: toolID, response: response})
+	m.updateCalls = append(m.updateCalls, updateCall{toolID: toolID, response: response, execErr: execErr})
 	return nil
 }
 
@@ -287,7 +288,7 @@ func TestToolCallPersister_Update(t *testing.T) {
 	store := &mockSessionStore{}
 	p := NewToolCallPersister(store, "Test")
 
-	p.Update("tool-001", "result data")
+	p.Update("tool-001", "result data", nil)
 
 	if len(store.updateCalls) != 1 {
 		t.Fatalf("expected 1 UpdateToolCallResponse call, got %d", len(store.updateCalls))
@@ -306,7 +307,7 @@ func TestToolCallPersister_Update_EmptyToolID(t *testing.T) {
 	p := NewToolCallPersister(store, "Test")
 
 	// Should not call store when toolID is empty
-	p.Update("", "some response")
+	p.Update("", "some response", nil)
 
 	if len(store.updateCalls) != 0 {
 		t.Errorf("expected no UpdateToolCallResponse calls for empty toolID, got %d", len(store.updateCalls))
@@ -319,7 +320,7 @@ func TestToolCallPersister_Update_Error(t *testing.T) {
 	p := NewToolCallPersister(store, "Test")
 
 	// Should not panic, just log the error
-	p.Update("tool-001", "result")
+	p.Update("tool-001", "result", nil)
 
 	if store.updateCallCount != 1 {
 		t.Errorf("expected Update to be called, count=%d", store.updateCallCount)
@@ -348,7 +349,7 @@ func TestToolCallPersister_NilPersister(t *testing.T) {
 	}
 
 	// Should not panic
-	p.Update("tool-1", "response")
+	p.Update("tool-1", "response", nil)
 }
 
 func TestToolCallPersister_SaveGeneratesSequentialToolIDs(t *testing.T) {

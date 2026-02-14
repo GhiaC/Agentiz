@@ -258,7 +258,19 @@ type ToolCall struct {
 	// DurationMs is the execution time in milliseconds (from creation to response)
 	DurationMs int64
 
+	// Status: "pending", "success", "failed"
+	Status string
+
+	// Error holds the error message when Status is "failed"
+	Error string
+
 	// Metadata
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }
+
+const (
+	ToolCallStatusPending = "pending"
+	ToolCallStatusSuccess = "success"
+	ToolCallStatusFailed  = "failed"
+)

@@ -1546,8 +1546,9 @@ func (s *MongoDBStore) GetAllToolCalls() ([]*model.ToolCall, error) {
 	return toolCalls, cursor.Err()
 }
 
-// UpdateToolCallResponse updates the response for a tool call by ToolID and calculates duration
-func (s *MongoDBStore) UpdateToolCallResponse(toolID string, response string) error {
+// UpdateToolCallResponse updates the response for a tool call by ToolID and calculates duration.
+// When execErr != nil, sets status=failed and error=execErr.Error().
+func (s *MongoDBStore) UpdateToolCallResponse(toolID string, response string, execErr error) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -1577,6 +1578,12 @@ func (s *MongoDBStore) UpdateToolCallResponse(toolID string, response string) er
 	tc.ResponseLength = len([]rune(response)) // Character count
 	tc.DurationMs = durationMs
 	tc.UpdatedAt = now
+	if execErr != nil {
+		tc.Status = model.ToolCallStatusFailed
+		tc.Error = execErr.Error()
+	} else {
+		tc.Status = model.ToolCallStatusSuccess
+	}
 
 	// Marshal back to BSON
 	data, err := json.Marshal(tc)

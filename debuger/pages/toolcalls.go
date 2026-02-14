@@ -123,6 +123,10 @@ func RenderToolCallDetail(handler *debuger.DebugHandler, toolID string) (string,
 	content += fmt.Sprintf(`<tr><th>Function</th><td>%s</td></tr>`, components.InlineCode(tc.FunctionName))
 	content += fmt.Sprintf(`<tr><th>Agent Type</th><td>%s</td></tr>`, agentBadge)
 	content += fmt.Sprintf(`<tr><th>Duration</th><td>%s</td></tr>`, debuger.FormatDurationMs(tc.DurationMs))
+	content += fmt.Sprintf(`<tr><th>Status</th><td>%s</td></tr>`, tc.Status)
+	if tc.Error != "" {
+		content += fmt.Sprintf(`<tr><th class="text-danger">Error</th><td class="text-danger">%s</td></tr>`, template.HTMLEscapeString(tc.Error))
+	}
 	content += fmt.Sprintf(`<tr><th>Created At</th><td>%s</td></tr>`, debuger.FormatTime(tc.CreatedAt))
 	content += fmt.Sprintf(`<tr><th>Updated At</th><td>%s</td></tr>`, debuger.FormatTime(tc.UpdatedAt))
 	content += `</table>`

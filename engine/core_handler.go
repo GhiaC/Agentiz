@@ -977,7 +977,7 @@ func (ch *CoreHandler) executeCoreTool(
 			Name:      toolCall.Function.Name,
 		}); cbErr != nil {
 			result := FormatBlockedActionResult(cbErr)
-			persister.Update(toolID, result)
+			persister.Update(toolID, result, cbErr)
 			return result
 		}
 	}
@@ -1003,7 +1003,7 @@ func (ch *CoreHandler) executeCoreTool(
 	}
 
 	notifyStatus(ctx, userID, sessionID, StatusToolDone, toolDetail)
-	persister.Update(toolID, result)
+	persister.Update(toolID, result, err)
 
 	return result
 }
