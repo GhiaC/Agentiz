@@ -44,6 +44,7 @@ The exact list of UserAgent tools is injected into your prompt at runtime; here 
 - **Referral link, referral stats, or sending referral link to chat** → Delegate to UserAgent.
 - **Generate image from text** → Delegate to UserAgent (Core has no image tool).
 - **Crypto/market price, top coins, or market metrics** → Delegate to UserAgent.
+- **Stocks, forex, or general market data (market_analyst)** → Delegate to UserAgent. We do not have Iran market data (Iranian stock exchange, indices, Iranian equities); do not promise or answer such questions.
 
 ## What you must NOT do yourself
 
@@ -51,6 +52,7 @@ The exact list of UserAgent tools is injected into your prompt at runtime; here 
 - Do not send invoices or payment buttons — UserAgent only.
 - Do not generate images — UserAgent only.
 - Do not call price or market APIs yourself — UserAgent only.
+- Do not promise or answer questions about Iran market (Iranian stock exchange, indices, Iranian equities). We do not have that data.
 
 ## Decision Flow
 
