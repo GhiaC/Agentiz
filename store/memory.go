@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ghiac/agentize/debuger"
 	"github.com/ghiac/agentize/model"
 )
 
@@ -378,6 +379,21 @@ func (s *DBStore) GetToolCallByToolID(toolID string) (*model.ToolCall, error) {
 	return s.sqliteStore.GetToolCallByToolID(toolID)
 }
 
+// PutSummarizationLog stores a summarization log (delegates to SQLiteStore)
+func (s *DBStore) PutSummarizationLog(log *model.SummarizationLog) error {
+	return s.sqliteStore.PutSummarizationLog(log)
+}
+
+// GetSummarizationLogsBySession returns summarization logs for a session (delegates to SQLiteStore)
+func (s *DBStore) GetSummarizationLogsBySession(sessionID string) ([]*model.SummarizationLog, error) {
+	return s.sqliteStore.GetSummarizationLogsBySession(sessionID)
+}
+
+// GetAllSummarizationLogs returns all summarization logs (delegates to SQLiteStore)
+func (s *DBStore) GetAllSummarizationLogs() ([]*model.SummarizationLog, error) {
+	return s.sqliteStore.GetAllSummarizationLogs()
+}
+
 // PutToolCall stores a tool call (delegates to SQLiteStore)
 func (s *DBStore) PutToolCall(toolCall *model.ToolCall) error {
 	return s.sqliteStore.PutToolCall(toolCall)
@@ -416,5 +432,8 @@ func (s *DBStore) DeleteUserData(userID string) error {
 // SessionStore is an alias for model.SessionStore for backward compatibility
 type SessionStore = model.SessionStore
 
-// Ensure DBStore implements model.SessionStore
-var _ model.SessionStore = (*DBStore)(nil)
+// Ensure DBStore implements model.SessionStore and debuger.DebugStore
+var (
+	_ model.SessionStore = (*DBStore)(nil)
+	_ debuger.DebugStore = (*DBStore)(nil)
+)

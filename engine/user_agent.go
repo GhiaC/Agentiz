@@ -574,6 +574,12 @@ func (e *Engine) ProcessMessage(
 	sessionID string,
 	userMessage string,
 ) (string, int, error) {
+	// Defensive: ensure progress guard is initialized (e.g. if Init() was not called)
+	e.dbReadyMu.Lock()
+	if e.sessionProgress == nil {
+		e.sessionProgress = NewProgressGuard()
+	}
+	e.dbReadyMu.Unlock()
 	// Check if already processing - queue if busy
 	if e.sessionProgress.TryQueue(sessionID, userMessage) {
 		return "⏳ Processing previous request... Please wait. 📋 Your message was queued and will be answered in order.", 0, nil

@@ -117,6 +117,12 @@ func NewWithOptions(path string, opts *Options) (*Agentize, error) {
 		return eng.Functions.Execute(toolName, args)
 	}
 
+	// Initialize engine (session mutexes, progress guard, DB readiness).
+	// Required before any ProcessMessage to avoid nil pointer dereference on sessionProgress.
+	if err := eng.Init(); err != nil {
+		return nil, fmt.Errorf("failed to initialize engine: %w", err)
+	}
+
 	// Create Agentize instance
 	ag := &Agentize{
 		engine: eng,

@@ -252,6 +252,14 @@ func (s *MongoDBStore) initIndexes(ctx context.Context) error {
 		// Non-unique index created successfully - this is acceptable
 	}
 
+	// Index for GetToolCallByID: lookup by tool_call_id (OpenAI's ID), not _id
+	_, err = s.toolCallsCollection.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{{Key: "tool_call_id", Value: 1}},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create tool_calls tool_call_id index: %w", err)
+	}
+
 	// ============================================================================
 	// OpenedFiles Collection Indexes
 	// ============================================================================
@@ -496,6 +504,11 @@ func (s *MongoDBStore) Put(session *model.Session) error {
 		return fmt.Errorf("session cannot be nil")
 	}
 
+	// Ensure user exists when storing a session (otherwise user is never created on first session)
+	if _, err := s.GetOrCreateUser(session.UserID); err != nil {
+		return fmt.Errorf("ensure user for session: %w", err)
+	}
+
 	// For Core sessions, use PutCoreSession to ensure uniqueness
 	if session.AgentType == model.AgentTypeCore {
 		return s.PutCoreSession(session)
@@ -737,6 +750,11 @@ func (s *MongoDBStore) PutCoreSession(session *model.Session) error {
 		return fmt.Errorf("session must be of type Core")
 	}
 
+	// Ensure user exists when storing a session
+	if _, err := s.GetOrCreateUser(session.UserID); err != nil {
+		return fmt.Errorf("ensure user for core session: %w", err)
+	}
+
 	// MongoDB is thread-safe, no mutex needed
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -917,10 +935,12 @@ func (s *MongoDBStore) GetAllSessions() (map[string][]*model.Session, error) {
 	return result, cursor.Err()
 }
 
-// userDocument represents a user document in MongoDB
+// userDocument represents a user document in MongoDB.
+// Uses _id for MongoDB primary key and user_id for alignment with SQLite schema (same value).
 type userDocument struct {
-	UserID    string    `bson:"_id"`
-	Data      string    `bson:"data"` // JSON serialized User
+	UserID    string    `bson:"_id"`     // MongoDB primary key
+	UserIDAlt string    `bson:"user_id"` // same as _id; aligns stored shape with SQLite (users.user_id)
+	Data      string    `bson:"data"`    // JSON serialized User
 	CreatedAt time.Time `bson:"created_at"`
 	UpdatedAt time.Time `bson:"updated_at"`
 }
@@ -973,6 +993,7 @@ func (s *MongoDBStore) PutUser(user *model.User) error {
 
 	doc := userDocument{
 		UserID:    user.UserID,
+		UserIDAlt: user.UserID, // align with SQLite: stored as user_id
 		Data:      string(data),
 		CreatedAt: user.CreatedAt,
 		UpdatedAt: time.Now(),
@@ -1473,13 +1494,14 @@ func (s *MongoDBStore) GetToolCallsBySession(sessionID string) ([]*model.ToolCal
 	return toolCalls, cursor.Err()
 }
 
-// GetToolCallByID returns a tool call by ID
+// GetToolCallByID returns a tool call by its ID (OpenAI's tool_call_id), not by ToolID.
+// In MongoDB _id is ToolID; tool_call_id is stored as a separate field for this lookup.
 func (s *MongoDBStore) GetToolCallByID(toolCallID string) (*model.ToolCall, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 	defer cancel()
 
 	var doc toolCallDocument
-	err := s.toolCallsCollection.FindOne(ctx, bson.M{"_id": toolCallID}).Decode(&doc)
+	err := s.toolCallsCollection.FindOne(ctx, bson.M{"tool_call_id": toolCallID}).Decode(&doc)
 	if err == mongo.ErrNoDocuments {
 		return nil, nil
 	}
@@ -1700,5 +1722,8 @@ func (s *MongoDBStore) GetAllSummarizationLogs() ([]*model.SummarizationLog, err
 	return logs, cursor.Err()
 }
 
-// Ensure MongoDBStore implements model.SessionStore
-var _ model.SessionStore = (*MongoDBStore)(nil)
+// Ensure MongoDBStore implements model.SessionStore and debuger.DebugStore
+var (
+	_ model.SessionStore = (*MongoDBStore)(nil)
+	_ debuger.DebugStore = (*MongoDBStore)(nil)
+)

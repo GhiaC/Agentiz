@@ -12,6 +12,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/ghiac/agentize/debuger"
 	"github.com/ghiac/agentize/model"
 	_ "modernc.org/sqlite"
 )
@@ -409,6 +410,11 @@ func (s *SQLiteStore) Put(session *model.Session) error {
 		return fmt.Errorf("session cannot be nil")
 	}
 
+	// Ensure user exists when storing a session (otherwise user is never created on first session)
+	if _, err := s.GetOrCreateUser(session.UserID); err != nil {
+		return fmt.Errorf("ensure user for session: %w", err)
+	}
+
 	// For Core sessions, use PutCoreSession to ensure uniqueness
 	if session.AgentType == model.AgentTypeCore {
 		return s.PutCoreSession(session)
@@ -684,6 +690,11 @@ func (s *SQLiteStore) PutCoreSession(session *model.Session) error {
 	}
 	if session.AgentType != model.AgentTypeCore {
 		return fmt.Errorf("session must be of type Core")
+	}
+
+	// Ensure user exists when storing a session
+	if _, err := s.GetOrCreateUser(session.UserID); err != nil {
+		return fmt.Errorf("ensure user for core session: %w", err)
 	}
 
 	s.mu.Lock()
@@ -2018,8 +2029,8 @@ func (s *SQLiteStore) scanSummarizationLogs(rows *sql.Rows) ([]*model.Summarizat
 	return logs, nil
 }
 
-// Ensure SQLiteStore implements model.SessionStore
-var _ model.SessionStore = (*SQLiteStore)(nil)
-
-// Ensure SQLiteStore implements debuger.DebugStore
-// This is verified at compile time in agentize.go where debuger package is imported
+// Ensure SQLiteStore implements model.SessionStore and debuger.DebugStore
+var (
+	_ model.SessionStore = (*SQLiteStore)(nil)
+	_ debuger.DebugStore = (*SQLiteStore)(nil)
+)
