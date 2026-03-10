@@ -53,7 +53,7 @@ func ExampleNewSQLiteStoreFromFile() {
 	// Output: SQLite store created successfully
 }
 
-func ExampleAgentizeWithSQLite() {
+func Example_agentizeWithSQLite() {
 	// Example of using SQLiteStore with Agentize
 	// This would be in your application code:
 
@@ -128,7 +128,7 @@ func ExampleNewMongoDBStoreFromURI() {
 	// If MongoDB is not running: "Error creating MongoDB store: failed to ping MongoDB: ..."
 }
 
-func ExampleAgentizeWithMongoDB() {
+func Example_agentizeWithMongoDB() {
 	// Example of using MongoDBStore with Agentize
 	// This would be in your application code:
 

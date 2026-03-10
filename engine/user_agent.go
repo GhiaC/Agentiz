@@ -932,31 +932,32 @@ func (e *Engine) removeFunctionCalls(sessionID string) error {
 }
 
 // generateResultID generates a unique ID for tool results
-// Format: r_SHORT-SESSION_TIMESTAMP (compact, ~20 chars)
+// Format: r_<fullSessionID>_<unixTimestamp>
 func generateResultID(sessionID string) string {
-	// Extract first 8 chars of sessionID for brevity
-	shortSession := sessionID
-	if len(shortSession) > 8 {
-		shortSession = shortSession[:8]
-	}
-	// Use Unix seconds (10 digits) instead of nanoseconds (19 digits)
-	return fmt.Sprintf("r_%s_%d", shortSession, time.Now().Unix())
+	return fmt.Sprintf("r_%s_%d", sessionID, time.Now().Unix())
 }
 
-// parseResultID extracts sessionID from resultID
-// Returns sessionID and the original resultID
-// Supports both old format (result_SESSION-ID_TIMESTAMP_RANDOM) and new format (r_SHORT-SESSION_TIMESTAMP)
+// parseResultID extracts the full sessionID from a resultID.
+// The timestamp is always the last underscore-separated segment, so everything
+// between the leading "r_" and the final "_<timestamp>" is the sessionID
+// (which itself may contain underscores).
 func parseResultID(resultID string) (sessionID string, ok bool) {
-	parts := strings.Split(resultID, "_")
-
-	// New format: r_SHORT-SESSION_TIMESTAMP
-	if len(parts) >= 3 && parts[0] == "r" {
-		return parts[1], true
+	// New format: r_<sessionID>_<timestamp>
+	if strings.HasPrefix(resultID, "r_") {
+		lastUnderscore := strings.LastIndex(resultID, "_")
+		// "r_" is at index 0-1, so the sessionID starts at index 2.
+		// lastUnderscore must be beyond the "r_" prefix and the sessionID.
+		if lastUnderscore > 2 {
+			return resultID[2:lastUnderscore], true
+		}
 	}
 
-	// Old format: result_SESSION-ID_TIMESTAMP_RANDOM
-	if len(parts) >= 4 && parts[0] == "result" {
-		return parts[1], true
+	// Old format: result_<sessionID>_<timestamp>_<random>
+	if strings.HasPrefix(resultID, "result_") {
+		parts := strings.Split(resultID, "_")
+		if len(parts) >= 4 {
+			return parts[1], true
+		}
 	}
 
 	return "", false
@@ -981,10 +982,12 @@ func truncateForLog(s string, maxLen int) string {
 	return s[:maxLen] + "..."
 }
 
-// saveToolResult stores a tool result and returns the result ID
+// saveToolResult stores a tool result and returns the result ID.
+// Returns empty string if the result could not be persisted.
 func (e *Engine) saveToolResult(sessionID string, result string) string {
 	session, err := e.Sessions.Get(sessionID)
 	if err != nil {
+		log.Log.Warnf("[Engine] saveToolResult: failed to get session %s: %v", sessionID, err)
 		return ""
 	}
 	if session.ToolResults == nil {
@@ -992,7 +995,10 @@ func (e *Engine) saveToolResult(sessionID string, result string) string {
 	}
 	resultID := generateResultID(sessionID)
 	session.ToolResults[resultID] = result
-	e.Sessions.Put(session)
+	if err := e.Sessions.Put(session); err != nil {
+		log.Log.Warnf("[Engine] saveToolResult: failed to persist session %s: %v", sessionID, err)
+		return ""
+	}
 	return resultID
 }
 
@@ -1022,6 +1028,9 @@ func (e *Engine) processToolResult(sessionID string, result string) string {
 
 	// Store full result and return truncated message
 	resultID := e.saveToolResult(sessionID, result)
+	if resultID == "" {
+		return result[:maxLen] + "... [truncated, full result could not be stored]"
+	}
 	return fmt.Sprintf("Tool result exceeds %d characters (exact: %d characters). To retrieve specific information from this result, use the `collect_result` tool with result_id=\"%s\" and specify what information you need.",
 		maxLen, len(result), resultID)
 }
