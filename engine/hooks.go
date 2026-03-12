@@ -55,10 +55,10 @@ func WithStatusFunc(ctx context.Context, fn StatusFunc) context.Context {
 	return context.WithValue(ctx, statusCtxKey{}, fn)
 }
 
-// notifyStatus is the internal helper called throughout the engine.
+// NotifyStatus is the helper called throughout the engine.
 // Safe to call even if no StatusFunc is set (no-op).
 // Optional opts are applied to the StatusUpdate before passing to the callback.
-func notifyStatus(ctx context.Context, userID, sessionID string, phase StatusPhase, detail string, opts ...NotifyOption) {
+func NotifyStatus(ctx context.Context, userID, sessionID string, phase StatusPhase, detail string, opts ...NotifyOption) {
 	if fn, ok := ctx.Value(statusCtxKey{}).(StatusFunc); ok && fn != nil {
 		su := &StatusUpdate{
 			UserID:    userID,

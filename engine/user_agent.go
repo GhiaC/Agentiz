@@ -86,7 +86,7 @@ type Engine struct {
 	sessionProgress *ProgressGuard
 
 	// Backup LLM chain (initialized from LLMConfig.BackupProviders)
-	backups *backupChain
+	backups *BackupChain
 
 	// Callback for billing/usage metering (optional, set by application)
 	Callback Callback
@@ -196,7 +196,7 @@ func (e *Engine) UseLLMConfig(config LLMConfig) error {
 	// Initialize backup chain from configured providers
 	// Note: BackupDisabled only affects Engine's direct LLM calls (callLLM)
 	// Scheduler ALWAYS uses backup chain for cost-efficient summarization
-	e.backups = newBackupChain(config.BackupProviders)
+	e.backups = NewBackupChain(config.BackupProviders)
 
 	// Automatically start scheduler if LLM is configured and scheduler is not already running
 	// Use sync.Once per session store to ensure scheduler starts only once
@@ -237,7 +237,7 @@ const backupCooldownDuration = 1 * time.Second
 func (e *Engine) callLLM(ctx context.Context, model string, messages []openai.ChatCompletionMessage, tools []openai.Tool) (openai.ChatCompletionResponse, error) {
 	// Try backup providers chain first (only if not disabled)
 	if !e.llmConfig.BackupDisabled {
-		if resp, ok := e.backups.tryBackup(ctx, messages, tools, "Engine"); ok {
+		if resp, ok := e.backups.TryBackup(ctx, messages, tools, "Engine"); ok {
 			return resp, nil
 		}
 	}
@@ -1101,7 +1101,7 @@ Your response must not exceed %d characters.`, maxLen)
 	resp, err := e.callLLM(ctx, modelName, msgs, nil)
 
 	if err != nil {
-		return "", formatLLMError(err)
+		return "", FormatLLMError(err)
 	}
 
 	if len(resp.Choices) == 0 {
@@ -1121,8 +1121,8 @@ func (e *Engine) GetLLMConfig() LLMConfig {
 	return e.llmConfig
 }
 
-// formatLLMError formats OpenAI API errors with detailed information
-func formatLLMError(err error) error {
+// FormatLLMError formats OpenAI API errors with detailed information
+func FormatLLMError(err error) error {
 	if err == nil {
 		return nil
 	}
@@ -1194,7 +1194,7 @@ func (e *Engine) processChatRequest(
 		log.Log.Infof("[Engine] LLM request | iteration=%d/%d | messages=%d | tools=%d",
 			i+1, maxIterations, len(reqMessages), len(openaiTools))
 
-		notifyStatus(ctx, session.UserID, sessionID, StatusThinking, "")
+		NotifyStatus(ctx, session.UserID, sessionID, StatusThinking, "")
 
 		// BeforeAction: check quota/credit before LLM call (block without consuming tokens)
 		if e.Callback != nil {
@@ -1214,7 +1214,7 @@ func (e *Engine) processChatRequest(
 		resp, err := e.callLLM(ctx, modelName, reqMessages, openaiTools)
 		llmDuration := time.Since(llmStart)
 		if err != nil {
-			return "", totalTokenUsage, formatLLMError(err)
+			return "", totalTokenUsage, FormatLLMError(err)
 		}
 
 		if len(resp.Choices) == 0 {
@@ -1311,7 +1311,7 @@ func (e *Engine) saveMessage(
 	// Get user message content
 	content := choice.Message.Content
 	if content == "" && len(choice.Message.ToolCalls) > 0 {
-		content = formatToolCallsContent(choice.Message.ToolCalls)
+		content = FormatToolCallsContent(choice.Message.ToolCalls)
 	}
 
 	// Create message record
@@ -1376,7 +1376,7 @@ func (e *Engine) executeTool(
 			toolDetail = d
 		}
 	}
-	notifyStatus(ctx, session.UserID, sessionID, StatusToolExecuting, toolDetail)
+	NotifyStatus(ctx, session.UserID, sessionID, StatusToolExecuting, toolDetail)
 
 	// Check callback before execution
 	if e.Callback != nil {
@@ -1418,7 +1418,7 @@ func (e *Engine) executeTool(
 		})
 	}
 
-	notifyStatus(ctx, session.UserID, sessionID, StatusToolDone, toolDetail)
+	NotifyStatus(ctx, session.UserID, sessionID, StatusToolDone, toolDetail)
 
 	// Process result (truncate if needed)
 	var processedResult string

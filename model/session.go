@@ -154,18 +154,15 @@ func GenerateSessionID(userID string, agentType AgentType, seq int) string {
 	return fmt.Sprintf("%s-%s-s%04d", userID, agentShort, seq)
 }
 
-// agentTypeShortCode returns short code for agent type
+// agentTypeShortCode returns short code for agent type.
+// For built-in types it returns the canonical short code; for custom agent
+// types (registered via AgentManager) it uses the AgentType string directly.
 func agentTypeShortCode(agentType AgentType) string {
-	switch agentType {
-	case AgentTypeCore:
-		return "core"
-	case AgentTypeHigh:
-		return "high"
-	case AgentTypeLow:
-		return "low"
-	default:
+	s := string(agentType)
+	if s == "" {
 		return "unk"
 	}
+	return s
 }
 
 // NextMessageSeq increments and returns the next message sequence number

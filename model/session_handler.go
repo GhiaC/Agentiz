@@ -59,6 +59,11 @@ type SessionHandler struct {
 	// Per-session locks to prevent race conditions during summarization
 	sessionLocks   map[string]*sync.Mutex
 	sessionLocksMu sync.Mutex
+
+	// Custom display names for dynamically registered agent types.
+	// Populated by AgentManager.Register via RegisterAgentDisplayName.
+	displayNames   map[AgentType]string
+	displayNamesMu sync.RWMutex
 }
 
 // GetStore returns the underlying SessionStore for direct access
@@ -251,13 +256,13 @@ func (sh *SessionHandler) ListUserSessions(userID string) ([]*Session, error) {
 			}
 			timeAgo := formatTimeAgo(s.UpdatedAt)
 			log.Log.Infof("[SessionHandler]   ├─ [%s] %s | Title: \"%s\" | Active: %d msgs | Archived: %d msgs | Last: %s",
-				s.SessionID, agentTypeDisplayName(s.AgentType), title, activeMsgs, archivedMsgs, timeAgo)
+				s.SessionID, sh.AgentTypeDisplayName(s.AgentType), title, activeMsgs, archivedMsgs, timeAgo)
 		}
 	}
 
 	if !sh.config.DisableLogs {
 		for agentType, count := range byType {
-			log.Log.Infof("[SessionHandler]   └─ %s sessions: %d", agentTypeDisplayName(agentType), count)
+			log.Log.Infof("[SessionHandler]   └─ %s sessions: %d", sh.AgentTypeDisplayName(agentType), count)
 		}
 		log.Log.Infof("[SessionHandler] 📊 Sessions Summary | Total: %d | Active messages: %d | Archived messages: %d",
 			len(sessions), totalActiveMessages, totalArchivedMessages)
@@ -307,10 +312,9 @@ func (sh *SessionHandler) DeleteSession(sessionID string) error {
 	}
 	sh.mu.Unlock()
 
-	// Clean up active session reference in user if this session was active
-	// This prevents stale references when a session is deleted
-	// Note: We check all agent types (Core, High, Low) to ensure no stale references
-	if session.AgentType == AgentTypeCore || session.AgentType == AgentTypeHigh || session.AgentType == AgentTypeLow {
+	// Clean up active session reference in user if this session was active.
+	// Works for both built-in and dynamically registered agent types.
+	if session.AgentType != "" {
 		if userStore, ok := sh.store.(interface {
 			GetOrCreateUser(string) (*User, error)
 			PutUser(*User) error
@@ -497,27 +501,13 @@ func (sh *SessionHandler) GetSessionsPrompt(userID string) (string, error) {
 	var sb strings.Builder
 	sb.WriteString("## Active Sessions\n\n")
 
-	// Order: high, low, core, others
-	typeOrder := []AgentType{AgentTypeHigh, AgentTypeLow, AgentTypeCore}
-	processedTypes := make(map[AgentType]bool)
+	// Build a deterministic type order: well-known types first, then
+	// remaining types sorted alphabetically.
+	typeOrder := sh.getAgentTypeOrder(byType)
 
 	for _, agentType := range typeOrder {
-		if typeSessions, ok := byType[agentType]; ok {
-			sb.WriteString(fmt.Sprintf("### %s Sessions:\n", agentTypeDisplayName(agentType)))
-			for i, s := range typeSessions {
-				sh.formatSessionEntry(&sb, i+1, s)
-			}
-			sb.WriteString("\n")
-			processedTypes[agentType] = true
-		}
-	}
-
-	// Process any remaining types
-	for agentType, typeSessions := range byType {
-		if processedTypes[agentType] {
-			continue
-		}
-		sb.WriteString(fmt.Sprintf("### %s Sessions:\n", agentTypeDisplayName(agentType)))
+		typeSessions := byType[agentType]
+		sb.WriteString(fmt.Sprintf("### %s Sessions:\n", sh.AgentTypeDisplayName(agentType)))
 		for i, s := range typeSessions {
 			sh.formatSessionEntry(&sb, i+1, s)
 		}
@@ -551,6 +541,34 @@ func (sh *SessionHandler) formatSessionEntry(sb *strings.Builder, index int, s *
 	msgCount := len(s.Msgs)
 	archivedCount := len(s.ArchivedMsgs)
 	sb.WriteString(fmt.Sprintf("   Messages: %d active, %d archived\n", msgCount, archivedCount))
+}
+
+// getAgentTypeOrder returns a deterministic ordering of agent types. Well-known
+// types (high, low, core) come first in their canonical order, followed by any
+// remaining types sorted alphabetically.
+func (sh *SessionHandler) getAgentTypeOrder(byType map[AgentType][]*Session) []AgentType {
+	wellKnown := []AgentType{AgentTypeHigh, AgentTypeLow, AgentTypeCore}
+	processed := make(map[AgentType]bool)
+
+	var order []AgentType
+	for _, at := range wellKnown {
+		if _, ok := byType[at]; ok {
+			order = append(order, at)
+			processed[at] = true
+		}
+	}
+
+	var extras []AgentType
+	for at := range byType {
+		if !processed[at] {
+			extras = append(extras, at)
+		}
+	}
+	sort.Slice(extras, func(i, j int) bool {
+		return string(extras[i]) < string(extras[j])
+	})
+	order = append(order, extras...)
+	return order
 }
 
 // generateConversationSummary uses LLM to generate a summary of the conversation
@@ -703,8 +721,32 @@ func formatTimeAgo(t time.Time) string {
 	}
 }
 
-// agentTypeDisplayName returns a human-readable name for the agent type
-func agentTypeDisplayName(agentType AgentType) string {
+// RegisterAgentDisplayName registers a human-readable name for a custom agent
+// type. This is called by AgentManager.Register so that GetSessionsPrompt and
+// log messages use the correct display name for dynamically registered agents.
+func (sh *SessionHandler) RegisterAgentDisplayName(agentType AgentType, displayName string) {
+	sh.displayNamesMu.Lock()
+	defer sh.displayNamesMu.Unlock()
+	if sh.displayNames == nil {
+		sh.displayNames = make(map[AgentType]string)
+	}
+	sh.displayNames[agentType] = displayName
+}
+
+// AgentTypeDisplayName returns a human-readable name for the agent type.
+// It checks the dynamic registry first, then falls back to built-in names.
+func (sh *SessionHandler) AgentTypeDisplayName(agentType AgentType) string {
+	sh.displayNamesMu.RLock()
+	if name, ok := sh.displayNames[agentType]; ok {
+		sh.displayNamesMu.RUnlock()
+		return name
+	}
+	sh.displayNamesMu.RUnlock()
+	return agentTypeDisplayNameBuiltin(agentType)
+}
+
+// agentTypeDisplayNameBuiltin returns the built-in display name for well-known agent types.
+func agentTypeDisplayNameBuiltin(agentType AgentType) string {
 	switch agentType {
 	case AgentTypeHigh:
 		return "UserAgent-High"

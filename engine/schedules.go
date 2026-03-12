@@ -182,7 +182,7 @@ Return only the title, no quotes or extra text.`,
 type SessionScheduler struct {
 	sessionHandler *model.SessionHandler
 	llmClient      *openai.Client
-	backups        *backupChain // backup LLM providers (OSS 120B first, then others)
+	backups        *BackupChain // backup LLM providers (OSS 120B first, then others)
 	config         SessionSchedulerConfig
 	stopChan       chan struct{}
 	running        bool
@@ -207,7 +207,7 @@ func NewSessionScheduler(
 // SetBackupChain sets the backup LLM chain for the scheduler
 // Backups are tried IN ORDER before falling back to the main llmClient
 // Recommended: put OSS 120B first for cost efficiency
-func (ss *SessionScheduler) SetBackupChain(backups *backupChain) {
+func (ss *SessionScheduler) SetBackupChain(backups *BackupChain) {
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
 	ss.backups = backups
@@ -293,7 +293,7 @@ func (ss *SessionScheduler) chatCompletion(ctx context.Context, request openai.C
 	if ss.backups != nil {
 		log.Log.Infof("[SessionScheduler] 🔄 BACKUP CHAIN >> Attempting backup chain for summarization | BackupProviders: %d | RequestModel: %s",
 			len(ss.backups.providers), request.Model)
-		resp, ok := ss.backups.tryBackup(ctx, request.Messages, nil, "SessionScheduler")
+		resp, ok := ss.backups.TryBackup(ctx, request.Messages, nil, "SessionScheduler")
 		if ok {
 			log.Log.Infof("[SessionScheduler] ✅ BACKUP CHAIN >> Success | UsedModel: %s | ResponseTokens: %d",
 				resp.Model, resp.Usage.TotalTokens)

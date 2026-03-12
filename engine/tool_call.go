@@ -11,7 +11,7 @@ import (
 
 // formatToolCallsContent builds display text for messages that only have tool calls (no content).
 // Example: "[Tool Calls: get_weather]" or "[Tool Calls: get_weather, search]"
-func formatToolCallsContent(toolCalls []openai.ToolCall) string {
+func FormatToolCallsContent(toolCalls []openai.ToolCall) string {
 	if len(toolCalls) == 0 {
 		return "[Tool Calls: 0]"
 	}

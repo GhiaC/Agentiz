@@ -20,30 +20,30 @@ type BackupLLM struct {
 	Name     string // human-readable name for logging (e.g. "cf-oss-120b")
 }
 
-// backupChain manages a chain of backup LLM providers with per-provider cooldowns.
+// BackupChain manages a chain of backup LLM providers with per-provider cooldowns.
 // It is the single implementation used by both Engine and CoreHandler to avoid duplication.
-type backupChain struct {
+type BackupChain struct {
 	providers  []BackupLLM
 	cooldowns  map[string]time.Time
 	cooldownMu sync.Mutex
 }
 
-// newBackupChain creates a backupChain from the given providers.
-// Returns nil if providers is empty (caller should check for nil before calling tryBackup).
-func newBackupChain(providers []BackupLLM) *backupChain {
+// NewBackupChain creates a BackupChain from the given providers.
+// Returns nil if providers is empty (caller should check for nil before calling TryBackup).
+func NewBackupChain(providers []BackupLLM) *BackupChain {
 	if len(providers) == 0 {
 		return nil
 	}
-	return &backupChain{
+	return &BackupChain{
 		providers: providers,
 		cooldowns: make(map[string]time.Time),
 	}
 }
 
-// tryBackup iterates through backup providers in order and returns the first successful response.
+// TryBackup iterates through backup providers in order and returns the first successful response.
 // logPrefix is used for log messages (e.g. "Engine" or "CoreHandler").
 // Returns (response, true) on success, or (zero, false) if all providers failed/skipped.
-func (bc *backupChain) tryBackup(ctx context.Context, messages []openai.ChatCompletionMessage, tools []openai.Tool, logPrefix string) (openai.ChatCompletionResponse, bool) {
+func (bc *BackupChain) TryBackup(ctx context.Context, messages []openai.ChatCompletionMessage, tools []openai.Tool, logPrefix string) (openai.ChatCompletionResponse, bool) {
 	if bc == nil || len(bc.providers) == 0 {
 		return openai.ChatCompletionResponse{}, false
 	}
