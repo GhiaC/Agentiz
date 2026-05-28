@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -560,7 +561,8 @@ func (s *MongoDBStore) Delete(sessionID string) error {
 }
 
 // DeleteUserData deletes all sessions, messages, tool calls, summarization logs,
-// and opened files for a user. Resets user's ActiveSessionIDs and SessionSeqs.
+// and opened files for a user. Resets user's ActiveSessionIDs and SessionSeqs,
+// and unbans the user (clears BanUntil, BanMessage, NonsenseCount).
 func (s *MongoDBStore) DeleteUserData(userID string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -609,7 +611,7 @@ func (s *MongoDBStore) DeleteUserData(userID string) error {
 		if json.Unmarshal([]byte(doc.Data), user) == nil {
 			user.ActiveSessionIDs = make(map[model.AgentType]string)
 			user.SessionSeqs = make(map[model.AgentType]int)
-			user.UpdatedAt = time.Now()
+			user.Unban() // remove ban so user is no longer banned after full data delete
 			if userData, err := json.Marshal(user); err == nil {
 				opts := options.Replace().SetUpsert(true)
 				doc.Data = string(userData)
@@ -1421,6 +1423,47 @@ func (s *MongoDBStore) GetAllOpenedFiles() ([]*model.OpenedFile, error) {
 	}
 
 	return files, cursor.Err()
+}
+
+// GetOpenedFilesByUser returns opened files for a user sorted by OpenedAt (newest first).
+// MongoDB stores full document in Data; we filter by user_id after decode.
+func (s *MongoDBStore) GetOpenedFilesByUser(userID string) ([]*model.OpenedFile, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cursor, err := s.openedFilesCollection.Find(ctx, bson.M{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to query opened files: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	var files []*model.OpenedFile
+	for cursor.Next(ctx) {
+		var doc openedFileDocument
+		if err := cursor.Decode(&doc); err != nil {
+			return nil, fmt.Errorf("failed to decode opened file: %w", err)
+		}
+
+		file := &model.OpenedFile{}
+		if err := unmarshalJSONOrBSON(doc.Data, file); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal opened file: %w", err)
+		}
+
+		if file.UserID == userID {
+			files = append(files, file)
+		}
+	}
+
+	if err := cursor.Err(); err != nil {
+		return nil, err
+	}
+
+	// Sort by OpenedAt descending
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].OpenedAt.After(files[j].OpenedAt)
+	})
+
+	return files, nil
 }
 
 // toolCallDocument represents a tool call document in MongoDB.

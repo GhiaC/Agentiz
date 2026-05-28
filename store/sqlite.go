@@ -212,6 +212,9 @@ func (s *SQLiteStore) initSchema() error {
 	// Migration: Add session_seq column to sessions table if it doesn't exist (for existing databases)
 	_ = s.migrateAddSessionSeqColumn()
 
+	// Migration: Add display_label to tool_calls for dashboard distinction
+	_ = s.migrateAddToolCallDisplayLabel()
+
 	return nil
 }
 
@@ -238,6 +241,12 @@ func (s *SQLiteStore) migrateAddMessageTypeColumns() error {
 	_, _ = s.db.Exec(`ALTER TABLE tool_calls ADD COLUMN status TEXT DEFAULT 'pending'`)
 	_, _ = s.db.Exec(`ALTER TABLE tool_calls ADD COLUMN error TEXT DEFAULT ''`)
 	// Ignore errors if columns already exist
+	return nil
+}
+
+// migrateAddToolCallDisplayLabel adds display_label to tool_calls for dashboard label/category display.
+func (s *SQLiteStore) migrateAddToolCallDisplayLabel() error {
+	_, _ = s.db.Exec(`ALTER TABLE tool_calls ADD COLUMN display_label TEXT DEFAULT ''`)
 	return nil
 }
 
@@ -488,7 +497,8 @@ func (s *SQLiteStore) Delete(sessionID string) error {
 }
 
 // DeleteUserData deletes all sessions, messages, tool calls, summarization logs,
-// and opened files for a user. Resets user's ActiveSessionIDs and SessionSeqs.
+// and opened files for a user. Resets user's ActiveSessionIDs and SessionSeqs,
+// and unbans the user (clears BanUntil, BanMessage, NonsenseCount).
 func (s *SQLiteStore) DeleteUserData(userID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -528,9 +538,9 @@ func (s *SQLiteStore) DeleteUserData(userID string) error {
 		if json.Unmarshal([]byte(data), user) == nil {
 			user.ActiveSessionIDs = make(map[model.AgentType]string)
 			user.SessionSeqs = make(map[model.AgentType]int)
-			user.UpdatedAt = time.Now()
+			user.Unban() // remove ban so user is no longer banned after full data delete
 			if userData, err := json.Marshal(user); err == nil {
-				now := user.UpdatedAt.Unix()
+				now := user.UpdatedAt.Unix() // Unban() already set UpdatedAt
 				_, _ = tx.Exec(
 					`INSERT OR REPLACE INTO users (user_id, data, created_at, updated_at) VALUES (?, ?, ?, ?)`,
 					userID, string(userData), createdAt, now,
@@ -1544,6 +1554,56 @@ func (s *SQLiteStore) GetAllOpenedFiles() ([]*model.OpenedFile, error) {
 	return files, nil
 }
 
+// GetOpenedFilesByUser returns opened files for a user sorted by OpenedAt (newest first).
+func (s *SQLiteStore) GetOpenedFilesByUser(userID string) ([]*model.OpenedFile, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.Query(
+		`SELECT file_id, session_id, user_id, file_path, file_name, opened_at, closed_at, is_open
+		FROM opened_files WHERE user_id = ? ORDER BY opened_at DESC`,
+		userID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query opened files by user: %w", err)
+	}
+	defer rows.Close()
+
+	var files []*model.OpenedFile
+	for rows.Next() {
+		f := &model.OpenedFile{}
+		var openedAt, closedAt int64
+		var isOpenInt int
+
+		err := rows.Scan(
+			&f.FileID,
+			&f.SessionID,
+			&f.UserID,
+			&f.FilePath,
+			&f.FileName,
+			&openedAt,
+			&closedAt,
+			&isOpenInt,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan opened file: %w", err)
+		}
+
+		f.OpenedAt = time.Unix(openedAt, 0)
+		if closedAt > 0 {
+			f.ClosedAt = time.Unix(closedAt, 0)
+		}
+		f.IsOpen = isOpenInt != 0
+		files = append(files, f)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating opened files: %w", err)
+	}
+
+	return files, nil
+}
+
 // GetSession is an alias for Get to match DebugStore interface
 func (s *SQLiteStore) GetSession(sessionID string) (*model.Session, error) {
 	return s.Get(sessionID)
@@ -1565,11 +1625,12 @@ func (s *SQLiteStore) PutToolCall(toolCall *model.ToolCall) error {
 	if status == "" {
 		status = model.ToolCallStatusPending
 	}
+	displayLabel := toolCall.DisplayLabel
 	// Use INSERT OR REPLACE for upsert behavior
 	_, err := s.db.Exec(
 		`INSERT OR REPLACE INTO tool_calls (
-			tool_call_id, tool_id, message_id, session_id, user_id, agent_type, function_name, arguments, response, response_length, duration_ms, status, error, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			tool_call_id, tool_id, message_id, session_id, user_id, agent_type, function_name, display_label, arguments, response, response_length, duration_ms, status, error, created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		toolCall.ToolCallID,
 		toolCall.ToolID,
 		toolCall.MessageID,
@@ -1577,6 +1638,7 @@ func (s *SQLiteStore) PutToolCall(toolCall *model.ToolCall) error {
 		toolCall.UserID,
 		string(toolCall.AgentType),
 		toolCall.FunctionName,
+		displayLabel,
 		toolCall.Arguments,
 		toolCall.Response,
 		toolCall.ResponseLength,
@@ -1650,7 +1712,7 @@ func (s *SQLiteStore) GetToolCallsBySession(sessionID string) ([]*model.ToolCall
 	defer s.mu.RUnlock()
 
 	rows, err := s.db.Query(
-		`SELECT tool_call_id, tool_id, message_id, session_id, user_id, agent_type, function_name, arguments, response, response_length, duration_ms, status, error, created_at, updated_at
+		`SELECT tool_call_id, tool_id, message_id, session_id, user_id, agent_type, function_name, COALESCE(display_label,'') as display_label, arguments, response, response_length, duration_ms, status, error, created_at, updated_at
 		FROM tool_calls WHERE session_id = ? ORDER BY created_at DESC`,
 		sessionID,
 	)
@@ -1673,6 +1735,7 @@ func (s *SQLiteStore) GetToolCallsBySession(sessionID string) ([]*model.ToolCall
 			&tc.UserID,
 			&agentType,
 			&tc.FunctionName,
+			&tc.DisplayLabel,
 			&tc.Arguments,
 			&tc.Response,
 			&tc.ResponseLength,
@@ -1705,7 +1768,7 @@ func (s *SQLiteStore) GetAllToolCalls() ([]*model.ToolCall, error) {
 	defer s.mu.RUnlock()
 
 	rows, err := s.db.Query(
-		`SELECT tool_call_id, tool_id, message_id, session_id, user_id, agent_type, function_name, arguments, response, response_length, duration_ms, status, error, created_at, updated_at
+		`SELECT tool_call_id, tool_id, message_id, session_id, user_id, agent_type, function_name, COALESCE(display_label,'') as display_label, arguments, response, response_length, duration_ms, status, error, created_at, updated_at
 		FROM tool_calls ORDER BY created_at DESC`,
 	)
 	if err != nil {
@@ -1727,6 +1790,7 @@ func (s *SQLiteStore) GetAllToolCalls() ([]*model.ToolCall, error) {
 			&tc.UserID,
 			&agentType,
 			&tc.FunctionName,
+			&tc.DisplayLabel,
 			&tc.Arguments,
 			&tc.Response,
 			&tc.ResponseLength,
@@ -1759,7 +1823,7 @@ func (s *SQLiteStore) GetToolCallByID(toolCallID string) (*model.ToolCall, error
 	defer s.mu.RUnlock()
 
 	row := s.db.QueryRow(
-		`SELECT tool_call_id, tool_id, message_id, session_id, user_id, agent_type, function_name, arguments, response, response_length, duration_ms, status, error, created_at, updated_at
+		`SELECT tool_call_id, tool_id, message_id, session_id, user_id, agent_type, function_name, COALESCE(display_label,'') as display_label, arguments, response, response_length, duration_ms, status, error, created_at, updated_at
 		FROM tool_calls WHERE tool_call_id = ?`,
 		toolCallID,
 	)
@@ -1776,6 +1840,7 @@ func (s *SQLiteStore) GetToolCallByID(toolCallID string) (*model.ToolCall, error
 		&tc.UserID,
 		&agentType,
 		&tc.FunctionName,
+		&tc.DisplayLabel,
 		&tc.Arguments,
 		&tc.Response,
 		&tc.ResponseLength,
@@ -1802,7 +1867,7 @@ func (s *SQLiteStore) GetToolCallByToolID(toolID string) (*model.ToolCall, error
 	defer s.mu.RUnlock()
 
 	row := s.db.QueryRow(
-		`SELECT tool_call_id, tool_id, message_id, session_id, user_id, agent_type, function_name, arguments, response, response_length, duration_ms, status, error, created_at, updated_at
+		`SELECT tool_call_id, tool_id, message_id, session_id, user_id, agent_type, function_name, COALESCE(display_label,'') as display_label, arguments, response, response_length, duration_ms, status, error, created_at, updated_at
 		FROM tool_calls WHERE tool_id = ?`,
 		toolID,
 	)
@@ -1819,6 +1884,7 @@ func (s *SQLiteStore) GetToolCallByToolID(toolID string) (*model.ToolCall, error
 		&tc.UserID,
 		&agentType,
 		&tc.FunctionName,
+		&tc.DisplayLabel,
 		&tc.Arguments,
 		&tc.Response,
 		&tc.ResponseLength,

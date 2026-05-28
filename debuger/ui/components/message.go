@@ -3,8 +3,8 @@ package components
 import (
 	"fmt"
 	"html/template"
-	"time"
 
+	"github.com/ghiac/agentize/debuger"
 	"github.com/ghiac/agentize/model"
 )
 
@@ -118,30 +118,6 @@ func MessageListEnd() string {
 	return ListGroupEnd()
 }
 
-// AgentTypeBadgeFromModel returns a badge for agent type from model.AgentType
-func AgentTypeBadgeFromModel(agentType model.AgentType) string {
-	switch agentType {
-	case model.AgentTypeCore:
-		return Badge("Core", "primary")
-	case model.AgentTypeLow:
-		return Badge("Low", "info")
-	case model.AgentTypeHigh:
-		return Badge("High", "success")
-	case model.AgentTypeUser:
-		return Badge("User", "warning")
-	default:
-		if agentType == "" {
-			return Badge("-", "secondary")
-		}
-		return Badge(string(agentType), "secondary")
-	}
-}
-
-// AgentTypeBadgeFromString returns a badge for agent type from string
-func AgentTypeBadgeFromString(agentType string) string {
-	return AgentTypeBadgeFromModel(model.AgentType(agentType))
-}
-
 // ContentTypeBadgeFromModel returns a badge for content type from model.ContentType
 func ContentTypeBadgeFromModel(contentType model.ContentType) string {
 	switch contentType {
@@ -249,7 +225,7 @@ func MessageTableRow(msg *model.Message, config MessageRowConfig, rowIndex int) 
 	}
 
 	// Format time as "ago"
-	timeAgo := formatTimeAgo(msg.CreatedAt)
+	timeAgo := debuger.FormatTimeAgo(msg.CreatedAt)
 
 	// Build the collapsed row
 	rowID := fmt.Sprintf("msg-row-%d", rowIndex)
@@ -383,22 +359,6 @@ function toggleMessageRow(rowId, btnId) {
 }
 </script>
 `
-}
-
-// formatTimeAgo formats time as "X ago" format
-func formatTimeAgo(t time.Time) string {
-	if t.IsZero() {
-		return "Never"
-	}
-	duration := time.Since(t)
-	if duration < time.Minute {
-		return fmt.Sprintf("%ds ago", int(duration.Seconds()))
-	} else if duration < time.Hour {
-		return fmt.Sprintf("%dm ago", int(duration.Minutes()))
-	} else if duration < 24*time.Hour {
-		return fmt.Sprintf("%.1fh ago", duration.Hours())
-	}
-	return fmt.Sprintf("%dd ago", int(duration.Hours()/24))
 }
 
 // Helper to format bool as badge

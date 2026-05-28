@@ -13,6 +13,7 @@ type DebugStore interface {
 	GetAllUsers() ([]*model.User, error)
 	GetAllMessages() ([]*model.Message, error)
 	GetAllOpenedFiles() ([]*model.OpenedFile, error)
+	GetOpenedFilesByUser(userID string) ([]*model.OpenedFile, error)
 	GetMessagesBySession(sessionID string) ([]*model.Message, error)
 	GetMessagesByUser(userID string) ([]*model.Message, error)
 	GetOpenedFilesBySession(sessionID string) ([]*model.OpenedFile, error)
@@ -51,6 +52,7 @@ type ToolCallInfo struct {
 	ToolCallID   string // OpenAI's tool call ID
 	AgentType    string
 	FunctionName string
+	DisplayLabel string // Human-readable label for dashboard (e.g. "Execute plan"); when empty, show FunctionName
 	Arguments    string
 	Result       string
 	ResultLength int

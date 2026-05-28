@@ -250,7 +250,7 @@ func TestToolCallPersister_SaveWithAgentType(t *testing.T) {
 	}
 
 	// Save with explicit AgentTypeCore (overriding session's AgentType)
-	toolID := p.SaveWithAgentType(session, "msg-002", toolCall, model.AgentTypeCore)
+	toolID := p.SaveWithAgentType(session, "msg-002", toolCall, model.AgentTypeCore, "Get weather")
 
 	if toolID == "" {
 		t.Fatal("expected non-empty toolID")
@@ -343,7 +343,7 @@ func TestToolCallPersister_NilPersister(t *testing.T) {
 		t.Errorf("expected empty toolID from nil persister, got %s", toolID)
 	}
 
-	toolID = p.SaveWithAgentType(session, "m1", toolCall, model.AgentTypeCore)
+	toolID = p.SaveWithAgentType(session, "m1", toolCall, model.AgentTypeCore, "")
 	if toolID != "" {
 		t.Errorf("expected empty toolID from nil persister, got %s", toolID)
 	}

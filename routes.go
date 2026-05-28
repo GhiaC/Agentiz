@@ -27,6 +27,8 @@ func (ag *Agentize) RegisterRoutes(router *gin.Engine) {
 	router.POST("/agentize/debug/users/:userID/delete-data", ag.handleDebugUserDeleteData)
 	router.GET("/agentize/debug/sessions", ag.handleDebugSessions)
 	router.GET("/agentize/debug/sessions/:sessionID", ag.handleDebugSessionDetail)
+	router.GET("/agentize/debug/plans", ag.handleDebugPlans)
+	router.GET("/agentize/debug/plans/:planID", ag.handleDebugPlanDetail)
 	router.GET("/agentize/debug/messages", ag.handleDebugMessages)
 	router.GET("/agentize/debug/files", ag.handleDebugFiles)
 	router.GET("/agentize/debug/tool-calls", ag.handleDebugToolCalls)
@@ -34,8 +36,12 @@ func (ag *Agentize) RegisterRoutes(router *gin.Engine) {
 	router.GET("/agentize/debug/summarized", ag.handleDebugSummarized)
 	router.GET("/agentize/debug/summarized/:logID", ag.handleDebugSummarizationLogDetail)
 
-	// Register extra debug pages from applications
+	// Register extra debug pages (with sidebar entry)
 	for _, p := range ag.extraDebugPages {
+		router.GET(p.Path, p.Handler)
+	}
+	// Register extra debug routes (no sidebar entry, e.g. detail pages)
+	for _, p := range ag.extraDebugRoutes {
 		router.GET(p.Path, p.Handler)
 	}
 }
@@ -153,7 +159,7 @@ func (ag *Agentize) handleDebug(c *gin.Context) {
 		return
 	}
 
-	html, err := pages.RenderDashboard(handler)
+	html, err := pages.RenderDashboardWithPlanning(handler, ag.GetPlanStore() != nil)
 	if err != nil {
 		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to generate debug page: %v", err)})
 		return
@@ -275,6 +281,34 @@ func (ag *Agentize) handleDebugSessionDetail(c *gin.Context) {
 		return
 	}
 
+	c.Header("Content-Type", "text/html; charset=utf-8")
+	c.String(200, html)
+}
+
+// handleDebugPlans handles plans list page requests (planning execution plans)
+func (ag *Agentize) handleDebugPlans(c *gin.Context) {
+	page := getPageParam(c)
+	html, err := pages.RenderPlans(ag.GetPlanStore(), page)
+	if err != nil {
+		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to generate plans page: %v", err)})
+		return
+	}
+	c.Header("Content-Type", "text/html; charset=utf-8")
+	c.String(200, html)
+}
+
+// handleDebugPlanDetail handles plan detail page requests
+func (ag *Agentize) handleDebugPlanDetail(c *gin.Context) {
+	planID := c.Param("planID")
+	if planID == "" {
+		c.JSON(400, gin.H{"error": "planID parameter is required"})
+		return
+	}
+	html, err := pages.RenderPlanDetail(ag.GetPlanStore(), planID)
+	if err != nil {
+		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to generate plan detail page: %v", err)})
+		return
+	}
 	c.Header("Content-Type", "text/html; charset=utf-8")
 	c.String(200, html)
 }

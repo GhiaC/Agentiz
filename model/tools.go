@@ -246,6 +246,9 @@ type ToolCall struct {
 	// FunctionName is the name of the function/tool that was called
 	FunctionName string
 
+	// DisplayLabel is the human-readable label for dashboard/UI (e.g. "Execute plan", "Ban user"). When empty, UI shows FunctionName.
+	DisplayLabel string
+
 	// Arguments is the JSON string of arguments passed to the tool
 	Arguments string
 

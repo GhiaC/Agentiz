@@ -3,8 +3,8 @@ package components
 import (
 	"fmt"
 	"html/template"
-	"time"
 
+	"github.com/ghiac/agentize/debuger"
 	"github.com/ghiac/agentize/model"
 )
 
@@ -69,7 +69,7 @@ func SessionTableRow(session *model.Session, config SessionRowConfig, rowIndex i
 	msgCount := len(session.Msgs)
 
 	// Format time as "ago"
-	timeAgo := formatTimeAgo(session.UpdatedAt)
+	timeAgo := debuger.FormatTimeAgo(session.UpdatedAt)
 
 	// Status badges
 	var statusBadges string
@@ -155,7 +155,7 @@ func SessionTableRow(session *model.Session, config SessionRowConfig, rowIndex i
 	// Summarized at display
 	summarizedAtDisplay := "-"
 	if !session.SummarizedAt.IsZero() {
-		summarizedAtDisplay = session.SummarizedAt.Format("2006-01-02 15:04:05") + " (" + formatTimeAgo(session.SummarizedAt) + ")"
+		summarizedAtDisplay = session.SummarizedAt.Format("2006-01-02 15:04:05") + " (" + debuger.FormatTimeAgo(session.SummarizedAt) + ")"
 	}
 
 	// Get files count if function provided
@@ -221,8 +221,8 @@ func SessionTableRow(session *model.Session, config SessionRowConfig, rowIndex i
 		session.MessageSeq,
 		session.ToolSeq,
 		CountBadge(filesCount, "info"),
-		formatDateTime(session.CreatedAt),
-		formatDateTime(session.UpdatedAt),
+		debuger.FormatDateTime(session.CreatedAt),
+		debuger.FormatDateTime(session.UpdatedAt),
 		summarizedAtDisplay,
 		inProgressDisplay,
 		tagsDisplay,
@@ -252,12 +252,4 @@ function toggleSessionRow(rowId, btnId) {
 }
 </script>
 `
-}
-
-// formatDateTime formats time for display
-func formatDateTime(t time.Time) string {
-	if t.IsZero() {
-		return "-"
-	}
-	return t.Format("2006-01-02 15:04:05")
 }

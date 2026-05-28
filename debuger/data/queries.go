@@ -202,25 +202,9 @@ func (dp *DataProvider) GetOpenedFilesBySession(sessionID string) ([]*model.Open
 	return files, nil
 }
 
-// GetOpenedFilesByUser returns opened files for a user sorted by OpenedAt (newest first)
+// GetOpenedFilesByUser returns opened files for a user sorted by OpenedAt (newest first).
 func (dp *DataProvider) GetOpenedFilesByUser(userID string) ([]*model.OpenedFile, error) {
-	allFiles, err := dp.store.GetAllOpenedFiles()
-	if err != nil {
-		return nil, err
-	}
-	var userFiles []*model.OpenedFile
-	for _, f := range allFiles {
-		if f.UserID == userID {
-			userFiles = append(userFiles, f)
-		}
-	}
-
-	// Sort by OpenedAt (newest first)
-	sort.Slice(userFiles, func(i, j int) bool {
-		return userFiles[i].OpenedAt.After(userFiles[j].OpenedAt)
-	})
-
-	return userFiles, nil
+	return dp.store.GetOpenedFilesByUser(userID)
 }
 
 // GetAllToolCalls returns all tool calls sorted by CreatedAt (newest first)
@@ -315,11 +299,15 @@ func (dp *DataProvider) GetDashboardStats() (*debuger.DashboardStats, error) {
 		return nil, err
 	}
 
-	// Count tool calls
+	// Use real tool call count from store so dashboard reflects all stored tool calls (with labels)
 	toolCallCount := 0
-	for _, msg := range messages {
-		if msg.HasToolCalls {
-			toolCallCount++
+	if toolCalls, err := dp.store.GetAllToolCalls(); err == nil {
+		toolCallCount = len(toolCalls)
+	} else {
+		for _, msg := range messages {
+			if msg.HasToolCalls {
+				toolCallCount++
+			}
 		}
 	}
 
@@ -403,6 +391,7 @@ func ConvertToolCallsToInfo(toolCalls []*model.ToolCall) []debuger.ToolCallInfo 
 			ToolCallID:   tc.ToolCallID,
 			AgentType:    string(tc.AgentType),
 			FunctionName: tc.FunctionName,
+			DisplayLabel: tc.DisplayLabel,
 			Arguments:    tc.Arguments,
 			Result:       tc.Response,
 			ResultLength: tc.ResponseLength,

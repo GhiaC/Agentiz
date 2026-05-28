@@ -61,8 +61,14 @@ func ToolCallTableRow(tc *debuger.ToolCallInfo, config ToolCallRowConfig, rowInd
 	// Result preview
 	resultPreview := TruncatedText(tc.Result, 80)
 
+	// Display name: label for dashboard (e.g. "Execute plan") or function name when no label
+	displayName := tc.DisplayLabel
+	if displayName == "" {
+		displayName = tc.FunctionName
+	}
+
 	// Format time as "ago"
-	timeAgo := formatTimeAgo(tc.CreatedAt)
+	timeAgo := debuger.FormatTimeAgo(tc.CreatedAt)
 
 	// Duration display
 	durationDisplay := debuger.FormatDurationMs(tc.DurationMs)
@@ -107,7 +113,7 @@ func ToolCallTableRow(tc *debuger.ToolCallInfo, config ToolCallRowConfig, rowInd
 		rowID, expandBtnID, expandBtnID,
 		timeAgo,
 		agentBadge,
-		InlineCode(tc.FunctionName),
+		InlineCode(displayName),
 		argsPreview,
 		resultPreview,
 		durationDisplay,
@@ -147,7 +153,7 @@ func ToolCallTableRow(tc *debuger.ToolCallInfo, config ToolCallRowConfig, rowInd
 	resultLenDisplay := debuger.FormatChars(tc.ResultLength)
 
 	// Format created/updated times
-	createdAtDisplay := formatDateTime(tc.CreatedAt)
+	createdAtDisplay := debuger.FormatDateTime(tc.CreatedAt)
 
 	errorRow := ""
 	if tc.Error != "" {
@@ -162,7 +168,8 @@ func ToolCallTableRow(tc *debuger.ToolCallInfo, config ToolCallRowConfig, rowInd
 						<table class="table table-sm table-borderless mb-0">
 							<tr><th class="text-muted" style="width: 140px;">Tool ID</th><td>%s</td></tr>
 							<tr><th class="text-muted">Tool Call ID</th><td>%s</td></tr>
-							<tr><th class="text-muted">Function Name</th><td>%s</td></tr>
+							<tr><th class="text-muted">Function</th><td>%s</td></tr>
+							<tr><th class="text-muted">Label</th><td>%s</td></tr>
 							<tr><th class="text-muted">Agent Type</th><td>%s</td></tr>
 							<tr><th class="text-muted">User ID</th><td>%s</td></tr>
 							<tr><th class="text-muted">Session ID</th><td>%s</td></tr>
@@ -199,6 +206,7 @@ func ToolCallTableRow(tc *debuger.ToolCallInfo, config ToolCallRowConfig, rowInd
 		InlineCode(tc.ToolID),
 		InlineCode(tc.ToolCallID),
 		InlineCode(tc.FunctionName),
+		InlineCode(displayName),
 		agentBadge,
 		TruncatedLink(tc.UserID, config.BaseURL+"/users/"+template.URLQueryEscaper(tc.UserID), 40),
 		TruncatedLink(tc.SessionID, config.BaseURL+"/sessions/"+template.URLQueryEscaper(tc.SessionID), 40),

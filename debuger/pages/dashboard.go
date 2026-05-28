@@ -9,8 +9,9 @@ import (
 	"github.com/ghiac/agentize/debuger/ui/components"
 )
 
-// RenderDashboard generates the dashboard HTML page
-func RenderDashboard(handler *debuger.DebugHandler) (string, error) {
+// RenderDashboard generates the dashboard HTML page.
+// When showPlansLink is true, the Quick Links section includes a link to the Plans page.
+func RenderDashboard(handler *debuger.DebugHandler, showPlansLink bool) (string, error) {
 	dp := data.NewDataProvider(handler.GetStore())
 
 	stats, err := dp.GetDashboardStats()
@@ -115,6 +116,16 @@ func RenderDashboard(handler *debuger.DebugHandler) (string, error) {
 	)
 	content += `</div>`
 
+	if showPlansLink {
+		content += `<div class="col-md-6 col-lg-3">`
+		content += components.LinkCard(
+			"View Execution Plans",
+			"Browse all execution plans and their steps",
+			"📋", "/agentize/debug/plans",
+		)
+		content += `</div>`
+	}
+
 	content += `</div>
             </div>
         </div>
@@ -123,4 +134,9 @@ func RenderDashboard(handler *debuger.DebugHandler) (string, error) {
 
 	content += ui.ContainerEnd()
 	return ui.Header("Agentize Debug - Dashboard") + ui.NavbarAndBody("/agentize/debug", content) + ui.Footer(), nil
+}
+
+// RenderDashboardWithPlanning is like RenderDashboard with showPlansLink set by the caller.
+func RenderDashboardWithPlanning(handler *debuger.DebugHandler, showPlansLink bool) (string, error) {
+	return RenderDashboard(handler, showPlansLink)
 }

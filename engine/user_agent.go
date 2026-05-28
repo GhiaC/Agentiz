@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"net/http"
 	"sort"
 	"strings"
@@ -813,14 +814,14 @@ func (e *Engine) collectFileIndexEntries(path string, openedPaths map[string]boo
 	}
 }
 
-// truncateString truncates a string to maxLen and adds ellipsis if needed
 func truncateString(s string, maxLen int) string {
-	s = strings.ReplaceAll(s, "|", "/") // Escape pipe for markdown table
+	s = strings.ReplaceAll(s, "|", "/")
 	s = strings.ReplaceAll(s, "\n", " ")
-	if len(s) <= maxLen {
+	runes := []rune(s)
+	if len(runes) <= maxLen {
 		return s
 	}
-	return s[:maxLen-3] + "..."
+	return string(runes[:maxLen-3]) + "..."
 }
 
 // getOpenedNodePrompts returns prompts for opened nodes in deterministic order
@@ -963,13 +964,11 @@ func parseResultID(resultID string) (sessionID string, ok bool) {
 	return "", false
 }
 
-// randomString generates a random string of given length
 func randomString(n int) string {
 	const charset = "abcdefghijklmnopqrstuvwxyz0123456789"
 	b := make([]byte, n)
 	for i := range b {
-		b[i] = charset[time.Now().UnixNano()%int64(len(charset))]
-		time.Sleep(1 * time.Nanosecond) // Ensure different values
+		b[i] = charset[rand.IntN(len(charset))]
 	}
 	return string(b)
 }

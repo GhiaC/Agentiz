@@ -99,12 +99,14 @@ func (p *ToolCallPersister) Save(
 	return toolID
 }
 
-// SaveWithAgentType persists a tool call with an explicit agent type (for CoreHandler).
+// SaveWithAgentType persists a tool call with an explicit agent type and optional display label (for CoreHandler).
+// displayLabel is shown in the dashboard to distinguish tool types (e.g. "Execute plan", "Ban user"); when empty, FunctionName is used in UI.
 func (p *ToolCallPersister) SaveWithAgentType(
 	session *model.Session,
 	messageID string,
 	toolCall openai.ToolCall,
 	agentType model.AgentType,
+	displayLabel string,
 ) string {
 	if p == nil || p.store == nil {
 		return ""
@@ -120,6 +122,7 @@ func (p *ToolCallPersister) SaveWithAgentType(
 		UserID:       session.UserID,
 		AgentType:    agentType,
 		FunctionName: toolCall.Function.Name,
+		DisplayLabel: displayLabel,
 		Arguments:    toolCall.Function.Arguments,
 		Response:     "",
 		Status:       model.ToolCallStatusPending,

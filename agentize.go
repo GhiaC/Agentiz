@@ -15,6 +15,7 @@ import (
 	"github.com/ghiac/agentize/llmutils"
 	"github.com/ghiac/agentize/log"
 	"github.com/ghiac/agentize/model"
+	"github.com/ghiac/agentize/planning"
 	"github.com/ghiac/agentize/store"
 	"github.com/ghiac/agentize/visualize"
 	"github.com/gin-gonic/gin"
@@ -25,12 +26,14 @@ func Version() string {
 	return "0.1.0"
 }
 
-// DebugPage represents an external page added to the debug panel
+// DebugPage represents an external page added to the debug panel.
 type DebugPage struct {
 	Path    string          // e.g., "/agentize/debug/quota"
 	Title   string          // Nav label
-	Icon    string          // Nav icon emoji
+	Icon    string          // Nav icon (emoji or Bootstrap icon name for cards)
 	Handler gin.HandlerFunc // Route handler
+	// NoNav, when true, registers the route but does not add an item to the sidebar.
+	NoNav bool
 }
 
 // Agentize is the main entry point for the library
@@ -47,14 +50,19 @@ type Agentize struct {
 	scheduler   *engine.SessionScheduler
 	schedulerMu sync.RWMutex
 
-	// Extra debug pages registered by applications
+	// Extra debug pages registered by applications (shown in sidebar)
 	extraDebugPages []DebugPage
+	// Extra debug routes without sidebar entry (e.g. detail pages)
+	extraDebugRoutes []DebugPage
 
 	// Optional: provider for user billing/credit HTML on debug user detail page
 	userBillingHTMLProvider debuger.UserBillingHTMLProvider
 
 	// Optional: hook called after DeleteUserData (sessions/messages) so app can delete quota/consumption etc.
 	userDeleteDataHook func(userID string) error
+
+	// Optional: planning orchestrator (nil = planning disabled)
+	orchestrator *planning.Orchestrator
 }
 
 // Options allows configuring Agentize behavior
@@ -338,6 +346,55 @@ func (ag *Agentize) ProcessMessage(ctx context.Context, sessionID string, userMe
 	return ag.engine.ProcessMessage(ctx, sessionID, userMessage)
 }
 
+// UsePlanning enables the planning layer with the given planner and runner.
+// The Plans debug pages are always registered; when planning is enabled they show plan data.
+func (ag *Agentize) UsePlanning(planner planning.Planner, runner planning.Runner, opts ...planning.OrchestratorOption) {
+	ag.orchestrator = planning.NewOrchestrator(planner, runner, opts...)
+}
+
+// GetOrchestrator returns the planning orchestrator, or nil if planning is not enabled.
+func (ag *Agentize) GetOrchestrator() *planning.Orchestrator {
+	return ag.orchestrator
+}
+
+// GetPlanStore returns the plan store when planning is enabled, otherwise nil.
+func (ag *Agentize) GetPlanStore() planning.PlanStore {
+	if ag.orchestrator == nil {
+		return nil
+	}
+	return ag.orchestrator.GetStore()
+}
+
+// EnsurePlanningSeed runs initial plan seeding when the store is empty and config allows.
+// Call once at startup after UsePlanning so the Plans dashboard has template data to display.
+func (ag *Agentize) EnsurePlanningSeed(ctx context.Context) error {
+	if ag.orchestrator == nil {
+		return nil
+	}
+	return ag.orchestrator.EnsureSeed(ctx)
+}
+
+// ProcessMessageWithPlanning uses the planning orchestrator when enabled; otherwise falls back to ProcessMessage.
+func (ag *Agentize) ProcessMessageWithPlanning(ctx context.Context, sessionID string, userMessage string) (string, int, error) {
+	if ag.orchestrator == nil {
+		return ag.ProcessMessage(ctx, sessionID, userMessage)
+	}
+	sess, err := ag.engine.Sessions.Get(sessionID)
+	if err != nil {
+		return "", 0, err
+	}
+	input := planning.PlanInput{
+		UserID:    sess.UserID,
+		SessionID: sessionID,
+		Message:   userMessage,
+	}
+	result, err := ag.orchestrator.Execute(ctx, input)
+	if err != nil {
+		return "", 0, err
+	}
+	return result.Output, result.TotalTokens, nil
+}
+
 // CreateSession initializes a fresh session anchored at the root node
 func (ag *Agentize) CreateSession(userID string) (*model.Session, error) {
 	return ag.engine.CreateSession(userID)
@@ -370,10 +427,14 @@ func (ag *Agentize) GenerateGraphVisualization(filename string, title string) er
 // ============================================================================
 
 // AddDebugPage registers an external page to the debug panel.
-// The page will appear in the debugger navbar and be accessible via its Path.
+// If page.NoNav is true, only the route is registered (no sidebar entry).
+// Otherwise the page appears in the debugger sidebar.
 func (ag *Agentize) AddDebugPage(page DebugPage) {
+	if page.NoNav {
+		ag.extraDebugRoutes = append(ag.extraDebugRoutes, page)
+		return
+	}
 	ag.extraDebugPages = append(ag.extraDebugPages, page)
-	// Also register in the global UI navbar so it shows on all debugger pages
 	ui.RegisterNavItem(ui.NavItem{URL: page.Path, Icon: page.Icon, Text: page.Title})
 }
 
@@ -407,6 +468,23 @@ func (ag *Agentize) WaitForShutdown() {
 	log.Log.Infof("[Agentize] 📡 Received signal: %v, initiating graceful shutdown...", sig)
 
 	ag.StopScheduler()
+	ag.ShutdownPlanStore(context.Background())
 
 	log.Log.Infof("[Agentize] ✅ Graceful shutdown completed")
+}
+
+// ShutdownPlanStore flushes and closes the plan store if it implements PlanStoreWithShutdown (e.g. MemoryStore with Persister).
+// Call on graceful shutdown so in-memory plans are persisted.
+func (ag *Agentize) ShutdownPlanStore(ctx context.Context) {
+	store := ag.GetPlanStore()
+	if store == nil {
+		return
+	}
+	if s, ok := store.(planning.PlanStoreWithShutdown); ok {
+		if err := s.Shutdown(ctx); err != nil {
+			log.Log.Warnf("[Agentize] ⚠️ Plan store shutdown: %v", err)
+		} else {
+			log.Log.Infof("[Agentize] 📦 Plan store shutdown (flush complete)")
+		}
+	}
 }

@@ -3,6 +3,8 @@ package components
 import (
 	"fmt"
 	"html/template"
+
+	"github.com/ghiac/agentize/model"
 )
 
 // Badge generates a Bootstrap badge
@@ -72,21 +74,32 @@ func TokenBadge(total, prompt, completion int) string {
 		total, prompt, completion)
 }
 
-// AgentTypeBadge generates a badge for agent types
+// AgentTypeBadge generates a badge for agent types (string). Use AgentTypeBadgeFromModel for model.AgentType.
 func AgentTypeBadge(agentType string) string {
-	if agentType == "" {
-		return Badge("-", "secondary")
-	}
-	variant := "secondary"
+	return AgentTypeBadgeFromString(agentType)
+}
+
+// AgentTypeBadgeFromModel returns a badge for agent type from model.AgentType.
+func AgentTypeBadgeFromModel(agentType model.AgentType) string {
 	switch agentType {
-	case "core":
-		variant = "danger"
-	case "high":
-		variant = "primary"
-	case "low":
-		variant = "success"
+	case model.AgentTypeCore:
+		return Badge("Core", "primary")
+	case model.AgentTypeLow:
+		return Badge("Low", "info")
+	case model.AgentTypeHigh:
+		return Badge("High", "success")
+	case model.AgentTypeUser:
+		return Badge("User", "warning")
+	case "":
+		return Badge("-", "secondary")
+	default:
+		return Badge(string(agentType), "secondary")
 	}
-	return Badge(agentType, variant)
+}
+
+// AgentTypeBadgeFromString returns a badge for agent type from string.
+func AgentTypeBadgeFromString(agentType string) string {
+	return AgentTypeBadgeFromModel(model.AgentType(agentType))
 }
 
 // BoolBadge generates a badge for boolean values

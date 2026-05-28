@@ -33,6 +33,8 @@ type StatusUpdate struct {
 	Metadata  map[string]interface{} // extensible
 	// SendAsNewMessage: when true, the receiver should send a new message instead of editing the status message.
 	SendAsNewMessage bool
+	// MessageID: when set, the receiver should update this specific message (e.g. plan status) instead of the default status target.
+	MessageID string
 }
 
 // NotifyOption modifies a StatusUpdate before it is passed to the StatusFunc.
@@ -41,6 +43,11 @@ type NotifyOption func(*StatusUpdate)
 // OptSendAsNewMessage sets SendAsNewMessage on the StatusUpdate so the client sends a new message instead of editing.
 func OptSendAsNewMessage() NotifyOption {
 	return func(s *StatusUpdate) { s.SendAsNewMessage = true }
+}
+
+// OptMessageID sets the message ID to update. When set, the status callback should edit this specific message (e.g. plan progress).
+func OptMessageID(messageID string) NotifyOption {
+	return func(s *StatusUpdate) { s.MessageID = messageID }
 }
 
 // StatusFunc is a per-request callback for real-time status updates.
