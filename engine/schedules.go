@@ -10,6 +10,7 @@ import (
 
 	"github.com/ghiac/agentize/debuger"
 	"github.com/ghiac/agentize/log"
+	"github.com/ghiac/agentize/metrics"
 	"github.com/ghiac/agentize/model"
 	"github.com/sashabaranov/go-openai"
 )
@@ -37,6 +38,12 @@ type SessionSchedulerConfig struct {
 	// ImmediateSummarizationThreshold is the message count that triggers immediate summarization
 	// regardless of other conditions (default: 50)
 	ImmediateSummarizationThreshold int
+
+	// RetainRecentMessages is how many of the most recent messages are kept in the
+	// active conversation (Msgs) after summarization, instead of archiving everything.
+	// This gives a rolling window of verbatim recent context so the conversation does
+	// not suddenly go empty. Older messages are moved to ArchivedMsgs. (default: 10)
+	RetainRecentMessages int
 
 	// SummaryModel is the LLM model to use for summarization (default: gpt-4o-mini)
 	SummaryModel string
@@ -79,6 +86,7 @@ func DefaultSessionSchedulerConfig() SessionSchedulerConfig {
 		SubsequentTimeThreshold:         1 * time.Hour, // Plus at least 1 hour since last summarization
 		LastActivityThreshold:           1 * time.Hour, // Session must be active within last hour
 		ImmediateSummarizationThreshold: 50,            // Immediate summarization when messages exceed 50
+		RetainRecentMessages:            10,            // Keep the last 10 messages active (rolling window)
 		SummarizationPrompts:            DefaultSummarizationPrompts(),
 	}
 }
@@ -95,41 +103,43 @@ type userStore interface {
 // DefaultSummarizationPrompts returns default prompts for summarization
 func DefaultSummarizationPrompts() SummarizationPrompts {
 	return SummarizationPrompts{
-		SummarySystemPrompt: `You are a conversation summarizer that extracts ONLY unique, specific, and personal information.
+		SummarySystemPrompt: `You are an INCREMENTAL conversation summarizer. You maintain a running summary by MERGING new information into the previous summary. You never rewrite it from scratch and never drop previously captured specifics.
 
-CONTENT VIOLATION (check first): If the user's messages contain offensive, vulgar, abusive, or clearly inappropriate language (insults, slurs, explicit content, hate speech, etc.), you MUST respond with ONLY this exact word, nothing else: OFFENSIVE_CONTENT. No explanation, no other text, no summary.
+CONTENT VIOLATION (check first): If the user's messages contain offensive, vulgar, abusive, or clearly inappropriate language (insults, slurs, explicit content, hate speech, etc.), respond with ONLY this exact word, nothing else: OFFENSIVE_CONTENT. No explanation, no other text.
 
-WHAT TO INCLUDE (specific/unique information):
-- Names of people, places, or entities mentioned
+HOW TO MERGE (append-style):
+- Start from the previous summary and KEEP all of its specific facts.
+- ADD only genuinely new specific information found in the new conversation.
+- If new info CORRECTS or UPDATES an existing fact (preference changed, a value/name/number changed), update just that fact and keep the rest.
+- Never delete a previously captured specific unless it was explicitly retracted or corrected.
+- Deduplicate: do not state the same fact twice.
+
+WHAT COUNTS AS SPECIFIC (include):
+- Names of people, places, or entities
 - Personal details: age, birthday, preferences, relationships
-- Specific decisions or commitments made
-- Important numbers that define something (age, dates, IDs, specific values the user defined)
-- Unique facts about the user or their situation
-- Custom configurations or settings discussed
+- Decisions, commitments, goals
+- Important numbers/IDs/dates the user defined
+- Custom configurations or settings
 
-WHAT TO EXCLUDE (generic/common information):
-- Greetings, pleasantries, and small talk
-- General questions and answers (unit conversions, weather, time, etc.)
-- Temporary calculations or arithmetic results
-- Generic how-to questions
-- Common knowledge lookups
-- Filler content and acknowledgments
+WHAT TO IGNORE (never add):
+- Greetings, pleasantries, small talk, acknowledgments
+- Generic Q&A (unit conversions, weather, time), temporary calculations
+- Generic how-to and common-knowledge lookups, filler
 
-Requirements:
-- Maximum 200 characters
-- Only include information that would be LOST if not summarized
-- If nothing specific/unique was discussed, return empty or minimal summary
-- If a previous summary is provided, preserve its specific information and add new specifics
+OUTPUT REQUIREMENTS:
+- Return the FULL updated summary (previous facts + additions/corrections), NOT just the delta.
+- Use compact factual sentences. Soft limit ~800 characters; if you would exceed it, compress by merging related facts, but NEVER drop a unique specific.
+- If nothing specific is present, return the previous summary unchanged (or empty if there was none).
 
-Example GOOD summary: "User Ali, 28 years old, prefers dark mode. Works at TechCorp on Kubernetes projects."
-Example BAD summary: "Discussed unit conversions and weather. User asked about time zones."`,
+Example: previous "User Ali, 28, prefers dark mode." + new "I just turned 29 and joined TechCorp" => "User Ali, 29, prefers dark mode. Works at TechCorp."`,
 
-		SummaryUserPromptTemplate: `{{if .PreviousSummary}}Previous summary (preserve specific info): {{.PreviousSummary}}
+		SummaryUserPromptTemplate: `{{if .PreviousSummary}}CURRENT running summary (keep all its facts; update one only if the new conversation corrects it):
+{{.PreviousSummary}}
 
-New conversation to incorporate:
+NEW conversation to merge in:
 {{end}}{{.ConversationText}}
 
-Extract ONLY specific/unique information (names, ages, personal details, important decisions). Ignore generic questions and small talk:`,
+Return the FULL updated summary by merging the new specific information into the current one (add new specifics, correct outdated facts, keep everything else, ignore small talk):`,
 
 		TagSystemPrompt: `You are a conversation tagger that identifies SPECIFIC topics only.
 
@@ -306,7 +316,14 @@ func (ss *SessionScheduler) chatCompletion(ctx context.Context, request openai.C
 
 	// Fall back to main llmClient
 	log.Log.Infof("[SessionScheduler] 🔵 MAIN LLM >> Calling main LLM | Model: %s", ss.config.SummaryModel)
-	return ss.llmClient.CreateChatCompletion(ctx, request)
+	sumStart := time.Now()
+	resp, err := ss.llmClient.CreateChatCompletion(ctx, request)
+	cached := 0
+	if resp.Usage.PromptTokensDetails != nil {
+		cached = resp.Usage.PromptTokensDetails.CachedTokens
+	}
+	metrics.LLMCall("summary", ss.config.SummaryModel, metrics.Status(err), time.Since(sumStart), resp.Usage.PromptTokens, resp.Usage.CompletionTokens, cached)
+	return resp, err
 }
 
 // run runs the scheduler loop
@@ -368,6 +385,10 @@ func (ss *SessionScheduler) checkAndSummarizeSessions(ctx context.Context) {
 		log.Log.Infof("[SessionScheduler] 🔍 Checking sessions for summarization...")
 	}
 
+	runStart := time.Now()
+	metrics.SchedulerRunning(true)
+	defer metrics.SchedulerRunning(false)
+
 	// Get all sessions from store
 	sessionStore := ss.sessionHandler.GetStore()
 	debugStore, ok := sessionStore.(debuger.DebugStore)
@@ -375,6 +396,7 @@ func (ss *SessionScheduler) checkAndSummarizeSessions(ctx context.Context) {
 		if !ss.config.DisableLogs {
 			log.Log.Errorf("[SessionScheduler] ❌ Store does not implement DebugStore interface")
 		}
+		metrics.SchedulerRun("error", time.Since(runStart), 0, 0)
 		return
 	}
 
@@ -383,6 +405,7 @@ func (ss *SessionScheduler) checkAndSummarizeSessions(ctx context.Context) {
 		if !ss.config.DisableLogs {
 			log.Log.Errorf("[SessionScheduler] ❌ Failed to get all sessions: %v", err)
 		}
+		metrics.SchedulerRun("error", time.Since(runStart), 0, 0)
 		return
 	}
 
@@ -468,7 +491,10 @@ sessionLoop:
 				if !ss.config.DisableLogs {
 					log.Log.Infof("[SessionScheduler] 🎯 Session eligible for summarization | SessionID: %s | UserID: %s | Messages: %d", session.SessionID, userID, msgCount)
 				}
-				if err := ss.summarizeSession(ctx, session); err != nil {
+				sumStart := time.Now()
+				sumErr := ss.summarizeSession(ctx, session)
+				metrics.SchedulerSummary(metrics.Status(sumErr), time.Since(sumStart))
+				if err := sumErr; err != nil {
 					// Check if error is due to context cancellation
 					if ctx.Err() != nil {
 						if !ss.config.DisableLogs {
@@ -511,6 +537,12 @@ sessionLoop:
 			status, totalSessions, totalUsers, totalMessages, sessionsWithMessages, sessionsWithoutMessages, alreadySummarizedSessions, sessionsNotEligible, eligibleSessions, summarizedSessions,
 			ss.config.FirstSummarizationThreshold, ss.config.SubsequentMessageThreshold, ss.config.SubsequentTimeThreshold)
 	}
+
+	runStatus := "ok"
+	if stoppedEarly {
+		runStatus = "interrupted"
+	}
+	metrics.SchedulerRun(runStatus, time.Since(runStart), totalSessions, summarizedSessions)
 }
 
 // isEligibleForSummarization checks if a session is eligible for summarization
@@ -574,7 +606,22 @@ func (ss *SessionScheduler) isEligibleForSummarization(session *model.Session, n
 	return true
 }
 
-// summarizeSession summarizes a session and moves messages to ArchivedMsgs
+// splitRollingWindow splits messages into the older ones to archive and the most
+// recent `retain` to keep active. When len(msgs) <= retain nothing is archived and
+// all messages are kept (the session is never emptied below the window size).
+func splitRollingWindow(msgs []openai.ChatCompletionMessage, retain int) (toArchive, toKeep []openai.ChatCompletionMessage) {
+	if retain < 0 {
+		retain = 0
+	}
+	if len(msgs) <= retain {
+		return nil, msgs
+	}
+	cut := len(msgs) - retain
+	return msgs[:cut], msgs[cut:]
+}
+
+// summarizeSession summarizes a session and moves older messages to ArchivedMsgs,
+// keeping the most recent RetainRecentMessages active (rolling window).
 func (ss *SessionScheduler) summarizeSession(ctx context.Context, session *model.Session) error {
 	// Lock the session to prevent race conditions with AddMessage
 	ss.sessionHandler.LockSession(session.SessionID)
@@ -680,6 +727,7 @@ func (ss *SessionScheduler) summarizeSession(ctx context.Context, session *model
 		if hasDebugStore {
 			_ = debugStore.PutSummarizationLog(summLog)
 		}
+		metrics.SummarizationResult(summarizationType, "failed", msgCount, 0, 0, len(previousSummary), 0, 0, 0)
 		// Do not set SummarizedAt or move messages when summary generation failed
 		return fmt.Errorf("failed to generate summary: %w", err)
 	}
@@ -695,6 +743,7 @@ func (ss *SessionScheduler) summarizeSession(ctx context.Context, session *model
 				}
 			}
 		}
+		metrics.SummarizationResult(summarizationType, "offensive", msgCount, 0, 0, len(previousSummary), 0, 0, 0)
 		// Do not save OFFENSIVE_CONTENT as summary; do not set SummarizedAt or move messages
 		return nil
 	}
@@ -745,17 +794,29 @@ func (ss *SessionScheduler) summarizeSession(ctx context.Context, session *model
 		summLog.ModelUsed = ss.config.SummaryModel
 	}
 
-	// When we had current Msgs: move them to ArchivedMsgs. When we used archived only: no move.
-	msgsToMove := make([]openai.ChatCompletionMessage, len(session.Msgs))
-	copy(msgsToMove, session.Msgs)
+	// Rolling window: keep the most recent RetainRecentMessages in the active
+	// conversation and archive only the older ones, so the session never goes
+	// suddenly empty. When we summarized from ArchivedMsgs (Msgs empty), nothing moves.
+	originalMsgs := make([]openai.ChatCompletionMessage, len(session.Msgs))
+	copy(originalMsgs, session.Msgs)
 
-	var archivedMsgsBackupLen int
-	previousSummarizedAt := session.SummarizedAt
-	if len(msgsToMove) > 0 {
-		archivedMsgsBackupLen = len(session.ArchivedMsgs)
-		session.ArchivedMsgs = append(session.ArchivedMsgs, msgsToMove...)
-		session.Msgs = []openai.ChatCompletionMessage{}
+	retain := ss.config.RetainRecentMessages
+	if retain < 0 {
+		retain = 0
 	}
+
+	archivedMsgsBackupLen := len(session.ArchivedMsgs)
+	previousSummarizedAt := session.SummarizedAt
+
+	toArchive, toKeep := splitRollingWindow(originalMsgs, retain)
+	movedCount := len(toArchive)
+	if movedCount > 0 {
+		session.ArchivedMsgs = append(session.ArchivedMsgs, toArchive...)
+		kept := make([]openai.ChatCompletionMessage, len(toKeep))
+		copy(kept, toKeep)
+		session.Msgs = kept
+	}
+	retainedCount := len(session.Msgs)
 
 	session.SummarizedAt = time.Now()
 	session.UpdatedAt = time.Now()
@@ -766,8 +827,8 @@ func (ss *SessionScheduler) summarizeSession(ctx context.Context, session *model
 
 	// Save session - if this fails, rollback all in-memory changes
 	if err := sessionStore.Put(session); err != nil {
-		if len(msgsToMove) > 0 {
-			session.Msgs = msgsToMove
+		if movedCount > 0 {
+			session.Msgs = originalMsgs
 			session.ArchivedMsgs = session.ArchivedMsgs[:archivedMsgsBackupLen]
 		}
 		session.Summary = previousSummary
@@ -777,6 +838,7 @@ func (ss *SessionScheduler) summarizeSession(ctx context.Context, session *model
 		if hasDebugStore {
 			_ = debugStore.PutSummarizationLog(summLog)
 		}
+		metrics.SummarizationResult(summarizationType, "failed", msgCount, 0, 0, len(previousSummary), 0, summLog.PromptTokens, summLog.CompletionTokens)
 		return fmt.Errorf("failed to save session: %w", err)
 	}
 
@@ -786,9 +848,12 @@ func (ss *SessionScheduler) summarizeSession(ctx context.Context, session *model
 		_ = debugStore.PutSummarizationLog(summLog)
 	}
 
+	metrics.SummarizationResult(summarizationType, "ok", msgCount, movedCount, retainedCount,
+		len(previousSummary), len(session.Summary), summLog.PromptTokens, summLog.CompletionTokens)
+
 	if !ss.config.DisableLogs {
-		log.Log.Infof("[SessionScheduler] ✅ Session %s summarized | Type: %s | Moved: %d msgs | Archived: %d | Summary: %s | Tags: %v | Duration: %dms",
-			session.SessionID, summarizationType, len(msgsToMove), len(session.ArchivedMsgs),
+		log.Log.Infof("[SessionScheduler] ✅ Session %s summarized | Type: %s | Moved: %d msgs | Retained: %d | Archived: %d | Summary: %s | Tags: %v | Duration: %dms",
+			session.SessionID, summarizationType, movedCount, retainedCount, len(session.ArchivedMsgs),
 			truncateStringForLog(session.Summary, 50), session.Tags, summLog.DurationMs)
 	}
 

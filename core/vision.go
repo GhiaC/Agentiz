@@ -8,6 +8,7 @@ import (
 
 	"github.com/ghiac/agentize/engine"
 	"github.com/ghiac/agentize/log"
+	"github.com/ghiac/agentize/metrics"
 	"github.com/ghiac/agentize/model"
 	"github.com/sashabaranov/go-openai"
 )
@@ -153,10 +154,17 @@ func (ch *CoreHandler) ProcessMessageWithImage(
 		Messages: messages,
 	}
 
+	visionStart := time.Now()
 	resp, err := llmClient.CreateChatCompletion(ctx, request)
 	if err != nil {
+		metrics.LLMCall("vision", llmModel, "error", time.Since(visionStart), 0, 0, 0)
 		return "", fmt.Errorf("vision LLM call failed: %w", err)
 	}
+	visionCached := 0
+	if resp.Usage.PromptTokensDetails != nil {
+		visionCached = resp.Usage.PromptTokensDetails.CachedTokens
+	}
+	metrics.LLMCall("vision", llmModel, "ok", time.Since(visionStart), resp.Usage.PromptTokens, resp.Usage.CompletionTokens, visionCached)
 
 	if len(resp.Choices) == 0 {
 		return "", fmt.Errorf("no response from vision LLM")

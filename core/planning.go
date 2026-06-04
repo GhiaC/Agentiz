@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/ghiac/agentize/engine"
+	"github.com/ghiac/agentize/metrics"
 	"github.com/ghiac/agentize/planning"
 	"github.com/sashabaranov/go-openai"
 )
@@ -134,6 +135,12 @@ func (ch *CoreHandler) executePlanTool(ctx context.Context, userID, sessionID, m
 		Observer: &planStatusObserver{ch: ch, ctx: ctx, userID: userID, sessionID: sessionID, messageID: messageID, lastMessage: message},
 	}
 	result, err := ch.orchestrator.Execute(ctx, input)
+	metrics.PlanRun(metrics.Status(err))
+	if result != nil {
+		for range result.Steps {
+			metrics.PlanStep("ok")
+		}
+	}
 	if err != nil {
 		return "", fmt.Errorf("execute_plan: %w", err)
 	}

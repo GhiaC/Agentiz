@@ -9,6 +9,7 @@ import (
 
 	llminterface "github.com/ghiac/agentize/llm-interface"
 	"github.com/ghiac/agentize/log"
+	"github.com/ghiac/agentize/metrics"
 	"github.com/sashabaranov/go-openai"
 )
 
@@ -86,10 +87,14 @@ func (bc *BackupChain) TryBackup(ctx context.Context, messages []openai.ChatComp
 		log.Log.Infof("[%s] 🔄 BACKUP LLM >> Trying %s | Model: %s | Messages: %d | Tools: %d | Prompt ~%d chars | system_prompt_len=%d",
 			logPrefix, name, backup.Model, len(ifcMsgs), len(ifcTools), promptChars, systemPromptLen)
 
+		bkStart := time.Now()
 		resp, err := backup.Provider.ChatCompletion(ctx, backup.Model, ifcMsgs, ifcTools)
+		bkDur := time.Since(bkStart)
 		if err == nil && (resp.Content != "" || len(resp.ToolCalls) > 0) {
 			// Success - set the model name in response so caller knows which model was used
 			resp.Model = backup.Model
+			metrics.BackupLLM(name, backup.Model, "ok")
+			metrics.LLMCall("backup", backup.Model, "ok", bkDur, resp.Usage.PromptTokens, resp.Usage.CompletionTokens, 0)
 			log.Log.Infof("[%s] ✅ BACKUP LLM >> Success | %s | Model: %s | Response: %d chars | ToolCalls: %d | Tokens: prompt=%d completion=%d total=%d",
 				logPrefix, name, backup.Model, len(resp.Content), len(resp.ToolCalls),
 				resp.Usage.PromptTokens, resp.Usage.CompletionTokens, resp.Usage.TotalTokens)
@@ -97,6 +102,7 @@ func (bc *BackupChain) TryBackup(ctx context.Context, messages []openai.ChatComp
 		}
 
 		// Failed or empty: set per-provider cooldown and continue to next
+		metrics.BackupLLM(name, backup.Model, "error")
 		bc.cooldownMu.Lock()
 		bc.cooldowns[name] = time.Now().Add(backupCooldownDuration)
 		bc.cooldownMu.Unlock()
