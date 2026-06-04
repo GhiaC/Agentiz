@@ -29,7 +29,7 @@ func stats() templ.Component {
 			templ_7745c5c3_Var1 = templ.NopComponent
 		}
 		ctx = templ.ClearChildren(ctx)
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 1, "<div class=\"stats\"><div class=\"stat\"><div class=\"stat-value\" id=\"total-nodes\">0</div><div class=\"stat-label\">Total Nodes</div></div><div class=\"stat\"><div class=\"stat-value\" id=\"total-tools\">0</div><div class=\"stat-label\">Total Tools</div></div><div class=\"stat\"><div class=\"stat-value\" id=\"tree-depth\">0</div><div class=\"stat-label\">Tree Depth</div></div></div>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 1, "<div class=\"stats\"><div class=\"stat\"><div class=\"stat-value\" id=\"total-nodes\">0</div><div class=\"stat-label\">Total Nodes</div></div><div class=\"stat\"><div class=\"stat-value\" id=\"total-tools\">0</div><div class=\"stat-label\">Total Tools</div></div><div class=\"stat\"><div class=\"stat-value\" id=\"tree-depth\">0</div><div class=\"stat-label\">Tree Depth</div></div><div class=\"stat\"><div class=\"stat-value\" id=\"total-registered\">0</div><div class=\"stat-label\">Registered Tools</div></div></div>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
