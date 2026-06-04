@@ -1,0 +1,120 @@
+{
+  "__inputs": [
+    { "name": "DS_PROMETHEUS", "label": "Prometheus", "description": "Prometheus scraping /agentize/metrics", "type": "datasource", "pluginId": "prometheus", "pluginName": "Prometheus" }
+  ],
+  "annotations": { "list": [ { "builtIn": 1, "datasource": { "type": "grafana", "uid": "-- Grafana --" }, "enable": true, "hide": true, "name": "Annotations & Alerts", "type": "dashboard" } ] },
+  "editable": true,
+  "graphTooltip": 1,
+  "id": null,
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["agentize", "summarization", "scheduler"],
+  "templating": { "list": [ { "current": {}, "hide": 0, "includeAll": false, "label": "Data source", "multi": false, "name": "datasource", "options": [], "query": "prometheus", "refresh": 1, "type": "datasource" } ] },
+  "time": { "from": "now-24h", "to": "now" },
+  "title": "Agentize — Summarization",
+  "uid": "agentize-summarization",
+  "version": 1,
+  "panels": [
+    { "type": "row", "id": 1, "title": "Overview", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 } },
+    {
+      "type": "stat", "id": 2, "title": "Summaries /min (ok)",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" }, "gridPos": { "h": 5, "w": 5, "x": 0, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "cpm", "color": { "mode": "thresholds" }, "thresholds": { "steps": [ { "color": "green", "value": null } ] } }, "overrides": [] },
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum(rate(agentize_summarization_runs_total{status=\"ok\"}[15m])) * 60" } ]
+    },
+    {
+      "type": "stat", "id": 3, "title": "Failures /min",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" }, "gridPos": { "h": 5, "w": 5, "x": 5, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "cpm", "color": { "mode": "thresholds" }, "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 0.1 } ] } }, "overrides": [] },
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum(rate(agentize_summarization_runs_total{status=\"failed\"}[15m])) * 60" } ]
+    },
+    {
+      "type": "stat", "id": 4, "title": "Offensive detections (total)",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" }, "gridPos": { "h": 5, "w": 5, "x": 10, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "thresholds" }, "thresholds": { "steps": [ { "color": "blue", "value": null }, { "color": "orange", "value": 1 } ] } }, "overrides": [] },
+      "options": { "colorMode": "value", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum(agentize_summarization_offensive_total)" } ]
+    },
+    {
+      "type": "gauge", "id": 5, "title": "Scheduler running",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" }, "gridPos": { "h": 5, "w": 4, "x": 15, "y": 1 },
+      "fieldConfig": { "defaults": { "min": 0, "max": 1, "thresholds": { "steps": [ { "color": "blue", "value": null }, { "color": "green", "value": 1 } ] } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "showThresholdMarkers": true },
+      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "max(agentize_scheduler_running)" } ]
+    },
+    {
+      "type": "stat", "id": 6, "title": "Avg summary length (chars)",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" }, "gridPos": { "h": 5, "w": 5, "x": 19, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "thresholds" }, "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "orange", "value": 800 } ] } }, "overrides": [] },
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum(rate(agentize_summarization_summary_chars_sum[1h])) / clamp_min(sum(rate(agentize_summarization_summary_chars_count[1h])), 1)" } ]
+    },
+
+    { "type": "row", "id": 10, "title": "Throughput", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 6 } },
+    {
+      "type": "timeseries", "id": 11, "title": "Runs by type & status (/min)",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" }, "gridPos": { "h": 8, "w": 12, "x": 0, "y": 7 },
+      "fieldConfig": { "defaults": { "unit": "cpm", "custom": { "drawStyle": "bars", "fillOpacity": 70, "stacking": { "mode": "normal" } } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["lastNotNull", "sum"] }, "tooltip": { "mode": "multi" } },
+      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum by (type, status) (rate(agentize_summarization_runs_total[15m])) * 60", "legendFormat": "{{type}} / {{status}}" } ]
+    },
+    {
+      "type": "timeseries", "id": 12, "title": "Messages: input / archived / retained (avg per run)",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" }, "gridPos": { "h": 8, "w": 12, "x": 12, "y": 7 },
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "drawStyle": "line", "fillOpacity": 10 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"] }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum(rate(agentize_summarization_input_messages_sum[1h])) / clamp_min(sum(rate(agentize_summarization_input_messages_count[1h])), 1)", "legendFormat": "input" },
+        { "refId": "B", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum(rate(agentize_summarization_messages_archived_sum[1h])) / clamp_min(sum(rate(agentize_summarization_messages_archived_count[1h])), 1)", "legendFormat": "archived" },
+        { "refId": "C", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum(rate(agentize_summarization_messages_retained_sum[1h])) / clamp_min(sum(rate(agentize_summarization_messages_retained_count[1h])), 1)", "legendFormat": "retained (window)" }
+      ]
+    },
+
+    { "type": "row", "id": 20, "title": "Summary quality (append-style growth)", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 15 } },
+    {
+      "type": "timeseries", "id": 21, "title": "Summary length p50 / p95 (chars)",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" }, "gridPos": { "h": 8, "w": 8, "x": 0, "y": 16 },
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "drawStyle": "line", "fillOpacity": 10 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "histogram_quantile(0.5, sum by (le) (rate(agentize_summarization_summary_chars_bucket[1h])))", "legendFormat": "p50" },
+        { "refId": "B", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "histogram_quantile(0.95, sum by (le) (rate(agentize_summarization_summary_chars_bucket[1h])))", "legendFormat": "p95" }
+      ]
+    },
+    {
+      "type": "timeseries", "id": 22, "title": "Avg summary growth per run (chars; <0 = compaction)",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" }, "gridPos": { "h": 8, "w": 8, "x": 8, "y": 16 },
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "drawStyle": "line", "fillOpacity": 20 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single" } },
+      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum(rate(agentize_summarization_summary_growth_chars_sum[1h])) / clamp_min(sum(rate(agentize_summarization_summary_growth_chars_count[1h])), 1)", "legendFormat": "avg growth" } ]
+    },
+    {
+      "type": "timeseries", "id": 23, "title": "Summarization tokens (/min)",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" }, "gridPos": { "h": 8, "w": 8, "x": 16, "y": 16 },
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "drawStyle": "line", "fillOpacity": 20, "stacking": { "mode": "normal" } } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"] }, "tooltip": { "mode": "multi" } },
+      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum by (type) (rate(agentize_summarization_tokens_total[15m])) * 60", "legendFormat": "{{type}}" } ]
+    },
+
+    { "type": "row", "id": 30, "title": "Scheduler cycle", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 24 } },
+    {
+      "type": "timeseries", "id": 31, "title": "Cycle duration p95 & sessions scanned p95",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" }, "gridPos": { "h": 8, "w": 12, "x": 0, "y": 25 },
+      "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "fillOpacity": 10 } }, "overrides": [ { "matcher": { "id": "byName", "options": "cycle p95" }, "properties": [ { "id": "unit", "value": "s" } ] } ] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"] }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "histogram_quantile(0.95, rate(agentize_scheduler_run_duration_seconds_bucket[1h]))", "legendFormat": "cycle p95" },
+        { "refId": "B", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "histogram_quantile(0.95, rate(agentize_scheduler_sessions_scanned_bucket[1h]))", "legendFormat": "sessions scanned p95" }
+      ]
+    },
+    {
+      "type": "timeseries", "id": 32, "title": "Scheduler cycles by status (/h)",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" }, "gridPos": { "h": 8, "w": 12, "x": 12, "y": 25 },
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "drawStyle": "line", "fillOpacity": 20, "stacking": { "mode": "normal" } } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"] }, "tooltip": { "mode": "multi" } },
+      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum by (status) (rate(agentize_scheduler_runs_total[1h])) * 3600", "legendFormat": "{{status}}" } ]
+    }
+  ]
+}

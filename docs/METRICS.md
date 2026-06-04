@@ -85,6 +85,29 @@ A ready-made Grafana dashboard is in [`grafana/agentize-dashboard.json`](./grafa
 | `planning_runs_total` | counter | `status` |
 | `planning_steps_total` | counter | `status` |
 
+### Summarization (detail beyond `scheduler_*`)
+| Metric | Type | Labels |
+|--------|------|--------|
+| `summarization_runs_total` | counter | `type` (first/subsequent/immediate), `status` (ok/failed/offensive/empty) |
+| `summarization_input_messages` | histogram | — (messages fed to the summarizer) |
+| `summarization_messages_archived` | histogram | — (evicted from the rolling window) |
+| `summarization_messages_retained` | histogram | — (kept active in the rolling window) |
+| `summarization_summary_chars` | histogram | — (resulting summary length) |
+| `summarization_summary_growth_chars` | histogram | — (delta vs previous; <0 = compaction) |
+| `summarization_tokens_total` | counter | `type` (prompt/completion) |
+| `summarization_offensive_total` | counter | — |
+
+Dashboard: [`grafana/agentize-summarization-dashboard.json`](./grafana/agentize-summarization-dashboard.json).
+
+#### Summarization behavior (since the rolling-window change)
+- **Rolling window:** summarization no longer empties the active conversation. The
+  most recent `SchedulerConfig.RetainRecentMessages` messages (default **10**) stay
+  in `Msgs`; only older messages move to `ArchivedMsgs`. Messages rotate out one
+  window at a time instead of the session going suddenly blank.
+- **Append-style summary:** the summary is *merged*, not replaced. The model keeps
+  every previously captured specific, adds only new specifics, and updates a fact
+  only when the new conversation corrects it (soft cap ~800 chars with compaction).
+
 ## Example PromQL
 
 ```promql
