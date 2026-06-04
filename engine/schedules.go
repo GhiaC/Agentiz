@@ -722,6 +722,7 @@ func (ss *SessionScheduler) summarizeSession(ctx context.Context, session *model
 		if !ss.config.DisableLogs {
 			log.Log.Warnf("[SessionScheduler] ⚠️  Failed to generate summary for session %s: %v", session.SessionID, err)
 		}
+		LogLLMError("Scheduler", ss.config.SummaryModel, err)
 		summLog.ErrorMessage = fmt.Sprintf("summary generation failed: %v", err)
 		summLog.MarkCompleted("failed")
 		if hasDebugStore {

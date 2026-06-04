@@ -32,7 +32,9 @@ func (ch *CoreHandler) callLLM(ctx context.Context, modelName string, messages [
 		Tools:    tools,
 	}
 	resp, err := ch.llmClient.CreateChatCompletion(ctx, request)
-	if err == nil && resp.Usage.TotalTokens > 0 {
+	if err != nil {
+		engine.LogLLMError("CoreHandler", modelName, err)
+	} else if resp.Usage.TotalTokens > 0 {
 		cacheTokens := 0
 		if resp.Usage.PromptTokensDetails != nil {
 			cacheTokens = resp.Usage.PromptTokensDetails.CachedTokens
