@@ -258,7 +258,9 @@ func (e *Engine) callLLM(ctx context.Context, model string, messages []openai.Ch
 		Tools:    tools,
 	}
 	resp, err := e.llmClient.CreateChatCompletion(ctx, request)
-	if err == nil && resp.Usage.TotalTokens > 0 {
+	if err != nil {
+		LogLLMError("Engine", model, err)
+	} else if resp.Usage.TotalTokens > 0 {
 		cacheTokens := 0
 		if resp.Usage.PromptTokensDetails != nil {
 			cacheTokens = resp.Usage.PromptTokensDetails.CachedTokens
@@ -1143,6 +1145,57 @@ func FormatLLMError(err error) error {
 
 	// For other errors, return as-is with prefix
 	return fmt.Errorf("LLM request failed: %w", err)
+}
+
+// LogLLMError emits a single, detailed, greppable diagnostic line for any LLM
+// call failure. Every line is tagged with the keyword LLMFAIL so the full
+// picture of a failed request can be pulled with a single filter:
+//
+//	docker logs tradeagent 2>&1 | grep LLMFAIL
+//
+// component is the caller (e.g. "CoreHandler", "Engine", "Scheduler"); model is
+// the requested model name.
+func LogLLMError(component, model string, err error) {
+	if err == nil {
+		return
+	}
+
+	// RequestError: go-openai returns this when the HTTP response body cannot be
+	// decoded as JSON (e.g. an empty / non-JSON body behind a 5xx gateway error).
+	// This is the "unexpected end of JSON input" case — usually a transient
+	// upstream/proxy failure where LiteLLM returned 503 with an empty body.
+	var reqErr *openai.RequestError
+	if errors.As(err, &reqErr) {
+		body := strings.TrimSpace(string(reqErr.Body))
+		underlying := ""
+		if reqErr.Err != nil {
+			underlying = reqErr.Err.Error()
+		}
+		log.Log.Errorf("[LLMFAIL] ❌ component=%s | kind=request_error | model=%s | http_status=%d (%s) | underlying=%q | body_len=%d | body_empty=%t | body=%q",
+			component, model, reqErr.HTTPStatusCode, reqErr.HTTPStatus, underlying, len(reqErr.Body), len(body) == 0, body)
+		return
+	}
+
+	// APIError: a well-formed OpenAI/LiteLLM error JSON (has a real message).
+	var apiErr *openai.APIError
+	if errors.As(err, &apiErr) {
+		log.Log.Errorf("[LLMFAIL] ❌ component=%s | kind=api_error | model=%s | http_status=%d (%s) | type=%q | code=%v | message=%q",
+			component, model, apiErr.HTTPStatusCode, apiErr.HTTPStatus, apiErr.Type, apiErr.Code, apiErr.Message)
+		return
+	}
+
+	// Context cancellation / deadline (client-side timeout or user abort).
+	if errors.Is(err, context.DeadlineExceeded) {
+		log.Log.Errorf("[LLMFAIL] ❌ component=%s | kind=timeout | model=%s | err=%v", component, model, err)
+		return
+	}
+	if errors.Is(err, context.Canceled) {
+		log.Log.Errorf("[LLMFAIL] ❌ component=%s | kind=canceled | model=%s | err=%v", component, model, err)
+		return
+	}
+
+	// Anything else: network refused, DNS failure, proxy down, etc.
+	log.Log.Errorf("[LLMFAIL] ❌ component=%s | kind=other | model=%s | go_type=%T | err=%v", component, model, err, err)
 }
 
 // processChatRequest processes an LLM chat request with support for tool calls.
