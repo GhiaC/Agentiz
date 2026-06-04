@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"time"
 
 	"github.com/ghiac/agentize/documents/components"
 	"github.com/ghiac/agentize/model"
@@ -19,14 +20,16 @@ type AgentizeDocument struct {
 
 // NodeDocument represents a node in the knowledge tree
 type NodeDocument struct {
-	Path        string   `json:"path"`
-	ID          string   `json:"id"`
-	Title       string   `json:"title"`
-	Description string   `json:"description,omitempty"`
-	Content     string   `json:"content,omitempty"`
-	Children    []string `json:"children,omitempty"`
-	Tools       []Tool   `json:"tools,omitempty"`
-	Auth        Auth     `json:"auth,omitempty"`
+	Path        string    `json:"path"`
+	ID          string    `json:"id"`
+	Title       string    `json:"title"`
+	Description string    `json:"description,omitempty"`
+	Content     string    `json:"content,omitempty"`
+	Children    []string  `json:"children,omitempty"`
+	Tools       []Tool    `json:"tools,omitempty"`
+	Auth        Auth      `json:"auth,omitempty"`
+	Hash        string    `json:"hash,omitempty"`      // content hash (for change detection)
+	LoadedAt    time.Time `json:"loaded_at,omitempty"` // when the node was loaded into memory
 }
 
 // Tool represents a tool definition
@@ -39,7 +42,10 @@ type Tool struct {
 
 // Auth represents node authentication/authorization
 type Auth struct {
-	Users []UserPermissions `json:"users,omitempty"`
+	Inherit bool               `json:"inherit"`
+	Users   []UserPermissions  `json:"users,omitempty"`
+	Groups  []NamedPermissions `json:"groups,omitempty"`
+	Roles   []NamedPermissions `json:"roles,omitempty"`
 }
 
 // UserPermissions represents permissions for a user
@@ -51,6 +57,37 @@ type UserPermissions struct {
 	CanSee         bool   `json:"can_see"`
 	VisibleInDocs  bool   `json:"visible_in_docs"`
 	VisibleInGraph bool   `json:"visible_in_graph"`
+}
+
+// NamedPermissions represents permissions for a named principal (group or role).
+type NamedPermissions struct {
+	Name           string `json:"name"`
+	CanEdit        bool   `json:"can_edit"`
+	CanRead        bool   `json:"can_read"`
+	CanAccessNext  bool   `json:"can_access_next"`
+	CanSee         bool   `json:"can_see"`
+	VisibleInDocs  bool   `json:"visible_in_docs"`
+	VisibleInGraph bool   `json:"visible_in_graph"`
+}
+
+// toNamedPermissions converts a name→Permissions map to a sorted-agnostic slice.
+func toNamedPermissions(m map[string]*model.Permissions) []NamedPermissions {
+	out := make([]NamedPermissions, 0, len(m))
+	for name, perms := range m {
+		if perms == nil {
+			continue
+		}
+		out = append(out, NamedPermissions{
+			Name:           name,
+			CanEdit:        perms.HasPermission('w'),
+			CanRead:        perms.HasPermission('r'),
+			CanAccessNext:  perms.HasPermission('x'),
+			CanSee:         perms.HasPermission('s'),
+			VisibleInDocs:  perms.HasPermission('d'),
+			VisibleInGraph: perms.HasPermission('g'),
+		})
+	}
+	return out
 }
 
 // TreeNode represents a node in the tree structure
@@ -98,8 +135,13 @@ func NewAgentizeDocument(nodes map[string]*model.Node, getChildren func(string) 
 			Description: node.Description,
 			Content:     node.Content,
 			Children:    children,
+			Hash:        node.Hash,
+			LoadedAt:    node.LoadedAt,
 			Auth: Auth{
-				Users: authUsers,
+				Inherit: node.Auth.Inherit,
+				Users:   authUsers,
+				Groups:  toNamedPermissions(node.Auth.Groups),
+				Roles:   toNamedPermissions(node.Auth.Roles),
 			},
 		}
 
