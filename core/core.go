@@ -12,6 +12,7 @@ import (
 	"github.com/ghiac/agentize/engine"
 	"github.com/ghiac/agentize/llmutils"
 	"github.com/ghiac/agentize/log"
+	"github.com/ghiac/agentize/metrics"
 	"github.com/ghiac/agentize/model"
 	"github.com/ghiac/agentize/planning"
 	"github.com/sashabaranov/go-openai"
@@ -196,6 +197,7 @@ func (ch *CoreHandler) ProcessMessageWithContentType(
 	contentType model.ContentType,
 ) (string, error) {
 	if ch.userProgress.TryQueue(userID, userMessage) {
+		metrics.MessageQueued("core")
 		return "⏳ Processing previous request... Please wait. 📋 Your message was queued and will be answered in order.", nil
 	}
 	userMu := ch.getUserMutex(userID)
@@ -204,7 +206,10 @@ func (ch *CoreHandler) ProcessMessageWithContentType(
 	ch.userProgress.SetInProgress(userID, true)
 	defer ch.userProgress.SetInProgress(userID, false)
 
+	metrics.MessageStart("core")
+	start := time.Now()
 	response, err := ch.processOneMessageCore(ctx, userID, userMessage, contentType)
+	metrics.MessageDone("core", metrics.Status(err), time.Since(start))
 	if err != nil {
 		return "", err
 	}
@@ -239,20 +244,25 @@ func (ch *CoreHandler) processOneMessageCore(
 	var isNonsense bool
 	if ch.userModeration != nil {
 		if isBanned, banMessage := ch.userModeration.CheckBanStatus(userID); isBanned {
+			metrics.Moderation("banned")
 			return banMessage, nil
 		}
 		ctx = model.WithUserID(ctx, userID)
 		shouldBan, banMessage, err := ch.userModeration.ProcessNonsenseCheck(ctx, userID, userMessage)
 		if err != nil {
+			metrics.Moderation("error")
 			log.Log.Warnf("[CoreHandler] ⚠️  Failed to process nonsense check, proceeding anyway | UserID: %s | Error: %v", userID, err)
 		} else {
 			isNonsense = banMessage != "" || shouldBan
 			if shouldBan {
+				metrics.Moderation("banned")
 				return banMessage, nil
 			}
 			if banMessage != "" {
+				metrics.Moderation("nonsense")
 				return banMessage, nil
 			}
+			metrics.Moderation("ok")
 		}
 	}
 

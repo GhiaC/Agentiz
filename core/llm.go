@@ -7,6 +7,7 @@ import (
 
 	"github.com/ghiac/agentize/engine"
 	"github.com/ghiac/agentize/log"
+	"github.com/ghiac/agentize/metrics"
 	"github.com/ghiac/agentize/model"
 	"github.com/ghiac/agentize/planning"
 	"github.com/sashabaranov/go-openai"
@@ -162,8 +163,15 @@ func (ch *CoreHandler) processWithTools(
 		resp, err := ch.callLLM(ctx, modelName, currentMessages, tools)
 		llmDuration := time.Since(llmStart)
 		if err != nil {
+			metrics.LLMCall("core", modelName, "error", llmDuration, 0, 0, 0)
 			return "", engine.FormatLLMError(err)
 		}
+
+		cachedTokens := 0
+		if resp.Usage.PromptTokensDetails != nil {
+			cachedTokens = resp.Usage.PromptTokensDetails.CachedTokens
+		}
+		metrics.LLMCall("core", modelName, "ok", llmDuration, resp.Usage.PromptTokens, resp.Usage.CompletionTokens, cachedTokens)
 
 		if len(resp.Choices) == 0 {
 			return "", fmt.Errorf("no response from LLM")

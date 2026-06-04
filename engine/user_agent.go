@@ -16,6 +16,7 @@ import (
 	"github.com/ghiac/agentize/config"
 	"github.com/ghiac/agentize/fsrepo"
 	"github.com/ghiac/agentize/log"
+	"github.com/ghiac/agentize/metrics"
 	"github.com/ghiac/agentize/model"
 	"github.com/ghiac/agentize/store"
 	"github.com/sashabaranov/go-openai"
@@ -583,6 +584,7 @@ func (e *Engine) ProcessMessage(
 	e.dbReadyMu.Unlock()
 	// Check if already processing - queue if busy
 	if e.sessionProgress.TryQueue(sessionID, userMessage) {
+		metrics.MessageQueued("agent")
 		return "⏳ Processing previous request... Please wait. 📋 Your message was queued and will be answered in order.", 0, nil
 	}
 
@@ -621,7 +623,10 @@ func (e *Engine) ProcessMessage(
 	}
 
 	// Process the message
+	metrics.MessageStart("agent")
+	procStart := time.Now()
 	response, tokens, err := e.processOneMessageBody(ctx, sessionID, userMessage)
+	metrics.MessageDone("agent", metrics.Status(err), time.Since(procStart))
 	if err != nil {
 		log.Log.Errorf("[Engine] ❌ Processing failed | SessionID: %s | Error: %v", sessionID, err)
 		return "", tokens, err
@@ -1213,8 +1218,15 @@ func (e *Engine) processChatRequest(
 		resp, err := e.callLLM(ctx, modelName, reqMessages, openaiTools)
 		llmDuration := time.Since(llmStart)
 		if err != nil {
+			metrics.LLMCall("agent", modelName, "error", llmDuration, 0, 0, 0)
 			return "", totalTokenUsage, FormatLLMError(err)
 		}
+
+		agentCached := 0
+		if resp.Usage.PromptTokensDetails != nil {
+			agentCached = resp.Usage.PromptTokensDetails.CachedTokens
+		}
+		metrics.LLMCall("agent", modelName, "ok", llmDuration, resp.Usage.PromptTokens, resp.Usage.CompletionTokens, agentCached)
 
 		if len(resp.Choices) == 0 {
 			return "", totalTokenUsage, fmt.Errorf("no choices in LLM response")
@@ -1397,6 +1409,7 @@ func (e *Engine) executeTool(
 	toolStart := time.Now()
 	result, err := e.Executor(toolCall.Function.Name, args)
 	toolDuration := time.Since(toolStart)
+	metrics.ToolCall("agent", toolCall.Function.Name, metrics.Status(err), toolDuration)
 
 	if err != nil {
 		result = fmt.Sprintf("Error executing tool %s: %v", toolCall.Function.Name, err)

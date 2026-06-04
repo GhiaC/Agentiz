@@ -3,6 +3,7 @@ package engine
 import (
 	"fmt"
 
+	"github.com/ghiac/agentize/metrics"
 	"github.com/ghiac/agentize/model"
 )
 
@@ -42,6 +43,7 @@ func (e *Engine) createOpenFileFunction() model.ToolFunction {
 		}
 
 		content, err := e.OpenFile(sessionID, path)
+		metrics.KnowledgeOpen(metrics.Status(err))
 		if err != nil {
 			return fmt.Sprintf("Error opening file: %v", err), nil
 		}

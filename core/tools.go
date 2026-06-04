@@ -10,6 +10,7 @@ import (
 	"github.com/ghiac/agentize/agentmanager"
 	"github.com/ghiac/agentize/engine"
 	"github.com/ghiac/agentize/log"
+	"github.com/ghiac/agentize/metrics"
 	"github.com/ghiac/agentize/model"
 	"github.com/sashabaranov/go-openai"
 )
@@ -225,6 +226,7 @@ func (ch *CoreHandler) executeCoreTool(
 	toolStart := time.Now()
 	result, err := ch.runCoreToolImpl(ctx, userID, sessionID, messageID, toolCall)
 	toolDuration := time.Since(toolStart)
+	metrics.ToolCall("core", toolCall.Function.Name, metrics.Status(err), toolDuration)
 	if err != nil {
 		result = fmt.Sprintf("Error executing tool: %v", err)
 	}
@@ -289,8 +291,10 @@ func (ch *CoreHandler) runCoreToolImpl(
 			// Find a higher-tier agent
 			higherAgent := ch.findHigherTierAgent(agent.Config.CostTier)
 			if higherAgent != nil {
+				metrics.AgentEscalation(agentName)
 				engine.NotifyStatus(ctx, userID, "", engine.StatusAgentCalling, higherAgent.Config.Name+" (escalated)")
 				result, err = ch.callAgent(ctx, userID, args, higherAgent)
+				metrics.AgentRouting(higherAgent.Config.Name, metrics.Status(err))
 				if ch.Callback != nil {
 					ch.Callback.AfterAction(ctx, &engine.UsageEvent{
 						UserID: userID, SessionID: sessionID, EventType: engine.EventAgentRouting, Name: higherAgent.Config.Name, Error: err,
@@ -306,6 +310,7 @@ func (ch *CoreHandler) runCoreToolImpl(
 				UserID: userID, SessionID: sessionID, EventType: engine.EventAgentRouting, Name: agentName, Error: err,
 			})
 		}
+		metrics.AgentRouting(agentName, metrics.Status(err))
 		engine.NotifyStatus(ctx, userID, "", engine.StatusAgentDone, agentName)
 		return result, err
 	}

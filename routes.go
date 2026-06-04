@@ -11,6 +11,7 @@ import (
 	"github.com/ghiac/agentize/debuger"
 	"github.com/ghiac/agentize/debuger/pages"
 	"github.com/ghiac/agentize/documents"
+	"github.com/ghiac/agentize/metrics"
 	"github.com/gin-gonic/gin"
 )
 
@@ -18,6 +19,7 @@ import (
 // Routes: /agentize, /agentize/graph, /agentize/docs, /agentize/health, /agentize/debug/*
 func (ag *Agentize) RegisterRoutes(router *gin.Engine) {
 	router.GET("/agentize", ag.handleIndex)
+	router.GET("/agentize/metrics", metrics.GinHandler())
 	router.GET("/agentize/graph", ag.handleGraph)
 	router.GET("/agentize/docs", ag.handleDocs)
 	router.GET("/agentize/health", ag.handleHealth)

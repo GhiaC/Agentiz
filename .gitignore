@@ -32,3 +32,6 @@ bin/
 # Templ generated files
 #*_templ.go
 
+
+# runtime data
+data/

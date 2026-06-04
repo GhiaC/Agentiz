@@ -10,6 +10,7 @@ import (
 
 	"github.com/ghiac/agentize/debuger"
 	"github.com/ghiac/agentize/log"
+	"github.com/ghiac/agentize/metrics"
 	"github.com/ghiac/agentize/model"
 	"github.com/sashabaranov/go-openai"
 )
@@ -306,7 +307,14 @@ func (ss *SessionScheduler) chatCompletion(ctx context.Context, request openai.C
 
 	// Fall back to main llmClient
 	log.Log.Infof("[SessionScheduler] 🔵 MAIN LLM >> Calling main LLM | Model: %s", ss.config.SummaryModel)
-	return ss.llmClient.CreateChatCompletion(ctx, request)
+	sumStart := time.Now()
+	resp, err := ss.llmClient.CreateChatCompletion(ctx, request)
+	cached := 0
+	if resp.Usage.PromptTokensDetails != nil {
+		cached = resp.Usage.PromptTokensDetails.CachedTokens
+	}
+	metrics.LLMCall("summary", ss.config.SummaryModel, metrics.Status(err), time.Since(sumStart), resp.Usage.PromptTokens, resp.Usage.CompletionTokens, cached)
+	return resp, err
 }
 
 // run runs the scheduler loop
@@ -368,6 +376,10 @@ func (ss *SessionScheduler) checkAndSummarizeSessions(ctx context.Context) {
 		log.Log.Infof("[SessionScheduler] 🔍 Checking sessions for summarization...")
 	}
 
+	runStart := time.Now()
+	metrics.SchedulerRunning(true)
+	defer metrics.SchedulerRunning(false)
+
 	// Get all sessions from store
 	sessionStore := ss.sessionHandler.GetStore()
 	debugStore, ok := sessionStore.(debuger.DebugStore)
@@ -375,6 +387,7 @@ func (ss *SessionScheduler) checkAndSummarizeSessions(ctx context.Context) {
 		if !ss.config.DisableLogs {
 			log.Log.Errorf("[SessionScheduler] ❌ Store does not implement DebugStore interface")
 		}
+		metrics.SchedulerRun("error", time.Since(runStart), 0, 0)
 		return
 	}
 
@@ -383,6 +396,7 @@ func (ss *SessionScheduler) checkAndSummarizeSessions(ctx context.Context) {
 		if !ss.config.DisableLogs {
 			log.Log.Errorf("[SessionScheduler] ❌ Failed to get all sessions: %v", err)
 		}
+		metrics.SchedulerRun("error", time.Since(runStart), 0, 0)
 		return
 	}
 
@@ -468,7 +482,10 @@ sessionLoop:
 				if !ss.config.DisableLogs {
 					log.Log.Infof("[SessionScheduler] 🎯 Session eligible for summarization | SessionID: %s | UserID: %s | Messages: %d", session.SessionID, userID, msgCount)
 				}
-				if err := ss.summarizeSession(ctx, session); err != nil {
+				sumStart := time.Now()
+				sumErr := ss.summarizeSession(ctx, session)
+				metrics.SchedulerSummary(metrics.Status(sumErr), time.Since(sumStart))
+				if err := sumErr; err != nil {
 					// Check if error is due to context cancellation
 					if ctx.Err() != nil {
 						if !ss.config.DisableLogs {
@@ -511,6 +528,12 @@ sessionLoop:
 			status, totalSessions, totalUsers, totalMessages, sessionsWithMessages, sessionsWithoutMessages, alreadySummarizedSessions, sessionsNotEligible, eligibleSessions, summarizedSessions,
 			ss.config.FirstSummarizationThreshold, ss.config.SubsequentMessageThreshold, ss.config.SubsequentTimeThreshold)
 	}
+
+	runStatus := "ok"
+	if stoppedEarly {
+		runStatus = "interrupted"
+	}
+	metrics.SchedulerRun(runStatus, time.Since(runStart), totalSessions, summarizedSessions)
 }
 
 // isEligibleForSummarization checks if a session is eligible for summarization
