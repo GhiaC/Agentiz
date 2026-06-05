@@ -1198,6 +1198,33 @@ func LogLLMError(component, model string, err error) {
 	log.Log.Errorf("[LLMFAIL] ❌ component=%s | kind=other | model=%s | go_type=%T | err=%v", component, model, err, err)
 }
 
+// sanitizeOrphanedToolResults removes tool-result messages (role: "tool") whose
+// ToolCallID does not match any tool call in the preceding assistant messages.
+// This can happen when an older rolling-window split archived the assistant
+// message that issued the call but kept the result, producing a history that
+// LLMs reject with "No tool call found for function call output with call_id X".
+func sanitizeOrphanedToolResults(msgs []openai.ChatCompletionMessage) []openai.ChatCompletionMessage {
+	// Collect every tool-call ID that appears in an assistant message.
+	calledIDs := make(map[string]bool, len(msgs))
+	for _, m := range msgs {
+		for _, tc := range m.ToolCalls {
+			if tc.ID != "" {
+				calledIDs[tc.ID] = true
+			}
+		}
+	}
+
+	out := make([]openai.ChatCompletionMessage, 0, len(msgs))
+	for _, m := range msgs {
+		if m.Role == openai.ChatMessageRoleTool && !calledIDs[m.ToolCallID] {
+			log.Log.Warnf("[Engine] ⚠️  Dropping orphaned tool-result message | ToolCallID: %s", m.ToolCallID)
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
 // processChatRequest processes an LLM chat request with support for tool calls.
 // SIMPLIFIED: Uses a single session object and local messages list throughout the loop.
 // Only saves to DB at key points (after tool calls, and at the end).
@@ -1232,8 +1259,10 @@ func (e *Engine) processChatRequest(
 		ctx = model.WithUserID(ctx, session.UserID)
 	}
 
-	// Work with a local copy of messages - this is the single source of truth for this request
-	localMsgs := append([]openai.ChatCompletionMessage{}, session.Msgs...)
+	// Work with a local copy of messages - this is the single source of truth for this request.
+	// Sanitize first to drop any orphaned tool-result messages left by an older rolling-window
+	// split that landed between an assistant tool-call and its result.
+	localMsgs := sanitizeOrphanedToolResults(session.Msgs)
 
 	for i := 0; i < maxIterations; i++ {
 		// Build request messages: system prompts + local messages
