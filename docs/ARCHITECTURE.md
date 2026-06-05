@@ -11,7 +11,11 @@ assistants**. It is meant to be *embedded* into a host application (e.g. a Teleg
 bot), which wires in its own tools, storage and billing while Agentize orchestrates:
 
 - **A Core router** that receives every message, manages sessions, and decides which
-  specialized agent should handle it (`core/`).
+  specialized agent should handle it (`core/`). Core is **dispatch-only**: once it
+  routes a message to an agent, that agent's reply is returned to the user verbatim —
+  it does *not* re-enter Core's LLM, so no closed Core→agent→Core loop is formed. Any
+  longer, multi-step reasoning is the responsibility of the chosen (higher-tier) agent,
+  not of Core looping back on itself.
 - **Tiered worker agents** (e.g. `low` / `high` cost tiers) each with their own LLM
   config, knowledge scope and tools (`agentmanager/`, `engine/`).
 - **A knowledge tree** (filesystem-backed nodes) the agents can open and reason over
@@ -103,10 +107,12 @@ sequenceDiagram
     CH->>SS: get/create Core session + save user message
     CH->>CH: build system prompts + Core tool schemas
     CH->>CH: NotifyStatus(Routing)
-    loop processWithTools (until no tool calls)
+    loop processWithTools (until a final answer)
         CH->>LLM: chat completion (messages + tools)
         LLM-->>CH: assistant reply and/or tool calls
-        alt tool call = call_agent_<name>
+        alt no tool calls
+            Note over CH: Core answered directly → break loop
+        else tool call = call_agent_<name>
             CH->>CB: BeforeAction(agent_routing)  %% may BLOCK
             CH->>AG: agent.Engine.ProcessMessage(sessionID, msg)
             Note over AG: per-session mutex;<br/>own LLM + tool loop [user_agent.go:573]
@@ -115,13 +121,15 @@ sequenceDiagram
                 CH->>AG: re-run on higher-tier agent
             end
             CH->>CB: AfterAction(agent_routing)
+            Note over CH: dispatch-only — return the agent answer<br/>directly; it does NOT loop back into Core's LLM
         else Core tool (web_search, sessions, plan, ...)
             CH->>CB: BeforeAction(tool_call)  %% may BLOCK
             CH->>CT: run tool, NotifyStatus(ToolExecuting → ToolDone)
             CH->>CB: AfterAction(tool_call, duration, error)
+            Note over CH: result re-enters the loop for the next LLM turn
         end
     end
-    CH->>SS: append assistant reply, save session
+    CH->>SS: append final answer as Core's assistant reply, save session
     CH->>CH: NotifyStatus(Completed)
     CH-->>Host: final response
 ```
@@ -147,20 +155,28 @@ sequenceDiagram
 7. **Tool dispatch** — `executeCoreTool` wraps every tool with
    `Callback.BeforeAction` (can **block** on quota/credit),
    timing, and `Callback.AfterAction` ([core/tools.go:192-247](../core/tools.go)).
-   - **Agent dispatch**: a `call_agent_<name>` tool routes to a registered agent;
-     `callAgent` runs that agent's own `Engine.ProcessMessage`
+   - **Agent dispatch (terminal)**: a `call_agent_<name>` tool routes to a registered
+     agent; `callAgent` runs that agent's own `Engine.ProcessMessage`
      ([core/tools.go:264-310,354-385](../core/tools.go)). An `ESCALATE:` reply bumps
      the request to a higher cost tier ([core/tools.go:283-302](../core/tools.go)).
-   - **Core tools**: `web_search`, session management, `ban_user`, planning, `sleep`,
-     etc. ([core/tools.go:313-350](../core/tools.go)).
+     **Core is dispatch-only**: the agent's answer is returned to the user as-is and
+     `processWithTools` short-circuits the loop ([core/llm.go:214-237](../core/llm.go)) —
+     it is *not* fed back as a tool result for another Core LLM turn. Because the agent
+     has the last word, the agent (not Core) owns the final user-facing formatting
+     (language, plain text, length). If a request needs longer, multi-step reasoning,
+     route it to a higher-tier agent instead of expecting Core to iterate.
+   - **Core tools (non-terminal)**: `web_search`, session management, `ban_user`,
+     planning, `sleep`, etc. ([core/tools.go:313-350](../core/tools.go)). Their results
+     *do* re-enter the loop so the Core LLM can use them to compose its own reply.
 8. **Inside a worker agent** — `Engine.ProcessMessage`
    ([engine/user_agent.go:573](../engine/user_agent.go)) takes a per-session mutex,
    loads the session, appends the message, and runs its own LLM + tool loop
    (`processChatRequest`), opening knowledge nodes and firing the same
    `Before/AfterAction` callbacks for its LLM and tool calls. Queued messages for the
    session are drained afterward ([engine/user_agent.go:630-635](../engine/user_agent.go)).
-9. **Finalize** — the Core appends the assistant reply, saves the session, emits
-   **Status: Completed**, and returns the text ([core/core.go:290-299](../core/core.go)).
+9. **Finalize** — the Core appends the final answer as its own assistant reply (whether
+   Core composed it or it came verbatim from a dispatched agent), saves the session,
+   emits **Status: Completed**, and returns the text ([core/core.go:290-299](../core/core.go)).
 
 ### Variants
 

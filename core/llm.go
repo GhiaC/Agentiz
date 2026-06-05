@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/ghiac/agentize/engine"
@@ -211,6 +212,10 @@ func (ch *CoreHandler) processWithTools(
 
 		currentMessages = append(currentMessages, choice.Message)
 
+		// dispatched holds the answer of an agent that Core routed to.
+		var dispatched string
+		var didDispatch bool
+
 		for _, toolCall := range choice.Message.ToolCalls {
 			result := ch.executeCoreTool(ctx, userID, sessionID, coreSession, messageID, toolCall)
 
@@ -222,6 +227,22 @@ func (ch *CoreHandler) processWithTools(
 				Content:    result,
 				ToolCallID: toolCall.ID,
 			})
+
+			// Core only dispatches: when it routes to an agent, that agent's
+			// answer goes straight back to the user. The result does NOT
+			// re-enter Core's LLM, so no closed graph is formed. If deeper /
+			// longer planning is needed it must be done by the high-tier agent,
+			// not by Core looping back on itself.
+			if !didDispatch && strings.HasPrefix(toolCall.Function.Name, "call_agent_") {
+				dispatched = result
+				didDispatch = true
+			}
+		}
+
+		if didDispatch {
+			log.Log.Infof("[CoreHandler] ↩️  Returning agent answer directly (Core dispatch only) | UserID: %s | ResultLen: %d",
+				userID, len(dispatched))
+			return dispatched, nil
 		}
 	}
 

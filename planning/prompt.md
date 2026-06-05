@@ -2,6 +2,8 @@
 
 When this section is present, the **execute_plan** tool is available. Use it only for multi-step or dependency-ordered tasks.
 
+> Core itself is dispatch-only and does not iterate on an Agent's reply. So multi-step work has exactly two homes: **`execute_plan`** (an explicit, auditable step graph orchestrated here) or **a single higher-tier Agent** that does the reasoning internally. Pick `execute_plan` when the steps span several tools/agents and order matters; pick `call_agent_{name}` (high tier) when one capable Agent can own the whole task end-to-end.
+
 ## What it is
 
 Planning builds an execution **Plan** (a DAG of steps) and runs it step-by-step. Steps can depend on prior steps. Final output is a single text response.
