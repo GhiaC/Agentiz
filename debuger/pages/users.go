@@ -4,13 +4,49 @@ import (
 	"fmt"
 	"html/template"
 	"net/url"
+	"sort"
 	"strings"
+	"time"
 
 	"github.com/ghiac/agentize/debuger"
 	"github.com/ghiac/agentize/debuger/data"
 	"github.com/ghiac/agentize/debuger/ui"
 	"github.com/ghiac/agentize/debuger/ui/components"
+	"github.com/ghiac/agentize/model"
 )
+
+// userLastActivity returns the most recent activity time for a user: the newest
+// of the user's own UpdatedAt and their latest session's activity, falling back
+// to CreatedAt. sessions is expected sorted newest-first (GetAllSessionsSorted).
+func userLastActivity(user *model.User, sessions []*model.Session) time.Time {
+	last := user.UpdatedAt
+	if len(sessions) > 0 {
+		st := sessions[0].UpdatedAt
+		if st.IsZero() {
+			st = sessions[0].CreatedAt
+		}
+		if st.After(last) {
+			last = st
+		}
+	}
+	if last.IsZero() {
+		last = user.CreatedAt
+	}
+	return last
+}
+
+// relativeTimeCell renders a time as a relative "X ago" label with the absolute
+// timestamp as a hover tooltip. muted dims the text (used for secondary columns).
+func relativeTimeCell(t time.Time, muted bool) string {
+	if t.IsZero() {
+		return `<span class="text-muted">Never</span>`
+	}
+	cls := ""
+	if muted {
+		cls = ` class="text-muted"`
+	}
+	return fmt.Sprintf(`<span%s title="%s">%s</span>`, cls, debuger.FormatTime(t), debuger.FormatTimeAgo(t))
+}
 
 // RenderUsers generates the users list HTML page
 func RenderUsers(handler *debuger.DebugHandler, page int) (string, error) {
@@ -26,6 +62,17 @@ func RenderUsers(handler *debuger.DebugHandler, page int) (string, error) {
 		return "", fmt.Errorf("failed to get sessions: %w", err)
 	}
 
+	// Sort users by Last Activity (most recently active first) so the list
+	// surfaces the users worth looking at; ties fall back to UserID for stability.
+	sort.SliceStable(users, func(i, j int) bool {
+		ai := userLastActivity(users[i], sessionsByUser[users[i].UserID])
+		aj := userLastActivity(users[j], sessionsByUser[users[j].UserID])
+		if ai.Equal(aj) {
+			return users[i].UserID < users[j].UserID
+		}
+		return ai.After(aj)
+	})
+
 	// Pagination
 	totalItems := len(users)
 	startIdx, endIdx, _ := components.GetPaginationInfo(page, totalItems, components.DefaultItemsPerPage)
@@ -39,18 +86,19 @@ func RenderUsers(handler *debuger.DebugHandler, page int) (string, error) {
 	} else {
 		columns := []components.ColumnConfig{
 			{Header: "User ID", NoWrap: true},
-			{Header: "Name", NoWrap: true},
-			{Header: "Username", NoWrap: true},
+			{Header: "User", NoWrap: true},
 			{Header: "Sessions", Center: true, NoWrap: true},
-			{Header: "Ban Status", Center: true, NoWrap: true},
-			{Header: "Nonsense Count", Center: true, NoWrap: true},
-			{Header: "Created At", NoWrap: true},
+			{Header: "Last Activity", NoWrap: true},
+			{Header: "Created", NoWrap: true},
+			{Header: "Status", Center: true, NoWrap: true},
+			{Header: "Nonsense", Center: true, NoWrap: true},
 			{Header: "Actions", Center: true, NoWrap: true},
 		}
 		content += components.TableStartWithConfig(columns, components.DefaultTableConfig())
 
 		for _, user := range paginatedUsers {
-			sessionCount := len(sessionsByUser[user.UserID])
+			userSessions := sessionsByUser[user.UserID]
+			sessionCount := len(userSessions)
 
 			banStatus := components.BadgeWithIcon("Active", "✅", "success")
 			if user.IsCurrentlyBanned() {
@@ -63,32 +111,46 @@ func RenderUsers(handler *debuger.DebugHandler, page int) (string, error) {
 				banStatus = components.BadgeWithIcon(banText, "🚫", "danger")
 			}
 
-			nameDisplay := "-"
-			if user.Name != "" {
-				nameDisplay = template.HTMLEscapeString(user.Name)
+			// Combined identity: name on top, @username muted below. Falls back
+			// to whichever is present, or "-" when the user has neither.
+			userCell := `<span class="text-muted">-</span>`
+			switch {
+			case user.Name != "" && user.Username != "":
+				userCell = fmt.Sprintf(`%s<br><small class="text-muted">@%s</small>`,
+					template.HTMLEscapeString(user.Name), template.HTMLEscapeString(user.Username))
+			case user.Name != "":
+				userCell = template.HTMLEscapeString(user.Name)
+			case user.Username != "":
+				userCell = fmt.Sprintf(`<span class="text-muted">@%s</span>`, template.HTMLEscapeString(user.Username))
 			}
-			usernameDisplay := "-"
-			if user.Username != "" {
-				usernameDisplay = template.HTMLEscapeString(user.Username)
+
+			// Sessions / Nonsense: only badge when non-zero, otherwise a quiet "0".
+			sessionsCell := `<span class="text-muted">0</span>`
+			if sessionCount > 0 {
+				sessionsCell = components.CountBadge(sessionCount, "primary")
+			}
+			nonsenseCell := `<span class="text-muted">0</span>`
+			if user.NonsenseCount > 0 {
+				nonsenseCell = components.CountBadge(user.NonsenseCount, "warning text-dark")
 			}
 
 			content += fmt.Sprintf(`<tr>
                 <td>%s</td>
                 <td>%s</td>
-                <td>%s</td>
-                <td class="text-center">%s</td>
-                <td class="text-center">%s</td>
                 <td class="text-center">%s</td>
                 <td class="text-nowrap">%s</td>
+                <td class="text-nowrap">%s</td>
+                <td class="text-center">%s</td>
+                <td class="text-center">%s</td>
                 <td class="text-center">%s</td>
             </tr>`,
 				components.InlineCode(template.HTMLEscapeString(user.UserID)),
-				nameDisplay,
-				usernameDisplay,
-				components.CountBadge(sessionCount, "primary"),
+				userCell,
+				sessionsCell,
+				relativeTimeCell(userLastActivity(user, userSessions), false),
+				relativeTimeCell(user.CreatedAt, true),
 				banStatus,
-				components.CountBadge(user.NonsenseCount, "warning text-dark"),
-				debuger.FormatTime(user.CreatedAt),
+				nonsenseCell,
 				components.ViewDetailsButton("/agentize/debug/users/"+template.URLQueryEscaper(user.UserID)),
 			)
 		}
