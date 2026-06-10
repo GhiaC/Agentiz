@@ -609,6 +609,11 @@ func (ss *SessionScheduler) isEligibleForSummarization(session *model.Session, n
 // splitRollingWindow splits messages into the older ones to archive and the most
 // recent `retain` to keep active. When len(msgs) <= retain nothing is archived and
 // all messages are kept (the session is never emptied below the window size).
+//
+// The cut is moved backwards when needed to avoid splitting a tool-call / tool-result
+// pair: if the first message of toKeep has role "tool" its paired assistant message
+// (which holds the ToolCalls) would be in toArchive, and any subsequent LLM call
+// would fail with "No tool call found for function call output with call_id X".
 func splitRollingWindow(msgs []openai.ChatCompletionMessage, retain int) (toArchive, toKeep []openai.ChatCompletionMessage) {
 	if retain < 0 {
 		retain = 0
@@ -617,6 +622,15 @@ func splitRollingWindow(msgs []openai.ChatCompletionMessage, retain int) (toArch
 		return nil, msgs
 	}
 	cut := len(msgs) - retain
+
+	// Walk the cut backwards until toKeep no longer starts with a tool-result message.
+	// Guard cut < len(msgs): when retain=0 cut equals len(msgs) and toKeep is empty.
+	for cut > 0 && cut < len(msgs) && msgs[cut].Role == openai.ChatMessageRoleTool {
+		cut--
+	}
+	if cut == 0 {
+		return nil, msgs
+	}
 	return msgs[:cut], msgs[cut:]
 }
 
