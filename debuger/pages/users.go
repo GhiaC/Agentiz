@@ -193,6 +193,11 @@ func RenderUserDetail(handler *debuger.DebugHandler, userID string, showDeletedS
 		return "", fmt.Errorf("failed to get files: %w", err)
 	}
 
+	userDocs, err := dp.GetUserFilesByUser(userID)
+	if err != nil {
+		return "", fmt.Errorf("failed to get documents: %w", err)
+	}
+
 	content := ui.ContainerStart()
 
 	// Breadcrumb
@@ -513,6 +518,51 @@ func RenderUserDetail(handler *debuger.DebugHandler, userID string, showDeletedS
 	}
 
 	content += ui.CardEnd()
+
+	// Documents card (real user files: uploaded or generated)
+	content += ui.CardStartWithCount("Documents", "file-earmark-text-fill", len(userDocs))
+
+	if len(userDocs) == 0 {
+		content += components.InfoAlert("No documents found for this user.")
+	} else {
+		columns := []components.ColumnConfig{
+			{Header: "Name"},
+			{Header: "Source", Center: true, NoWrap: true},
+			{Header: "Type", NoWrap: true},
+			{Header: "Size", NoWrap: true},
+			{Header: "Created At", NoWrap: true},
+			{Header: "Session", NoWrap: true},
+		}
+		content += components.TableStartWithConfig(columns, components.TableConfig{
+			Striped:     false,
+			Hover:       true,
+			Small:       true,
+			Responsive:  true,
+			AlignMiddle: true,
+		})
+
+		for _, f := range userDocs {
+			content += fmt.Sprintf(`<tr>
+                <td>%s</td>
+                <td class="text-center">%s</td>
+                <td class="text-nowrap">%s</td>
+                <td class="text-nowrap">%s</td>
+                <td class="text-nowrap">%s</td>
+                <td class="text-nowrap">%s</td>
+            </tr>`,
+				template.HTMLEscapeString(f.Name),
+				fileSourceBadge(f.Source),
+				components.InlineCode(template.HTMLEscapeString(f.MIMEType)),
+				formatBytes(f.Size),
+				debuger.FormatTime(f.CreatedAt),
+				components.TruncatedLink(f.SessionID, "/agentize/debug/sessions/"+template.URLQueryEscaper(f.SessionID), 8),
+			)
+		}
+
+		content += components.TableEnd(true)
+	}
+
+	content += ui.CardEnd()
 	content += ui.ContainerEnd()
-	return ui.Header("Agentize Debug - User: "+userID) + ui.NavbarAndBody("/agentize/debug/users", content) + ui.Footer(), nil
+	return ui.Header("Agentize Debug - User: "+template.HTMLEscapeString(userID)) + ui.NavbarAndBody("/agentize/debug/users", content) + ui.Footer(), nil
 }

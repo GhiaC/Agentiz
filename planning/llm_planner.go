@@ -153,21 +153,81 @@ func (p *LLMPlanner) buildSystemPrompts(input PlanInput) []string {
 	return prompts
 }
 
+// llmStepJSON is the per-step shape we expect from the LLM. It is recursive via
+// sub_steps (for parallel steps) and carries condition/branches (for conditional).
+type llmStepJSON struct {
+	ID          string `json:"id"`
+	Type        string `json:"type"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Config      struct {
+		Model        string         `json:"model"`
+		Prompt       string         `json:"prompt"`
+		SystemPrompt string         `json:"system_prompt"`
+		ToolName     string         `json:"tool_name"`
+		ToolArgs     map[string]any `json:"tool_args"`
+		AgentType    string         `json:"agent_type"`
+		AgentInput   string         `json:"agent_input"`
+	} `json:"config"`
+	DependsOn []string `json:"depends_on"`
+	Condition *struct {
+		Field    string `json:"field"`
+		Operator string `json:"operator"`
+		Value    string `json:"value"`
+	} `json:"condition"`
+	Branches map[string][]string `json:"branches"`
+	SubSteps []llmStepJSON       `json:"sub_steps"`
+}
+
 // llmPlanJSON is the shape we expect from the LLM for parsing.
 type llmPlanJSON struct {
-	Steps []struct {
-		ID          string `json:"id"`
-		Type        string `json:"type"`
-		Name        string `json:"name"`
-		Description string `json:"description"`
-		Config      struct {
-			Prompt     string         `json:"prompt"`
-			ToolName   string         `json:"tool_name"`
-			ToolArgs   map[string]any `json:"tool_args"`
-			AgentInput string         `json:"agent_input"`
-		} `json:"config"`
-		DependsOn []string `json:"depends_on"`
-	} `json:"steps"`
+	Steps []llmStepJSON `json:"steps"`
+}
+
+// toStep converts a parsed JSON step into a planning.Step, recursively for
+// parallel sub-steps. index supplies a fallback ID.
+func (p *LLMPlanner) toStep(s llmStepJSON, index int) *Step {
+	stepType := StepType(s.Type)
+	if stepType == "" {
+		stepType = StepLLMCall
+	}
+	// Downgrade tool_call with missing tool_name to llm_call so the runner
+	// doesn't choke on a blank tool_name from a bad LLM response.
+	if stepType == StepToolCall && s.Config.ToolName == "" {
+		stepType = StepLLMCall
+		if s.Config.Prompt == "" {
+			s.Config.Prompt = s.Name + ": " + s.Description
+		}
+	}
+	id := s.ID
+	if id == "" {
+		id = fmt.Sprintf("step-%d", index+1)
+	}
+	step := &Step{
+		ID:          id,
+		Type:        stepType,
+		Name:        s.Name,
+		Description: s.Description,
+		Config: StepConfig{
+			Model:        s.Config.Model,
+			Prompt:       s.Config.Prompt,
+			SystemPrompt: s.Config.SystemPrompt,
+			ToolName:     s.Config.ToolName,
+			ToolArgs:     s.Config.ToolArgs,
+			AgentType:    s.Config.AgentType,
+			AgentInput:   s.Config.AgentInput,
+		},
+		DependsOn: s.DependsOn,
+		Branches:  s.Branches,
+		Status:    StepPending,
+	}
+	if s.Condition != nil {
+		step.Condition = &Condition{Field: s.Condition.Field, Operator: s.Condition.Operator, Value: s.Condition.Value}
+	}
+	for j, sub := range s.SubSteps {
+		step.Config.SubSteps = append(step.Config.SubSteps, p.toStep(sub, j))
+	}
+	return step
 }
 
 func (p *LLMPlanner) parsePlanJSON(content string, input PlanInput) (*Plan, error) {
@@ -199,37 +259,7 @@ func (p *LLMPlanner) parsePlanJSON(content string, input PlanInput) (*Plan, erro
 		Version:   1,
 	}
 	for i, s := range parsed.Steps {
-		stepType := StepType(s.Type)
-		if stepType == "" {
-			stepType = StepLLMCall
-		}
-		// Downgrade tool_call with missing tool_name to llm_call so the runner
-		// doesn't choke on a blank tool_name from a bad LLM response.
-		if stepType == StepToolCall && s.Config.ToolName == "" {
-			stepType = StepLLMCall
-			if s.Config.Prompt == "" {
-				s.Config.Prompt = s.Name + ": " + s.Description
-			}
-		}
-		id := s.ID
-		if id == "" {
-			id = fmt.Sprintf("step-%d", i+1)
-		}
-		step := &Step{
-			ID:          id,
-			Type:        stepType,
-			Name:        s.Name,
-			Description: s.Description,
-			Config: StepConfig{
-				Prompt:     s.Config.Prompt,
-				ToolName:   s.Config.ToolName,
-				ToolArgs:   s.Config.ToolArgs,
-				AgentInput: s.Config.AgentInput,
-			},
-			DependsOn: s.DependsOn,
-			Status:    StepPending,
-		}
-		plan.Steps = append(plan.Steps, step)
+		plan.Steps = append(plan.Steps, p.toStep(s, i))
 	}
 	if len(plan.Steps) > p.maxSteps {
 		plan.Steps = plan.Steps[:p.maxSteps]

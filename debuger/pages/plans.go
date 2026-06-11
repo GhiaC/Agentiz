@@ -5,12 +5,24 @@ import (
 	"fmt"
 	"html/template"
 	"net/url"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/ghiac/agentize/debuger/ui"
 	"github.com/ghiac/agentize/debuger/ui/components"
 	"github.com/ghiac/agentize/planning"
 )
+
+// truncateRunes shortens s to at most n runes, appending "…" when truncated.
+// It is rune-safe so multibyte (e.g. Persian) content is never split mid-rune.
+func truncateRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
+}
 
 // RenderPlans renders the list of plans with table and pagination.
 func RenderPlans(planStore planning.PlanStore, page int) (string, error) {
@@ -109,7 +121,7 @@ func RenderPlanDetail(planStore planning.PlanStore, planID string) (string, erro
 	content += `<dl class="row mb-0">`
 	content += fmt.Sprintf(`<dt class="col-sm-2">ID</dt><dd class="col-sm-10">%s</dd>`, template.HTMLEscapeString(plan.ID))
 	content += fmt.Sprintf(`<dt class="col-sm-2">User ID</dt><dd class="col-sm-10"><a href="/agentize/debug/users/%s">%s</a></dd>`, url.PathEscape(plan.UserID), template.HTMLEscapeString(plan.UserID))
-	content += fmt.Sprintf(`<dt class="col-sm-2">Session ID</dt><dd class="col-sm-10"><a href="/agentize/debug/sessions">%s</a></dd>`, template.HTMLEscapeString(plan.SessionID))
+	content += fmt.Sprintf(`<dt class="col-sm-2">Session ID</dt><dd class="col-sm-10"><a href="/agentize/debug/sessions/%s">%s</a></dd>`, url.PathEscape(plan.SessionID), template.HTMLEscapeString(plan.SessionID))
 	content += fmt.Sprintf(`<dt class="col-sm-2">Status</dt><dd class="col-sm-10">%s</dd>`, components.Badge(string(plan.Status), statusVariant))
 	content += fmt.Sprintf(`<dt class="col-sm-2">Input</dt><dd class="col-sm-10">%s</dd>`, template.HTMLEscapeString(plan.Input))
 	content += fmt.Sprintf(`<dt class="col-sm-2">Created</dt><dd class="col-sm-10">%s</dd>`, plan.CreatedAt.Format(time.RFC3339))
@@ -148,9 +160,11 @@ func RenderPlanDetail(planStore planning.PlanStore, planID string) (string, erro
 			{Header: "Type", NoWrap: true},
 			{Header: "Name", NoWrap: true},
 			{Header: "Status", Center: true, NoWrap: true},
+			{Header: "Depends On", NoWrap: true},
 			{Header: "Started", NoWrap: true},
 			{Header: "Duration", NoWrap: true},
-			{Header: "Result preview", NoWrap: false},
+			{Header: "Tokens", Center: true, NoWrap: true},
+			{Header: "Result / Error", NoWrap: false},
 		}
 		content += components.TableStartWithConfig(columns, components.TableConfig{
 			Striped: true, Hover: true, Small: true, Responsive: true, AlignMiddle: true,
@@ -165,22 +179,32 @@ func RenderPlanDetail(planStore planning.PlanStore, planID string) (string, erro
 			if s.Result != nil && s.Result.Duration > 0 {
 				dur = s.Result.Duration.String()
 			}
-			preview := ""
-			if s.Result != nil && s.Result.Output != "" {
-				if len(s.Result.Output) > 100 {
-					preview = template.HTMLEscapeString(s.Result.Output[:100]) + "..."
-				} else {
-					preview = template.HTMLEscapeString(s.Result.Output)
-				}
+			deps := "-"
+			if len(s.DependsOn) > 0 {
+				deps = template.HTMLEscapeString(strings.Join(s.DependsOn, ", "))
+			}
+			tokens := "-"
+			if s.Result != nil && s.Result.TokensUsed > 0 {
+				tokens = strconv.Itoa(s.Result.TokensUsed)
+			}
+			// Surface the failure reason when a step errored; otherwise show a
+			// short preview of its output. Previously step errors were invisible.
+			resultCell := "-"
+			if s.Error != "" {
+				resultCell = `<span class="text-danger">` + template.HTMLEscapeString(truncateRunes(s.Error, 160)) + `</span>`
+			} else if s.Result != nil && s.Result.Output != "" {
+				resultCell = template.HTMLEscapeString(truncateRunes(s.Result.Output, 160))
 			}
 			content += components.TableRow([]string{
 				template.HTMLEscapeString(s.ID),
 				template.HTMLEscapeString(string(s.Type)),
 				template.HTMLEscapeString(s.Name),
 				components.Badge(string(s.Status), stepStatusVariant),
+				deps,
 				started,
 				dur,
-				preview,
+				tokens,
+				resultCell,
 			})
 		}
 		content += components.TableEnd(true)

@@ -7,8 +7,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/sashabaranov/go-openai"
 )
 
 // testObserver records observer events for tests in this file.
@@ -24,231 +22,209 @@ func (o *testObserver) OnStepStarted(plan *Plan, step *Step)                    
 func (o *testObserver) OnStepCompleted(plan *Plan, step *Step, result *StepResult) {}
 func (o *testObserver) OnStepFailed(plan *Plan, step *Step, err error)             {}
 
-func TestValidateDAG_NoCycle(t *testing.T) {
-	steps := []*Step{
-		{ID: "a", DependsOn: nil},
-		{ID: "b", DependsOn: []string{"a"}},
-		{ID: "c", DependsOn: []string{"b"}},
+// linearChain builds steps where each depends on the previous one; ids[0] has
+// no dependency. It is the common fixture shape for DAG/topo-sort tests.
+func linearChain(ids ...string) []*Step {
+	out := make([]*Step, len(ids))
+	for i, id := range ids {
+		var dep []string
+		if i > 0 {
+			dep = []string{ids[i-1]}
+		}
+		out[i] = &Step{ID: id, DependsOn: dep}
 	}
-	err := ValidateDAG(steps)
-	if err != nil {
-		t.Fatalf("expected no error, got %v", err)
-	}
+	return out
 }
 
-func TestValidateDAG_Cycle(t *testing.T) {
-	steps := []*Step{
-		{ID: "a", DependsOn: []string{"c"}},
-		{ID: "b", DependsOn: []string{"a"}},
-		{ID: "c", DependsOn: []string{"b"}},
+// orderIndex maps each step ID to its position in a sorted slice.
+func orderIndex(steps []*Step) map[string]int {
+	idx := make(map[string]int, len(steps))
+	for i, s := range steps {
+		idx[s.ID] = i
 	}
-	err := ValidateDAG(steps)
-	if err == nil {
-		t.Fatal("expected cycle error")
-	}
-	if !errors.Is(err, ErrCyclicDependency) {
-		t.Errorf("expected ErrCyclicDependency, got %v", err)
-	}
+	return idx
 }
 
-func TestValidateDAG_MissingDep(t *testing.T) {
-	steps := []*Step{
-		{ID: "a", DependsOn: []string{"x"}},
+func TestValidateDAG(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		steps  []*Step
+		wantOK bool   // expect a nil error
+		is     error  // if set, errors.Is(err, is) must hold
+		isNot  error  // if set, errors.Is(err, isNot) must be false
+		substr string // if set, err.Error() must contain it
+	}{
+		{name: "no cycle", steps: linearChain("a", "b", "c"), wantOK: true},
+		{name: "empty nil", steps: nil, wantOK: true},
+		{name: "empty slice", steps: []*Step{}, wantOK: true},
+		{name: "nil step in slice", steps: []*Step{{ID: "a"}, nil, {ID: "b", DependsOn: []string{"a"}}}, wantOK: true},
+		{name: "cycle", steps: []*Step{{ID: "a", DependsOn: []string{"c"}}, {ID: "b", DependsOn: []string{"a"}}, {ID: "c", DependsOn: []string{"b"}}}, is: ErrCyclicDependency},
+		{name: "self dependency", steps: []*Step{{ID: "a", DependsOn: []string{"a"}}}, is: ErrCyclicDependency},
+		{name: "missing dependency", steps: []*Step{{ID: "a", DependsOn: []string{"x"}}}, isNot: ErrCyclicDependency},
+		{name: "duplicate ids", steps: []*Step{{ID: "x"}, {ID: "x"}}, is: ErrDuplicateStepID, substr: "duplicate"},
 	}
-	err := ValidateDAG(steps)
-	if err == nil {
-		t.Fatal("expected missing dep error")
-	}
-	if errors.Is(err, ErrCyclicDependency) {
-		t.Errorf("expected missing-dep error, not cycle: %v", err)
-	}
-}
-
-func TestValidateDAG_EmptySteps(t *testing.T) {
-	err := ValidateDAG(nil)
-	if err != nil {
-		t.Errorf("expected nil for empty steps, got %v", err)
-	}
-	err = ValidateDAG([]*Step{})
-	if err != nil {
-		t.Errorf("expected nil for empty slice, got %v", err)
-	}
-}
-
-func TestValidateDAG_NilStepsInSlice(t *testing.T) {
-	steps := []*Step{
-		{ID: "a", DependsOn: nil},
-		nil,
-		{ID: "b", DependsOn: []string{"a"}},
-	}
-	err := ValidateDAG(steps)
-	if err != nil {
-		t.Fatalf("expected no error with nil in slice, got %v", err)
-	}
-}
-
-func TestValidateDAG_DuplicateIDs(t *testing.T) {
-	steps := []*Step{
-		{ID: "x", DependsOn: nil},
-		{ID: "x", DependsOn: nil},
-	}
-	err := ValidateDAG(steps)
-	if err == nil {
-		t.Fatal("expected error for duplicate step IDs")
-	}
-	if err != nil && !strings.Contains(err.Error(), "duplicate") {
-		t.Errorf("expected duplicate ID error, got %v", err)
-	}
-	if err != nil && !errors.Is(err, ErrDuplicateStepID) {
-		t.Errorf("expected ErrDuplicateStepID, got %v", err)
-	}
-}
-
-func TestValidateDAG_SelfDependency(t *testing.T) {
-	steps := []*Step{
-		{ID: "a", DependsOn: []string{"a"}},
-	}
-	err := ValidateDAG(steps)
-	if err == nil {
-		t.Fatal("expected cycle error for self-dependency")
-	}
-	if !errors.Is(err, ErrCyclicDependency) {
-		t.Errorf("expected ErrCyclicDependency, got %v", err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := ValidateDAG(tt.steps)
+			if tt.wantOK {
+				if err != nil {
+					t.Fatalf("expected no error, got %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("expected an error, got nil")
+			}
+			if tt.is != nil && !errors.Is(err, tt.is) {
+				t.Errorf("expected errors.Is(%v), got %v", tt.is, err)
+			}
+			if tt.isNot != nil && errors.Is(err, tt.isNot) {
+				t.Errorf("did not expect errors.Is(%v), got %v", tt.isNot, err)
+			}
+			if tt.substr != "" && !strings.Contains(err.Error(), tt.substr) {
+				t.Errorf("expected error to contain %q, got %v", tt.substr, err)
+			}
+		})
 	}
 }
 
 func TestTopologicalSort(t *testing.T) {
-	// Diamond: a -> b, a -> c, b -> d, c -> d
-	steps := []*Step{
-		{ID: "d", DependsOn: []string{"b", "c"}},
-		{ID: "c", DependsOn: []string{"a"}},
-		{ID: "b", DependsOn: []string{"a"}},
-		{ID: "a", DependsOn: nil},
+	t.Parallel()
+	tests := []struct {
+		name       string
+		steps      []*Step
+		is         error // if set, errors.Is(err, is) must hold
+		wantErrAny bool  // any non-nil error is acceptable
+		verify     func(t *testing.T, sorted []*Step)
+	}{
+		{
+			name:  "diamond",
+			steps: []*Step{{ID: "d", DependsOn: []string{"b", "c"}}, {ID: "c", DependsOn: []string{"a"}}, {ID: "b", DependsOn: []string{"a"}}, {ID: "a"}},
+			verify: func(t *testing.T, sorted []*Step) {
+				if len(sorted) != 4 {
+					t.Fatalf("expected 4 steps, got %d", len(sorted))
+				}
+				idx := orderIndex(sorted)
+				if idx["a"] >= idx["b"] || idx["a"] >= idx["c"] {
+					t.Error("a must come before b and c")
+				}
+				if idx["b"] >= idx["d"] || idx["c"] >= idx["d"] {
+					t.Error("b and c must come before d")
+				}
+			},
+		},
+		{
+			name:  "empty",
+			steps: nil,
+			verify: func(t *testing.T, sorted []*Step) {
+				if sorted != nil {
+					t.Errorf("expected nil slice, got len=%d", len(sorted))
+				}
+			},
+		},
+		{
+			name:  "large linear chain",
+			steps: linearChain(chainIDs(100)...),
+			verify: func(t *testing.T, sorted []*Step) {
+				if len(sorted) != 100 {
+					t.Fatalf("expected 100 steps, got %d", len(sorted))
+				}
+				idx := orderIndex(sorted)
+				for i := 1; i < 100; i++ {
+					prev, curr := fmt.Sprintf("s%d", i-1), fmt.Sprintf("s%d", i)
+					if idx[prev] >= idx[curr] {
+						t.Errorf("order violated: %s must come before %s", prev, curr)
+					}
+				}
+			},
+		},
+		{name: "cycle", steps: []*Step{{ID: "a", DependsOn: []string{"c"}}, {ID: "b", DependsOn: []string{"a"}}, {ID: "c", DependsOn: []string{"b"}}}, is: ErrCyclicDependency},
+		{name: "missing dependency", steps: []*Step{{ID: "a", DependsOn: []string{"missing"}}}, wantErrAny: true},
 	}
-	sorted, err := TopologicalSort(steps)
-	if err != nil {
-		t.Fatalf("TopologicalSort: %v", err)
-	}
-	if len(sorted) != 4 {
-		t.Fatalf("expected 4 steps, got %d", len(sorted))
-	}
-	idx := make(map[string]int)
-	for i, s := range sorted {
-		idx[s.ID] = i
-	}
-	if idx["a"] >= idx["b"] || idx["a"] >= idx["c"] {
-		t.Error("a must come before b and c")
-	}
-	if idx["b"] >= idx["d"] || idx["c"] >= idx["d"] {
-		t.Error("b and c must come before d")
-	}
-}
-
-func TestTopologicalSort_WithCycle(t *testing.T) {
-	steps := []*Step{
-		{ID: "a", DependsOn: []string{"c"}},
-		{ID: "b", DependsOn: []string{"a"}},
-		{ID: "c", DependsOn: []string{"b"}},
-	}
-	_, err := TopologicalSort(steps)
-	if err == nil {
-		t.Fatal("expected error for cycle")
-	}
-	if !errors.Is(err, ErrCyclicDependency) {
-		t.Errorf("expected ErrCyclicDependency, got %v", err)
-	}
-}
-
-func TestTopologicalSort_MissingDep(t *testing.T) {
-	steps := []*Step{
-		{ID: "a", DependsOn: []string{"missing"}},
-	}
-	_, err := TopologicalSort(steps)
-	if err == nil {
-		t.Fatal("expected error for missing dependency")
-	}
-}
-
-func TestTopologicalSort_Empty(t *testing.T) {
-	sorted, err := TopologicalSort(nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if sorted != nil {
-		t.Errorf("expected nil slice, got len=%d", len(sorted))
-	}
-}
-
-func TestTopologicalSort_LargeGraph(t *testing.T) {
-	// Linear chain of 100 steps: s0 -> s1 -> ... -> s99
-	steps := make([]*Step, 100)
-	for i := 0; i < 100; i++ {
-		id := fmt.Sprintf("s%d", i)
-		dep := []string(nil)
-		if i > 0 {
-			dep = []string{fmt.Sprintf("s%d", i-1)}
-		}
-		steps[i] = &Step{ID: id, DependsOn: dep}
-	}
-	sorted, err := TopologicalSort(steps)
-	if err != nil {
-		t.Fatalf("TopologicalSort: %v", err)
-	}
-	if len(sorted) != 100 {
-		t.Fatalf("expected 100 steps, got %d", len(sorted))
-	}
-	idx := make(map[string]int)
-	for i, s := range sorted {
-		idx[s.ID] = i
-	}
-	for i := 1; i < 100; i++ {
-		prev := fmt.Sprintf("s%d", i-1)
-		curr := fmt.Sprintf("s%d", i)
-		if idx[prev] >= idx[curr] {
-			t.Errorf("dependency order violated: %s must come before %s", prev, curr)
-		}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			sorted, err := TopologicalSort(tt.steps)
+			if tt.is != nil || tt.wantErrAny {
+				if err == nil {
+					t.Fatal("expected an error, got nil")
+				}
+				if tt.is != nil && !errors.Is(err, tt.is) {
+					t.Errorf("expected errors.Is(%v), got %v", tt.is, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("TopologicalSort: %v", err)
+			}
+			tt.verify(t, sorted)
+		})
 	}
 }
 
-func TestReadySteps_DepFailed(t *testing.T) {
-	steps := []*Step{
-		{ID: "a", Status: StepFailed, DependsOn: nil},
-		{ID: "b", Status: StepPending, DependsOn: []string{"a"}},
+// chainIDs returns ["s0","s1",...] of length n.
+func chainIDs(n int) []string {
+	ids := make([]string, n)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("s%d", i)
 	}
-	ready := ReadySteps(steps)
-	if len(ready) != 0 {
-		t.Errorf("expected no ready steps when dependency failed, got %d", len(ready))
-	}
-}
-
-func TestReadySteps_DepSkipped(t *testing.T) {
-	steps := []*Step{
-		{ID: "a", Status: StepSkipped, DependsOn: nil},
-		{ID: "b", Status: StepPending, DependsOn: []string{"a"}},
-	}
-	ready := ReadySteps(steps)
-	if len(ready) != 0 {
-		t.Errorf("expected no ready steps when dependency skipped, got %d", len(ready))
-	}
+	return ids
 }
 
 func TestReadySteps(t *testing.T) {
-	steps := []*Step{
-		{ID: "a", Status: StepCompleted, DependsOn: nil},
-		{ID: "b", Status: StepPending, DependsOn: []string{"a"}},
-		{ID: "c", Status: StepPending, DependsOn: []string{"a"}},
-		{ID: "d", Status: StepPending, DependsOn: []string{"b", "c"}},
+	t.Parallel()
+	tests := []struct {
+		name      string
+		steps     []*Step
+		wantReady []string // expected ready IDs (order-independent)
+	}{
+		{
+			name:      "dependency failed blocks dependent",
+			steps:     []*Step{{ID: "a", Status: StepFailed}, {ID: "b", Status: StepPending, DependsOn: []string{"a"}}},
+			wantReady: nil,
+		},
+		{
+			// A skipped dependency now *resolves* (does not hard-block); the
+			// all-skipped cascade is PropagateSkips' job, tested separately.
+			name:      "skipped dependency resolves dependent",
+			steps:     []*Step{{ID: "a", Status: StepSkipped}, {ID: "b", Status: StepPending, DependsOn: []string{"a"}}},
+			wantReady: []string{"b"},
+		},
+		{
+			name:      "mixed completed and skipped deps are ready",
+			steps:     []*Step{{ID: "a", Status: StepCompleted}, {ID: "b", Status: StepSkipped}, {ID: "c", Status: StepPending, DependsOn: []string{"a", "b"}}},
+			wantReady: []string{"c"},
+		},
+		{
+			name: "completed dep unblocks two",
+			steps: []*Step{
+				{ID: "a", Status: StepCompleted},
+				{ID: "b", Status: StepPending, DependsOn: []string{"a"}},
+				{ID: "c", Status: StepPending, DependsOn: []string{"a"}},
+				{ID: "d", Status: StepPending, DependsOn: []string{"b", "c"}},
+			},
+			wantReady: []string{"b", "c"},
+		},
 	}
-	ready := ReadySteps(steps)
-	if len(ready) != 2 {
-		t.Errorf("expected 2 ready (b,c), got %d", len(ready))
-	}
-	ids := make(map[string]bool)
-	for _, s := range ready {
-		ids[s.ID] = true
-	}
-	if !ids["b"] || !ids["c"] {
-		t.Error("expected b and c to be ready")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ready := ReadySteps(tt.steps)
+			if len(ready) != len(tt.wantReady) {
+				t.Fatalf("expected %d ready %v, got %d", len(tt.wantReady), tt.wantReady, len(ready))
+			}
+			got := make(map[string]bool, len(ready))
+			for _, s := range ready {
+				got[s.ID] = true
+			}
+			for _, id := range tt.wantReady {
+				if !got[id] {
+					t.Errorf("expected %q to be ready, ready set=%v", id, got)
+				}
+			}
+		})
 	}
 }
 
@@ -606,8 +582,8 @@ func (m *mockRunner) Resume(ctx context.Context, planID string) (*PlanResult, er
 func TestOrchestrator_WithInputObserver(t *testing.T) {
 	ctx := context.Background()
 	// Use LocalRunner so observers are actually invoked during Run.
-	llm := &mockLLMForTest{out: "ok", tokens: 1}
-	tools := &mockToolsForTest{}
+	llm := &mockLLM{out: "ok", tokens: 1}
+	tools := &mockTools{}
 	store := NewMemoryStore()
 	localRunner := NewLocalRunner(llm, tools, WithLocalStore(store))
 	fixedPlan := &Plan{
@@ -631,21 +607,6 @@ func TestOrchestrator_WithInputObserver(t *testing.T) {
 	if !inputObs.planCreated || !inputObs.planCompleted {
 		t.Errorf("input observer: planCreated=%v planCompleted=%v", inputObs.planCreated, inputObs.planCompleted)
 	}
-}
-
-type mockLLMForTest struct {
-	out    string
-	tokens int
-}
-
-func (m *mockLLMForTest) ProcessMessage(_ context.Context, _, _ string) (string, int, error) {
-	return m.out, m.tokens, nil
-}
-
-type mockToolsForTest struct{}
-
-func (m *mockToolsForTest) Execute(_ string, _ map[string]interface{}) (string, error) {
-	return "", nil
 }
 
 func TestOrchestrator_Cancel(t *testing.T) {
@@ -1025,21 +986,6 @@ func TestMiddleware_WithMetrics_Failure(t *testing.T) {
 	}
 }
 
-type mockDirectLLMClient struct {
-	resp   string
-	onCall func()
-}
-
-func (m *mockDirectLLMClient) CreateChatCompletion(_ context.Context, req openai.ChatCompletionRequest) (openai.ChatCompletionResponse, error) {
-	if m.onCall != nil {
-		m.onCall()
-	}
-	return openai.ChatCompletionResponse{
-		Choices: []openai.ChatCompletionChoice{{Message: openai.ChatCompletionMessage{Content: m.resp}}},
-		Usage:   openai.Usage{TotalTokens: 5},
-	}, nil
-}
-
 func TestOrchestrator_Execute_PlanIDSequential(t *testing.T) {
 	ctx := context.Background()
 	store := NewMemoryStore()
@@ -1087,8 +1033,8 @@ func TestOrchestrator_Execute_PlanIDSequential(t *testing.T) {
 
 func TestLocalRunner_WithLocalLLMClient(t *testing.T) {
 	called := false
-	client := &mockDirectLLMClient{
-		resp: "direct-response",
+	client := &mockChatClient{
+		response: "direct-response",
 		onCall: func() {
 			called = true
 		},
@@ -1114,7 +1060,7 @@ func TestLocalRunner_WithLocalLLMClient(t *testing.T) {
 }
 
 func TestLocalRunner_WithLocalLLMClient_AgentDelegate(t *testing.T) {
-	client := &mockDirectLLMClient{resp: "delegated"}
+	client := &mockChatClient{response: "delegated"}
 	lr := NewLocalRunner(nil, nil, WithLocalLLMClient(client, "m1"))
 	plan := &Plan{
 		ID: "p1", UserID: "u1", SessionID: "s1", Input: "hi",
@@ -1151,7 +1097,7 @@ func TestLocalRunner_NoLLMCaller_ReturnsError(t *testing.T) {
 }
 
 func TestLocalRunner_RunWithRunLLMClient(t *testing.T) {
-	client := &mockDirectLLMClient{resp: "via-run-option"}
+	client := &mockChatClient{response: "via-run-option"}
 	lr := NewLocalRunner(nil, nil)
 	plan := &Plan{
 		ID: "p1", UserID: "u1", SessionID: "s1", Input: "hello",
@@ -1170,7 +1116,7 @@ func TestLocalRunner_RunWithRunLLMClient(t *testing.T) {
 }
 
 func TestOrchestrator_Execute_WithLLMClient(t *testing.T) {
-	client := &mockDirectLLMClient{resp: "orchestrator-llm"}
+	client := &mockChatClient{response: "orchestrator-llm"}
 	planner := &mockPlanner{plan: &Plan{
 		ID: "tmp", UserID: "bob", SessionID: "s1", Input: "hi",
 		Steps:  []*Step{{ID: "s1", Type: StepLLMCall, Status: StepPending, Config: StepConfig{Prompt: "run"}}},
@@ -1192,7 +1138,7 @@ func TestOrchestrator_Execute_WithLLMClient(t *testing.T) {
 }
 
 func TestOrchestrator_SetLLMClient(t *testing.T) {
-	client := &mockDirectLLMClient{resp: "set-later"}
+	client := &mockChatClient{response: "set-later"}
 	planner := &mockPlanner{plan: &Plan{
 		ID: "tmp", UserID: "u1", SessionID: "s1", Input: "hi",
 		Steps:  []*Step{{ID: "s1", Type: StepLLMCall, Status: StepPending, Config: StepConfig{Prompt: "go"}}},
@@ -1229,7 +1175,7 @@ func (m *mockToolExecutorForTest) Execute(toolName string, args map[string]inter
 
 func TestLocalRunner_WithRunToolExecutor(t *testing.T) {
 	mockExec := &mockToolExecutorForTest{response: "tool-result"}
-	client := &mockDirectLLMClient{resp: "llm-result"}
+	client := &mockChatClient{response: "llm-result"}
 	lr := NewLocalRunner(nil, nil, WithLocalLLMClient(client, "m1"))
 	plan := &Plan{
 		ID: "p1", UserID: "u1", SessionID: "s1", Input: "test",
@@ -1255,7 +1201,7 @@ func TestLocalRunner_WithRunToolExecutor(t *testing.T) {
 
 func TestOrchestrator_WithToolExecutorOption(t *testing.T) {
 	mockExec := &mockToolExecutorForTest{response: "from-orch-executor"}
-	client := &mockDirectLLMClient{resp: "llm"}
+	client := &mockChatClient{response: "llm"}
 	planner := &mockPlanner{plan: &Plan{
 		ID: "tmp", UserID: "u1", SessionID: "s1", Input: "test",
 		Steps: []*Step{
@@ -1283,7 +1229,7 @@ func TestOrchestrator_WithToolExecutorOption(t *testing.T) {
 
 func TestOrchestrator_SetToolExecutor(t *testing.T) {
 	mockExec := &mockToolExecutorForTest{response: "set-later-tool"}
-	client := &mockDirectLLMClient{resp: "llm"}
+	client := &mockChatClient{response: "llm"}
 	planner := &mockPlanner{plan: &Plan{
 		ID: "tmp", UserID: "u1", SessionID: "s1", Input: "test",
 		Steps: []*Step{
@@ -1308,7 +1254,7 @@ func TestOrchestrator_SetToolExecutor(t *testing.T) {
 func TestOrchestrator_PlanContextToolExecutor_OverridesOrchestrator(t *testing.T) {
 	orchExec := &mockToolExecutorForTest{response: "orch-level"}
 	contextExec := &mockToolExecutorForTest{response: "context-level"}
-	client := &mockDirectLLMClient{resp: "llm"}
+	client := &mockChatClient{response: "llm"}
 	planner := &mockPlanner{plan: &Plan{
 		ID: "tmp", UserID: "u1", SessionID: "s1", Input: "test",
 		Steps: []*Step{

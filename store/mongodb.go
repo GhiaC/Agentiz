@@ -31,6 +31,7 @@ type MongoDBStore struct {
 	messagesCollection          *mongo.Collection
 	toolCallsCollection         *mongo.Collection
 	openedFilesCollection       *mongo.Collection
+	userFilesCollection         *mongo.Collection
 	summarizationLogsCollection *mongo.Collection
 
 	// UserNodes tracks visited nodes for each user (user-level, not session-level)
@@ -101,6 +102,7 @@ func NewMongoDBStore(config MongoDBStoreConfig) (*MongoDBStore, error) {
 		messagesCollection:          database.Collection("messages"),
 		toolCallsCollection:         database.Collection("tool_calls"),
 		openedFilesCollection:       database.Collection("opened_files"),
+		userFilesCollection:         database.Collection("user_files"),
 		summarizationLogsCollection: database.Collection("summarization_logs"),
 		userLock:                    make(map[string]*sync.Mutex),
 	}
@@ -284,6 +286,29 @@ func (s *MongoDBStore) initIndexes(ctx context.Context) error {
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create opened_files session_id+closed_at index: %w", err)
+	}
+
+	// ============================================================================
+	// UserFiles Collection Indexes
+	// ============================================================================
+
+	// Index for GetUserFilesByUser: user_id + created_at (newest first)
+	_, err = s.userFilesCollection.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{
+			{Key: "user_id", Value: 1},
+			{Key: "created_at", Value: -1},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create user_files user_id index: %w", err)
+	}
+
+	// Index for GetUserFilesBySession: session_id
+	_, err = s.userFilesCollection.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{{Key: "session_id", Value: 1}},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create user_files session_id index: %w", err)
 	}
 
 	// ============================================================================
@@ -582,6 +607,11 @@ func (s *MongoDBStore) DeleteUserData(userID string) error {
 	// Delete messages by user_id
 	if _, err := s.messagesCollection.DeleteMany(ctx, userFilter); err != nil {
 		return fmt.Errorf("failed to delete messages: %w", err)
+	}
+
+	// Delete user_files by user_id
+	if _, err := s.userFilesCollection.DeleteMany(ctx, userFilter); err != nil {
+		return fmt.Errorf("failed to delete user_files: %w", err)
 	}
 
 	// Delete tool_calls and summarization_logs by session_id (these don't have user_id at top level)
@@ -1464,6 +1494,134 @@ func (s *MongoDBStore) GetOpenedFilesByUser(userID string) ([]*model.OpenedFile,
 	})
 
 	return files, nil
+}
+
+// userFileDocument represents a user file metadata document in MongoDB.
+// _id is FileID. Top-level user_id/session_id/created_at support indexed queries;
+// the full record is JSON-serialized in Data.
+type userFileDocument struct {
+	ID        string    `bson:"_id"`
+	UserID    string    `bson:"user_id"`
+	SessionID string    `bson:"session_id"`
+	Data      string    `bson:"data"` // JSON serialized UserFile
+	CreatedAt time.Time `bson:"created_at"`
+}
+
+// decodeUserFiles decodes a cursor of userFileDocument into model.UserFile slice.
+func decodeUserFiles(ctx context.Context, cursor *mongo.Cursor) ([]*model.UserFile, error) {
+	defer cursor.Close(ctx)
+	var files []*model.UserFile
+	for cursor.Next(ctx) {
+		var doc userFileDocument
+		if err := cursor.Decode(&doc); err != nil {
+			return nil, fmt.Errorf("failed to decode user file: %w", err)
+		}
+		f := &model.UserFile{}
+		if err := unmarshalJSONOrBSON(doc.Data, f); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal user file: %w", err)
+		}
+		files = append(files, f)
+	}
+	return files, cursor.Err()
+}
+
+// PutUserFile inserts or updates a user file record.
+func (s *MongoDBStore) PutUserFile(f *model.UserFile) error {
+	if f == nil {
+		return fmt.Errorf("userFile cannot be nil")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	data, err := json.Marshal(f)
+	if err != nil {
+		return fmt.Errorf("failed to marshal user file: %w", err)
+	}
+
+	doc := userFileDocument{
+		ID:        f.FileID,
+		UserID:    f.UserID,
+		SessionID: f.SessionID,
+		Data:      string(data),
+		CreatedAt: f.CreatedAt,
+	}
+
+	opts := options.Replace().SetUpsert(true)
+	if _, err := s.userFilesCollection.ReplaceOne(ctx, bson.M{"_id": f.FileID}, doc, opts); err != nil {
+		return fmt.Errorf("failed to store user file: %w", err)
+	}
+	return nil
+}
+
+// GetUserFile returns a single user file by ID, or nil if not found.
+func (s *MongoDBStore) GetUserFile(fileID string) (*model.UserFile, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	var doc userFileDocument
+	err := s.userFilesCollection.FindOne(ctx, bson.M{"_id": fileID}).Decode(&doc)
+	if err == mongo.ErrNoDocuments {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to query user file: %w", err)
+	}
+	f := &model.UserFile{}
+	if err := unmarshalJSONOrBSON(doc.Data, f); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal user file: %w", err)
+	}
+	return f, nil
+}
+
+// GetUserFilesByUser returns all files for a user, newest first.
+func (s *MongoDBStore) GetUserFilesByUser(userID string) ([]*model.UserFile, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	opts := options.Find().SetSort(bson.D{{Key: "created_at", Value: -1}})
+	cursor, err := s.userFilesCollection.Find(ctx, bson.M{"user_id": userID}, opts)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query user files: %w", err)
+	}
+	return decodeUserFiles(ctx, cursor)
+}
+
+// GetUserFilesBySession returns all files for a session, newest first.
+func (s *MongoDBStore) GetUserFilesBySession(sessionID string) ([]*model.UserFile, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	opts := options.Find().SetSort(bson.D{{Key: "created_at", Value: -1}})
+	cursor, err := s.userFilesCollection.Find(ctx, bson.M{"session_id": sessionID}, opts)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query user files: %w", err)
+	}
+	return decodeUserFiles(ctx, cursor)
+}
+
+// GetAllUserFiles returns all user files, newest first.
+func (s *MongoDBStore) GetAllUserFiles() ([]*model.UserFile, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	opts := options.Find().SetSort(bson.D{{Key: "created_at", Value: -1}})
+	cursor, err := s.userFilesCollection.Find(ctx, bson.M{}, opts)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query user files: %w", err)
+	}
+	return decodeUserFiles(ctx, cursor)
+}
+
+// DeleteUserFile removes a user file metadata record by ID.
+func (s *MongoDBStore) DeleteUserFile(fileID string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if _, err := s.userFilesCollection.DeleteOne(ctx, bson.M{"_id": fileID}); err != nil {
+		return fmt.Errorf("failed to delete user file: %w", err)
+	}
+	return nil
 }
 
 // toolCallDocument represents a tool call document in MongoDB.

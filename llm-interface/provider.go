@@ -37,6 +37,10 @@ type Usage struct {
 	PromptTokens     int
 	CompletionTokens int
 	TotalTokens      int
+	// CachedTokens is the cached portion of PromptTokens (prompt-cache hits).
+	// Providers that support prompt caching should populate this so backup-LLM
+	// token metrics match the primary path.
+	CachedTokens int
 }
 
 // Provider is the generic LLM provider interface.

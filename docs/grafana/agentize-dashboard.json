@@ -161,6 +161,59 @@
       "fieldConfig": { "defaults": { "unit": "bytes", "custom": { "drawStyle": "line", "fillOpacity": 10 } }, "overrides": [] },
       "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single" } },
       "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "process_resident_memory_bytes{job=\"agentize\"}", "legendFormat": "RSS" } ]
+    },
+
+    { "type": "row", "id": 50, "title": "Files (file manager) & Bans", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 44 } },
+    {
+      "type": "timeseries", "id": 51, "title": "File operations by action (/min)",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" }, "gridPos": { "h": 7, "w": 6, "x": 0, "y": 45 },
+      "fieldConfig": { "defaults": { "unit": "cpm", "custom": { "drawStyle": "bars", "fillOpacity": 70, "stacking": { "mode": "normal" } } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "sum"] }, "tooltip": { "mode": "multi" } },
+      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum by (operation, status) (rate(agentize_file_operations_total[5m])) * 60", "legendFormat": "{{operation}} / {{status}}" } ]
+    },
+    {
+      "type": "timeseries", "id": 52, "title": "File op latency p95 by operation",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" }, "gridPos": { "h": 7, "w": 6, "x": 6, "y": 45 },
+      "fieldConfig": { "defaults": { "unit": "s", "custom": { "drawStyle": "line", "fillOpacity": 10 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "histogram_quantile(0.95, sum by (le, operation) (rate(agentize_file_operation_duration_seconds_bucket[10m])))", "legendFormat": "{{operation}}" } ]
+    },
+    {
+      "type": "timeseries", "id": 53, "title": "File bytes moved (/s)",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" }, "gridPos": { "h": 7, "w": 6, "x": 12, "y": 45 },
+      "fieldConfig": { "defaults": { "unit": "binBps", "custom": { "drawStyle": "line", "fillOpacity": 20, "stacking": { "mode": "normal" } } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"] }, "tooltip": { "mode": "multi" } },
+      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum by (direction) (rate(agentize_file_bytes_total[5m]))", "legendFormat": "{{direction}}" } ]
+    },
+    {
+      "type": "timeseries", "id": 54, "title": "Bans applied by reason (/h)",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" }, "gridPos": { "h": 7, "w": 6, "x": 18, "y": 45 },
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "drawStyle": "bars", "fillOpacity": 70, "stacking": { "mode": "normal" } } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "sum"] }, "tooltip": { "mode": "multi" } },
+      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum by (reason) (rate(agentize_moderation_bans_total[1h])) * 3600", "legendFormat": "{{reason}}" } ]
+    },
+
+    { "type": "row", "id": 60, "title": "Image editing", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 52 } },
+    {
+      "type": "timeseries", "id": 61, "title": "Image edits by model & status (/min)",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" }, "gridPos": { "h": 7, "w": 8, "x": 0, "y": 53 },
+      "fieldConfig": { "defaults": { "unit": "cpm", "custom": { "drawStyle": "bars", "fillOpacity": 70, "stacking": { "mode": "normal" } } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "sum"] }, "tooltip": { "mode": "multi" } },
+      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum by (model, status) (rate(agentize_image_edits_total[15m])) * 60", "legendFormat": "{{model}} / {{status}}" } ]
+    },
+    {
+      "type": "timeseries", "id": 62, "title": "Image edit latency p95 by model",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" }, "gridPos": { "h": 7, "w": 8, "x": 8, "y": 53 },
+      "fieldConfig": { "defaults": { "unit": "s", "custom": { "drawStyle": "line", "fillOpacity": 10 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"] }, "tooltip": { "mode": "multi" } },
+      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "histogram_quantile(0.95, sum by (le, model) (rate(agentize_image_edit_duration_seconds_bucket[1h])))", "legendFormat": "{{model}}" } ]
+    },
+    {
+      "type": "timeseries", "id": 63, "title": "Image edit bytes (/s)",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" }, "gridPos": { "h": 7, "w": 8, "x": 16, "y": 53 },
+      "fieldConfig": { "defaults": { "unit": "binBps", "custom": { "drawStyle": "line", "fillOpacity": 20, "stacking": { "mode": "normal" } } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"] }, "tooltip": { "mode": "multi" } },
+      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum by (direction) (rate(agentize_image_edit_bytes_total[5m]))", "legendFormat": "{{direction}}" } ]
     }
   ]
 }

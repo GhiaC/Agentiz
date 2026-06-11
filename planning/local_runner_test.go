@@ -3,12 +3,163 @@ package planning
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/ghiac/agentize/engine"
 )
+
+func TestLocalRunner_RunStep_RetriesOnFailure(t *testing.T) {
+	// MaxRetries=2 → 1 initial attempt + 2 retries = 3 calls on persistent failure.
+	llm := &mockLLM{err: errors.New("boom")}
+	lr := NewLocalRunner(llm, &mockTools{})
+	plan := &Plan{ID: "p1", UserID: "u1", SessionID: "s1", Input: "hi"}
+	step := &Step{
+		ID: "s1", Type: StepLLMCall, Status: StepPending,
+		Config: StepConfig{Prompt: "hi", MaxRetries: 2},
+	}
+
+	_, err := lr.RunStep(context.Background(), plan, step)
+	if err == nil {
+		t.Fatal("expected error after exhausting retries")
+	}
+	if len(llm.calls) != 3 {
+		t.Fatalf("expected 3 attempts (1 + 2 retries), got %d", len(llm.calls))
+	}
+}
+
+func TestPropagateSkips_CascadesAllSkippedDeps(t *testing.T) {
+	steps := []*Step{
+		{ID: "a", Status: StepSkipped},
+		{ID: "b", Status: StepPending, DependsOn: []string{"a"}},      // all deps skipped → skip
+		{ID: "c", Status: StepPending, DependsOn: []string{"b"}},      // cascades from b
+		{ID: "d", Status: StepCompleted},                              // a surviving result
+		{ID: "e", Status: StepPending, DependsOn: []string{"a", "d"}}, // mixed → stays runnable
+		{ID: "root", Status: StepPending},                             // no deps → never skipped
+	}
+	plan := &Plan{Steps: steps}
+
+	if n := PropagateSkips(steps); n != 2 {
+		t.Fatalf("expected 2 cascaded skips (b, c), got %d", n)
+	}
+	for _, id := range []string{"b", "c"} {
+		if findStep(plan, id).Status != StepSkipped {
+			t.Errorf("step %s should be skipped", id)
+		}
+	}
+	for _, id := range []string{"e", "root"} {
+		if findStep(plan, id).Status != StepPending {
+			t.Errorf("step %s should stay pending", id)
+		}
+	}
+}
+
+func TestLocalRunner_Conditional_SkipsNonSelectedBranch(t *testing.T) {
+	llm := &mockLLM{out: "LLMOUT", tokens: 1}
+	lr := NewLocalRunner(llm, &mockTools{})
+	plan := &Plan{
+		ID: "p1", UserID: "u1", SessionID: "s1", Input: "please say yes",
+		Steps: []*Step{
+			{ID: "s1", Type: StepConditional, Status: StepPending,
+				Condition: &Condition{Field: "input", Operator: "contains", Value: "yes"},
+				Branches:  map[string][]string{"true": {"s2"}, "false": {"s3"}}},
+			{ID: "s2", Type: StepLLMCall, Name: "taken", Status: StepPending, DependsOn: []string{"s1"}, Config: StepConfig{Prompt: "go"}},
+			{ID: "s3", Type: StepLLMCall, Name: "nottaken", Status: StepPending, DependsOn: []string{"s1"}, Config: StepConfig{Prompt: "no"}},
+			{ID: "s4", Type: StepCollect, Name: "join", Status: StepPending, DependsOn: []string{"s2", "s3"}},
+		},
+		Status: PlanPending, Version: 1,
+	}
+
+	if _, err := lr.Run(context.Background(), plan); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if findStep(plan, "s3").Status != StepSkipped {
+		t.Errorf("non-selected branch s3 should be skipped, got %s", findStep(plan, "s3").Status)
+	}
+	if findStep(plan, "s2").Status != StepCompleted {
+		t.Errorf("selected branch s2 should be completed, got %s", findStep(plan, "s2").Status)
+	}
+	s4 := findStep(plan, "s4")
+	if s4.Status != StepCompleted {
+		t.Fatalf("collect s4 should be completed, got %s", s4.Status)
+	}
+	if !strings.Contains(s4.Result.Output, "LLMOUT") {
+		t.Errorf("collect should include the taken branch output, got %q", s4.Result.Output)
+	}
+	if strings.Contains(s4.Result.Output, "nottaken") {
+		t.Errorf("collect should not include the skipped branch, got %q", s4.Result.Output)
+	}
+}
+
+func TestLocalRunner_Collect_AggregatesDependencies(t *testing.T) {
+	lr := NewLocalRunner(&mockLLM{}, &mockTools{})
+	plan := &Plan{ID: "p1", Steps: []*Step{
+		{ID: "a", Name: "Alpha", Status: StepCompleted, Result: &StepResult{Output: "AAA", TokensUsed: 2}},
+		{ID: "b", Name: "Beta", Status: StepCompleted, Result: &StepResult{Output: "BBB", TokensUsed: 3}},
+		{ID: "c", Type: StepCollect, Status: StepPending, DependsOn: []string{"a", "b"}},
+	}}
+
+	res, err := lr.RunStep(context.Background(), plan, findStep(plan, "c"))
+	if err != nil {
+		t.Fatalf("RunStep: %v", err)
+	}
+	if !strings.Contains(res.Output, "AAA") || !strings.Contains(res.Output, "BBB") {
+		t.Errorf("collect should aggregate both outputs, got %q", res.Output)
+	}
+	if res.TokensUsed != 5 {
+		t.Errorf("collect should sum dependency tokens, got %d want 5", res.TokensUsed)
+	}
+}
+
+func TestLocalRunner_HumanReview_AutoApproveByDefault(t *testing.T) {
+	lr := NewLocalRunner(&mockLLM{}, &mockTools{}) // no reviewer wired
+	plan := &Plan{ID: "p1", Input: "review me", Steps: []*Step{
+		{ID: "s1", Type: StepHumanReview, Status: StepPending},
+	}}
+
+	res, err := lr.RunStep(context.Background(), plan, findStep(plan, "s1"))
+	if err != nil {
+		t.Fatalf("RunStep: %v", err)
+	}
+	if res.Output != "review me" {
+		t.Errorf("expected pass-through of the input, got %q", res.Output)
+	}
+}
+
+func TestLocalRunner_HumanReview_RejectFailsStep(t *testing.T) {
+	lr := NewLocalRunner(&mockLLM{}, &mockTools{}, WithLocalReviewer(
+		func(_ context.Context, _ *Plan, _ *Step, _ string) (bool, string, error) {
+			return false, "needs changes", nil
+		}))
+	plan := &Plan{ID: "p1", Input: "x", Steps: []*Step{
+		{ID: "s1", Type: StepHumanReview, Status: StepPending},
+	}}
+
+	_, err := lr.RunStep(context.Background(), plan, findStep(plan, "s1"))
+	if err == nil {
+		t.Fatal("expected a rejection error")
+	}
+	if !strings.Contains(err.Error(), "needs changes") {
+		t.Errorf("error should carry the reviewer note, got %v", err)
+	}
+}
+
+func TestLocalRunner_RunStep_NoRetryByDefault(t *testing.T) {
+	// Default MaxRetries=0 must keep the single-attempt behavior unchanged.
+	llm := &mockLLM{err: errors.New("boom")}
+	lr := NewLocalRunner(llm, &mockTools{})
+	plan := &Plan{ID: "p1", UserID: "u1", SessionID: "s1", Input: "hi"}
+	step := &Step{ID: "s1", Type: StepLLMCall, Status: StepPending, Config: StepConfig{Prompt: "hi"}}
+
+	if _, err := lr.RunStep(context.Background(), plan, step); err == nil {
+		t.Fatal("expected error")
+	}
+	if len(llm.calls) != 1 {
+		t.Fatalf("expected exactly 1 attempt with no retries, got %d", len(llm.calls))
+	}
+}
 
 // mockLLM implements LLMCaller for tests.
 type mockLLM struct {
@@ -196,7 +347,7 @@ func TestLocalRunner_RunStep_UnknownType(t *testing.T) {
 	ctx := context.Background()
 	lr := NewLocalRunner(&mockLLM{}, &mockTools{})
 	plan := &Plan{ID: "p1", UserID: "u1", SessionID: "s1", Input: "x", Status: PlanRunning, CreatedAt: time.Now(), UpdatedAt: time.Now(), Version: 1}
-	step := &Step{ID: "s1", Type: StepConditional, Status: StepPending, Config: StepConfig{}}
+	step := &Step{ID: "s1", Type: StepType("bogus_unhandled_type"), Status: StepPending, Config: StepConfig{}}
 
 	result, err := lr.RunStep(ctx, plan, step)
 	if err == nil {
@@ -485,7 +636,10 @@ func TestLocalRunner_Run_AgentDelegate(t *testing.T) {
 
 func TestLocalRunner_Run_Timeout(t *testing.T) {
 	ctx := context.Background()
-	slowLLM := &mockLLM{out: "slow", tokens: 1, delay: 50 * time.Millisecond}
+	// The step's wall-clock delay is an order of magnitude larger than the
+	// timeout, so the deadline has reliably elapsed by the time the step returns
+	// — the runner then cancels the plan regardless of host speed/jitter.
+	slowLLM := &mockLLM{out: "slow", tokens: 1, delay: 100 * time.Millisecond}
 	tools := &mockTools{}
 	store := NewMemoryStore()
 	lr := NewLocalRunner(slowLLM, tools, WithLocalStore(store))
@@ -497,7 +651,7 @@ func TestLocalRunner_Run_Timeout(t *testing.T) {
 		},
 		Status: PlanPending, CreatedAt: time.Now(), UpdatedAt: time.Now(), Version: 1,
 	}
-	result, err := lr.Run(ctx, plan, WithTimeout(1*time.Millisecond))
+	result, err := lr.Run(ctx, plan, WithTimeout(10*time.Millisecond))
 	if err == nil {
 		t.Fatal("expected timeout error")
 	}

@@ -538,5 +538,5 @@ func RenderSessionDetail(handler *debuger.DebugHandler, sessionID string) (strin
 
 	content += ui.CardEnd()
 	content += ui.ContainerEnd()
-	return ui.Header("Agentize Debug - Session: "+sessionID) + ui.NavbarAndBody("/agentize/debug", content) + ui.Footer(), nil
+	return ui.Header("Agentize Debug - Session: "+template.HTMLEscapeString(sessionID)) + ui.NavbarAndBody("/agentize/debug", content) + ui.Footer(), nil
 }

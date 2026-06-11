@@ -11,6 +11,7 @@ import (
 	"github.com/ghiac/agentize/debuger"
 	"github.com/ghiac/agentize/debuger/pages"
 	"github.com/ghiac/agentize/documents"
+	"github.com/ghiac/agentize/log"
 	"github.com/ghiac/agentize/metrics"
 	"github.com/gin-gonic/gin"
 )
@@ -33,6 +34,7 @@ func (ag *Agentize) RegisterRoutes(router *gin.Engine) {
 	router.GET("/agentize/debug/plans/:planID", ag.handleDebugPlanDetail)
 	router.GET("/agentize/debug/messages", ag.handleDebugMessages)
 	router.GET("/agentize/debug/files", ag.handleDebugFiles)
+	router.GET("/agentize/debug/documents", ag.handleDebugDocuments)
 	router.GET("/agentize/debug/tool-calls", ag.handleDebugToolCalls)
 	router.GET("/agentize/debug/tool-calls/:toolID", ag.handleDebugToolCallDetail)
 	router.GET("/agentize/debug/summarized", ag.handleDebugSummarized)
@@ -229,6 +231,12 @@ func (ag *Agentize) handleDebugUserDeleteData(c *gin.Context) {
 		return
 	}
 
+	// Remove stored file bytes first (best-effort) so they are not orphaned once
+	// the metadata rows are deleted by DeleteUserData below.
+	if err := ag.engine.DeleteUserFileBytes(userID); err != nil {
+		log.Log.Warnf("[Agentize] ⚠️  Failed to delete some user file bytes | UserID: %s | Error: %v", userID, err)
+	}
+
 	if err := handler.GetStore().DeleteUserData(userID); err != nil {
 		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to delete user data: %v", err)})
 		return
@@ -348,6 +356,25 @@ func (ag *Agentize) handleDebugFiles(c *gin.Context) {
 	html, err := pages.RenderFiles(handler, page)
 	if err != nil {
 		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to generate files page: %v", err)})
+		return
+	}
+
+	c.Header("Content-Type", "text/html; charset=utf-8")
+	c.String(200, html)
+}
+
+// handleDebugDocuments handles the user documents (files) list page requests
+func (ag *Agentize) handleDebugDocuments(c *gin.Context) {
+	handler, err := ag.createDebugHandler()
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+
+	page := getPageParam(c)
+	html, err := pages.RenderDocuments(handler, page)
+	if err != nil {
+		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to generate documents page: %v", err)})
 		return
 	}
 

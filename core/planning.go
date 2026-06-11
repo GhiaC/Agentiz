@@ -137,8 +137,15 @@ func (ch *CoreHandler) executePlanTool(ctx context.Context, userID, sessionID, m
 	result, err := ch.orchestrator.Execute(ctx, input)
 	metrics.PlanRun(metrics.Status(err))
 	if result != nil {
-		for range result.Steps {
-			metrics.PlanStep("ok")
+		// Record each executed step with its real status instead of a blanket
+		// "ok"; steps that never ran (pending/skipped) are not counted.
+		for _, s := range result.Steps {
+			switch s.Status {
+			case planning.StepCompleted:
+				metrics.PlanStep("ok")
+			case planning.StepFailed:
+				metrics.PlanStep("error")
+			}
 		}
 	}
 	if err != nil {

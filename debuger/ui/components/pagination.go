@@ -195,6 +195,10 @@ func Pagination(config PaginationConfig) string {
 	if endItem > config.TotalItems {
 		endItem = config.TotalItems
 	}
+	// Guard the empty case so we don't render "Showing 1-0 of 0 items".
+	if config.TotalItems == 0 {
+		startItem = 0
+	}
 
 	html += fmt.Sprintf(`
 <div class="text-center text-muted mb-3">

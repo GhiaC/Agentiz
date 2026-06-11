@@ -10,41 +10,13 @@ import (
 	"github.com/sashabaranov/go-openai"
 )
 
-type mockLLMClient struct {
-	response string
-	err      error
-}
-
-func (m *mockLLMClient) CreateChatCompletion(_ context.Context, _ openai.ChatCompletionRequest) (openai.ChatCompletionResponse, error) {
-	if m.err != nil {
-		return openai.ChatCompletionResponse{}, m.err
-	}
-	return openai.ChatCompletionResponse{
-		Choices: []openai.ChatCompletionChoice{
-			{Message: openai.ChatCompletionMessage{Content: m.response}},
-		},
-	}, nil
-}
-
 func TestLLMPlanner_CreatePlan_Success(t *testing.T) {
-	plan := llmPlanJSON{Steps: []struct {
-		ID          string `json:"id"`
-		Type        string `json:"type"`
-		Name        string `json:"name"`
-		Description string `json:"description"`
-		Config      struct {
-			Prompt     string         `json:"prompt"`
-			ToolName   string         `json:"tool_name"`
-			ToolArgs   map[string]any `json:"tool_args"`
-			AgentInput string         `json:"agent_input"`
-		} `json:"config"`
-		DependsOn []string `json:"depends_on"`
-	}{
+	plan := llmPlanJSON{Steps: []llmStepJSON{
 		{ID: "s1", Type: "llm_call", Name: "test-step"},
 	}}
 	data, _ := json.Marshal(plan)
 
-	p := NewLLMPlanner(&mockLLMClient{response: string(data)}, "test-model")
+	p := NewLLMPlanner(&mockChatClient{response: string(data)}, "test-model")
 	result, err := p.CreatePlan(context.Background(), PlanInput{
 		UserID:  "u1",
 		Message: "hello",
@@ -66,11 +38,40 @@ func TestLLMPlanner_CreatePlan_Success(t *testing.T) {
 	}
 }
 
+func TestLLMPlanner_ParsesConditionalAndParallel(t *testing.T) {
+	planJSON := `{"steps":[
+	  {"id":"c1","type":"conditional","name":"branch",
+	   "condition":{"field":"input","operator":"contains","value":"yes"},
+	   "branches":{"true":["a"],"false":["b"]}},
+	  {"id":"p1","type":"parallel","name":"par",
+	   "sub_steps":[{"id":"x","type":"llm_call","config":{"prompt":"hi"}}]}
+	]}`
+	p := NewLLMPlanner(&mockChatClient{response: planJSON}, "m")
+	plan, err := p.CreatePlan(context.Background(), PlanInput{Message: "say yes"})
+	if err != nil {
+		t.Fatalf("CreatePlan: %v", err)
+	}
+	if len(plan.Steps) != 2 {
+		t.Fatalf("expected 2 steps, got %d", len(plan.Steps))
+	}
+	c := plan.Steps[0]
+	if c.Condition == nil || c.Condition.Operator != "contains" || c.Condition.Value != "yes" {
+		t.Errorf("condition not parsed: %+v", c.Condition)
+	}
+	if len(c.Branches["true"]) != 1 || c.Branches["true"][0] != "a" {
+		t.Errorf("branches not parsed: %+v", c.Branches)
+	}
+	par := plan.Steps[1]
+	if len(par.Config.SubSteps) != 1 || par.Config.SubSteps[0].ID != "x" {
+		t.Errorf("sub_steps not parsed: %+v", par.Config.SubSteps)
+	}
+}
+
 func TestLLMPlanner_CreatePlan_WithMarkdownFence(t *testing.T) {
 	inner := `{"steps":[{"id":"s1","type":"tool_call","name":"search","config":{"tool_name":"web_search"}}]}`
 	fenced := "```json\n" + inner + "\n```"
 
-	p := NewLLMPlanner(&mockLLMClient{response: fenced}, "test-model")
+	p := NewLLMPlanner(&mockChatClient{response: fenced}, "test-model")
 	result, err := p.CreatePlan(context.Background(), PlanInput{Message: "test"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -84,7 +85,7 @@ func TestLLMPlanner_CreatePlan_WithMarkdownFence(t *testing.T) {
 }
 
 func TestLLMPlanner_CreatePlan_InvalidJSON(t *testing.T) {
-	p := NewLLMPlanner(&mockLLMClient{response: "this is not json"}, "test-model")
+	p := NewLLMPlanner(&mockChatClient{response: "this is not json"}, "test-model")
 	_, err := p.CreatePlan(context.Background(), PlanInput{Message: "test"})
 	if err == nil {
 		t.Fatal("expected error for invalid JSON")
@@ -106,7 +107,7 @@ func TestLLMPlanner_CreatePlan_TruncatesAtMaxSteps(t *testing.T) {
 	}
 	data, _ := json.Marshal(map[string]any{"steps": steps})
 
-	p := NewLLMPlanner(&mockLLMClient{response: string(data)}, "test-model")
+	p := NewLLMPlanner(&mockChatClient{response: string(data)}, "test-model")
 	p.SetMaxSteps(5)
 	result, err := p.CreatePlan(context.Background(), PlanInput{Message: "test"})
 	if err != nil {
@@ -118,7 +119,7 @@ func TestLLMPlanner_CreatePlan_TruncatesAtMaxSteps(t *testing.T) {
 }
 
 func TestLLMPlanner_CreatePlan_LLMError(t *testing.T) {
-	p := NewLLMPlanner(&mockLLMClient{err: fmt.Errorf("rate limit")}, "test-model")
+	p := NewLLMPlanner(&mockChatClient{err: fmt.Errorf("rate limit")}, "test-model")
 	_, err := p.CreatePlan(context.Background(), PlanInput{Message: "test"})
 	if err == nil {
 		t.Fatal("expected error")
@@ -127,7 +128,7 @@ func TestLLMPlanner_CreatePlan_LLMError(t *testing.T) {
 
 func TestLLMPlanner_Replan_Success(t *testing.T) {
 	inner := `{"steps":[{"id":"s1","type":"llm_call","name":"revised"}]}`
-	p := NewLLMPlanner(&mockLLMClient{response: inner}, "test-model")
+	p := NewLLMPlanner(&mockChatClient{response: inner}, "test-model")
 
 	plan := &Plan{
 		ID:        "plan-1",
@@ -154,7 +155,7 @@ func TestLLMPlanner_Replan_Success(t *testing.T) {
 
 func TestLLMPlanner_Replan_NilResult(t *testing.T) {
 	inner := `{"steps":[{"id":"s1","type":"llm_call","name":"revised"}]}`
-	p := NewLLMPlanner(&mockLLMClient{response: inner}, "test-model")
+	p := NewLLMPlanner(&mockChatClient{response: inner}, "test-model")
 
 	plan := &Plan{
 		ID:      "plan-1",

@@ -207,6 +207,21 @@ func (dp *DataProvider) GetOpenedFilesByUser(userID string) ([]*model.OpenedFile
 	return dp.store.GetOpenedFilesByUser(userID)
 }
 
+// GetAllUserFiles returns all user files (newest first; ordering provided by store).
+func (dp *DataProvider) GetAllUserFiles() ([]*model.UserFile, error) {
+	return dp.store.GetAllUserFiles()
+}
+
+// GetUserFilesByUser returns all files owned by a user (newest first).
+func (dp *DataProvider) GetUserFilesByUser(userID string) ([]*model.UserFile, error) {
+	return dp.store.GetUserFilesByUser(userID)
+}
+
+// GetUserFilesBySession returns all files created in a session (newest first).
+func (dp *DataProvider) GetUserFilesBySession(sessionID string) ([]*model.UserFile, error) {
+	return dp.store.GetUserFilesBySession(sessionID)
+}
+
 // GetAllToolCalls returns all tool calls sorted by CreatedAt (newest first)
 func (dp *DataProvider) GetAllToolCalls() ([]*model.ToolCall, error) {
 	toolCalls, err := dp.store.GetAllToolCalls()

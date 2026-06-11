@@ -32,10 +32,11 @@ func Status(err error) string {
 }
 
 var (
-	msgLatencyBuckets = []float64{0.1, 0.25, 0.5, 1, 2, 4, 8, 15, 30, 60, 120, 300}
-	llmLatencyBuckets = []float64{0.1, 0.25, 0.5, 1, 2, 4, 8, 15, 30, 60, 120}
-	schedBuckets      = []float64{0.5, 1, 2, 5, 10, 30, 60, 120, 300, 600}
-	scanBuckets       = prometheus.ExponentialBuckets(1, 2, 12) // 1 → ~2048 sessions
+	msgLatencyBuckets  = []float64{0.1, 0.25, 0.5, 1, 2, 4, 8, 15, 30, 60, 120, 300}
+	llmLatencyBuckets  = []float64{0.1, 0.25, 0.5, 1, 2, 4, 8, 15, 30, 60, 120}
+	schedBuckets       = []float64{0.5, 1, 2, 5, 10, 30, 60, 120, 300, 600}
+	scanBuckets        = prometheus.ExponentialBuckets(1, 2, 12) // 1 → ~2048 sessions
+	fileLatencyBuckets = []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5}
 )
 
 // ---------------------------------------------------------------------------
@@ -266,6 +267,11 @@ var (
 		Help: "Moderation checks by result (ok|nonsense|banned|error).",
 	}, []string{"result"})
 
+	bans = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace, Subsystem: "moderation", Name: "bans_total",
+		Help: "User bans applied by reason (nonsense|offensive|manual).",
+	}, []string{"reason"})
+
 	planRuns = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace, Subsystem: "planning", Name: "runs_total",
 		Help: "Plan executions by status (ok|error).",
@@ -283,11 +289,97 @@ func KnowledgeOpen(status string) { knowledgeOpens.WithLabelValues(status).Inc()
 // Moderation records a moderation check result.
 func Moderation(result string) { moderationChecks.WithLabelValues(result).Inc() }
 
+// Ban records a user ban with its reason (nonsense|offensive).
+func Ban(reason string) {
+	if reason == "" {
+		reason = "unknown"
+	}
+	bans.WithLabelValues(reason).Inc()
+}
+
 // PlanRun records a plan execution outcome.
 func PlanRun(status string) { planRuns.WithLabelValues(status).Inc() }
 
 // PlanStep records a plan step outcome.
 func PlanStep(status string) { planSteps.WithLabelValues(status).Inc() }
+
+// ---------------------------------------------------------------------------
+// User files (file manager)
+// ---------------------------------------------------------------------------
+
+var (
+	fileOps = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace, Subsystem: "file", Name: "operations_total",
+		Help: "User-file operations by operation (list|read|grep|save|edit|edit_image|upload) and status (ok|error).",
+	}, []string{"operation", "status"})
+
+	fileOpDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Namespace: namespace, Subsystem: "file", Name: "operation_duration_seconds",
+		Help: "User-file operation latency by operation.", Buckets: fileLatencyBuckets,
+	}, []string{"operation"})
+
+	fileBytes = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace, Subsystem: "file", Name: "bytes_total",
+		Help: "User-file bytes moved by direction (stored|read).",
+	}, []string{"direction"})
+)
+
+// FileOp records one user-file operation and its latency.
+func FileOp(operation, status string, dur time.Duration) {
+	if operation == "" {
+		operation = "unknown"
+	}
+	fileOps.WithLabelValues(operation, status).Inc()
+	if dur > 0 {
+		fileOpDuration.WithLabelValues(operation).Observe(dur.Seconds())
+	}
+}
+
+// FileBytes records bytes stored or read for user files (direction: stored|read).
+func FileBytes(direction string, n int64) {
+	if n > 0 {
+		fileBytes.WithLabelValues(direction).Add(float64(n))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Image editing (e.g. OpenRouter Gemini image edits)
+// ---------------------------------------------------------------------------
+
+var (
+	imageEdits = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace, Subsystem: "image", Name: "edits_total",
+		Help: "Image edit attempts by model and status (ok|error).",
+	}, []string{"model", "status"})
+
+	imageEditDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Namespace: namespace, Subsystem: "image", Name: "edit_duration_seconds",
+		Help: "Image edit latency by model.", Buckets: llmLatencyBuckets,
+	}, []string{"model"})
+
+	imageEditBytes = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace, Subsystem: "image", Name: "edit_bytes_total",
+		Help: "Image edit bytes by direction (input|output).",
+	}, []string{"direction"})
+)
+
+// ImageEdit records one image-edit attempt: count + latency by model, plus the
+// input and output image byte volume.
+func ImageEdit(model, status string, dur time.Duration, inBytes, outBytes int64) {
+	if model == "" {
+		model = "unknown"
+	}
+	imageEdits.WithLabelValues(model, status).Inc()
+	if dur > 0 {
+		imageEditDuration.WithLabelValues(model).Observe(dur.Seconds())
+	}
+	if inBytes > 0 {
+		imageEditBytes.WithLabelValues("input").Add(float64(inBytes))
+	}
+	if outBytes > 0 {
+		imageEditBytes.WithLabelValues("output").Add(float64(outBytes))
+	}
+}
 
 // ---------------------------------------------------------------------------
 // HTTP exposition

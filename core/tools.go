@@ -523,6 +523,7 @@ func (ch *CoreHandler) banUserTool(_ context.Context, userID string, args map[st
 	}
 
 	user.Ban(banDuration, message)
+	metrics.Ban("manual")
 	if err := ch.saveUser(user); err != nil {
 		return "", fmt.Errorf("failed to save user ban: %w", err)
 	}

@@ -753,6 +753,7 @@ func (ss *SessionScheduler) summarizeSession(ctx context.Context, session *model
 			user, err := us.GetOrCreateUser(session.UserID)
 			if err == nil {
 				user.Ban(0, "You have been restricted due to use of inappropriate language.")
+				metrics.Ban("offensive")
 				if putErr := us.PutUser(user); putErr == nil && !ss.config.DisableLogs {
 					log.Log.Infof("[SessionScheduler] 🚫 User banned (offensive content) | UserID: %s", session.UserID)
 				}

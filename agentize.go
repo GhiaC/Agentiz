@@ -11,7 +11,9 @@ import (
 	"github.com/ghiac/agentize/debuger"
 	"github.com/ghiac/agentize/debuger/ui"
 	"github.com/ghiac/agentize/engine"
+	"github.com/ghiac/agentize/filestore"
 	"github.com/ghiac/agentize/fsrepo"
+	"github.com/ghiac/agentize/imageedit"
 	"github.com/ghiac/agentize/llmutils"
 	"github.com/ghiac/agentize/log"
 	"github.com/ghiac/agentize/model"
@@ -73,6 +75,15 @@ type Options struct {
 	Repository *fsrepo.NodeRepository
 	// FunctionRegistry allows providing an existing function registry instead of creating a new one
 	FunctionRegistry *model.FunctionRegistry
+	// FileStore allows providing a custom pluggable byte storage for user files.
+	// When nil, a local-disk store rooted at FileStoreDir is used.
+	FileStore filestore.FileStore
+	// FileStoreDir is the base directory for the default local file store.
+	// Ignored when FileStore is provided. Defaults to "./data/files".
+	FileStoreDir string
+	// ImageEditor, when set, enables the manage_files edit_image action by
+	// wiring an image-capable model/API. Can also be set later via SetImageEditor.
+	ImageEditor engine.ImageEditorFunc
 }
 
 // New creates a new Agentize instance by loading the entire knowledge tree from the given path
@@ -112,11 +123,31 @@ func NewWithOptions(path string, opts *Options) (*Agentize, error) {
 		functionRegistry = opts.FunctionRegistry
 	}
 
+	// Determine file store (pluggable byte storage for user files)
+	var fileStore filestore.FileStore
+	if opts != nil && opts.FileStore != nil {
+		fileStore = opts.FileStore
+	} else {
+		dir := "./data/files"
+		if opts != nil && opts.FileStoreDir != "" {
+			dir = opts.FileStoreDir
+		}
+		localStore, err := filestore.NewLocalFileStore(dir)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create file store: %w", err)
+		}
+		fileStore = localStore
+	}
+
 	// Create engine
 	eng := &engine.Engine{
 		Repo:      repo,
 		Sessions:  sessionStore,
 		Functions: functionRegistry,
+		Files:     fileStore,
+	}
+	if opts != nil && opts.ImageEditor != nil {
+		eng.ImageEditor = opts.ImageEditor
 	}
 	eng.Executor = func(toolName string, args map[string]interface{}) (string, error) {
 		if eng.Functions == nil {
@@ -130,6 +161,9 @@ func NewWithOptions(path string, opts *Options) (*Agentize, error) {
 	if err := eng.Init(); err != nil {
 		return nil, fmt.Errorf("failed to initialize engine: %w", err)
 	}
+
+	// Register the file-manager tool (manage_files) so the agent can use files.
+	eng.RegisterManageFilesTool()
 
 	// Create Agentize instance
 	ag := &Agentize{
@@ -279,6 +313,39 @@ func (ag *Agentize) GetSessionStore() store.SessionStore {
 // GetEngine returns the internal engine
 func (ag *Agentize) GetEngine() *engine.Engine {
 	return ag.engine
+}
+
+// RecordUserFile stores a file the user sent (or that was generated for them)
+// against the given session: the bytes go to the configured FileStore and the
+// metadata is recorded in the database. Use model.FileSourceUploaded for files
+// the user sent, or model.FileSourceGenerated for produced files. This is the
+// entry point an application's upload handler should call.
+func (ag *Agentize) RecordUserFile(sessionID, name, mimeType string, source model.FileSource, data []byte) (*model.UserFile, error) {
+	return ag.engine.RecordUserFile(sessionID, name, mimeType, source, data)
+}
+
+// ListUserFiles returns all files owned by a user, newest first.
+func (ag *Agentize) ListUserFiles(userID string) ([]*model.UserFile, error) {
+	return ag.engine.ListUserFiles(userID)
+}
+
+// ReadUserFile returns the bytes and metadata for a file by ID.
+func (ag *Agentize) ReadUserFile(fileID string) ([]byte, *model.UserFile, error) {
+	return ag.engine.ReadUserFile(fileID)
+}
+
+// SetImageEditor wires an image-editing backend, enabling the manage_files
+// edit_image action. The function receives the source image bytes + MIME type
+// and an instruction, and returns the edited image bytes + MIME type.
+func (ag *Agentize) SetImageEditor(editor engine.ImageEditorFunc) {
+	ag.engine.SetImageEditor(editor)
+}
+
+// UseOpenRouterImageEditor enables image editing via OpenRouter's image-output
+// models (default Gemini 2.5 Flash Image). It wires the built-in editor as the
+// manage_files edit_image backend. Provide at least cfg.APIKey.
+func (ag *Agentize) UseOpenRouterImageEditor(cfg imageedit.OpenRouterConfig) {
+	ag.SetImageEditor(imageedit.NewOpenRouter(cfg).EditImage)
 }
 
 // GetRegisteredTools returns the list of registered tool names from the FunctionRegistry

@@ -94,7 +94,7 @@ func (bc *BackupChain) TryBackup(ctx context.Context, messages []openai.ChatComp
 			// Success - set the model name in response so caller knows which model was used
 			resp.Model = backup.Model
 			metrics.BackupLLM(name, backup.Model, "ok")
-			metrics.LLMCall("backup", backup.Model, "ok", bkDur, resp.Usage.PromptTokens, resp.Usage.CompletionTokens, 0)
+			metrics.LLMCall("backup", backup.Model, "ok", bkDur, resp.Usage.PromptTokens, resp.Usage.CompletionTokens, resp.Usage.CachedTokens)
 			log.Log.Infof("[%s] ✅ BACKUP LLM >> Success | %s | Model: %s | Response: %d chars | ToolCalls: %d | Tokens: prompt=%d completion=%d total=%d",
 				logPrefix, name, backup.Model, len(resp.Content), len(resp.ToolCalls),
 				resp.Usage.PromptTokens, resp.Usage.CompletionTokens, resp.Usage.TotalTokens)

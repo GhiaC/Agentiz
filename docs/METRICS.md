@@ -82,8 +82,32 @@ A ready-made Grafana dashboard is in [`grafana/agentize-dashboard.json`](./grafa
 |--------|------|--------|
 | `knowledge_file_opens_total` | counter | `status` |
 | `moderation_checks_total` | counter | `result` (ok/nonsense/banned/error) |
-| `planning_runs_total` | counter | `status` |
-| `planning_steps_total` | counter | `status` |
+| `moderation_bans_total` | counter | `reason` (nonsense/offensive/manual) |
+| `planning_runs_total` | counter | `status` (ok/error) — one per `execute_plan` call |
+| `planning_steps_total` | counter | `status` (ok/error) — one per **executed** step (completed→ok, failed→error; pending/skipped not counted) |
+
+See [PLANNING.md](./PLANNING.md) for the planning subsystem these come from.
+
+### User files (file manager)
+| Metric | Type | Labels |
+|--------|------|--------|
+| `file_operations_total` | counter | `operation` (list/read/grep/save/edit/edit_image/upload), `status` (ok/error) |
+| `file_operation_duration_seconds` | histogram | `operation` |
+| `file_bytes_total` | counter | `direction` (stored/read) |
+
+These cover the `manage_files` tool actions plus inbound uploads. The per-tool
+success/latency is also visible via `tool_calls_total{tool="manage_files"}`; the
+`file_*` metrics add the per-**operation** breakdown and byte volume.
+
+### Image editing
+| Metric | Type | Labels |
+|--------|------|--------|
+| `image_edits_total` | counter | `model`, `status` (ok/error) |
+| `image_edit_duration_seconds` | histogram | `model` |
+| `image_edit_bytes_total` | counter | `direction` (input/output) |
+
+Emitted by the built-in OpenRouter image editor (`imageedit/`) on every
+`edit_image` call — see [the image-edit flow](#image-editing-flow) below.
 
 ### Summarization (detail beyond `scheduler_*`)
 | Metric | Type | Labels |
@@ -129,7 +153,62 @@ histogram_quantile(0.95, rate(agentize_scheduler_run_duration_seconds_bucket[1h]
 
 # Agent escalation ratio
 sum(rate(agentize_agent_escalations_total[30m])) / sum(rate(agentize_agent_routing_total[30m]))
+
+# File operations by action (/min), and p95 latency
+sum by (operation, status) (rate(agentize_file_operations_total[5m])) * 60
+histogram_quantile(0.95, sum by (le, operation) (rate(agentize_file_operation_duration_seconds_bucket[10m])))
+
+# File bytes moved (stored vs read, bytes/s)
+sum by (direction) (rate(agentize_file_bytes_total[5m]))
+
+# Bans applied by reason (/h)
+sum by (reason) (rate(agentize_moderation_bans_total[1h])) * 3600
+
+# Image edits: rate by model & status, and p95 latency
+sum by (model, status) (rate(agentize_image_edits_total[15m])) * 60
+histogram_quantile(0.95, sum by (le, model) (rate(agentize_image_edit_duration_seconds_bucket[1h])))
+
+# Image edit failure ratio
+sum(rate(agentize_image_edits_total{status="error"}[1h]))
+  / clamp_min(sum(rate(agentize_image_edits_total[1h])), 1)
 ```
+
+## Image editing flow
+
+A user sends an image, then asks to change it — the model edits it and stores the
+result as a **new** file (the original is kept).
+
+```
+ProcessMessageWithImage ─ records the upload as a UserFile (FileSourceUploaded)
+        │                   [metrics: file_operations_total{operation="upload"}]
+        ▼
+agent: manage_files action=list → finds the file_id (scoped to the user)
+        │
+        ▼
+agent: manage_files action=edit_image (file_id, instruction)
+        │   Engine.EditImageFile → ImageEditor(bytes, mime, instruction)
+        │   └─ OpenRouter editor (imageedit/): POST /chat/completions with
+        │      modalities=["image","text"]; reads message.images[0] data URL
+        │      [metrics: image_edits_total{model,status}, image_edit_duration_seconds,
+        │       image_edit_bytes_total{direction}; logs: "[imageedit] …"]
+        ▼
+   saves edited bytes as a NEW UserFile (FileSourceGenerated, ParentFileID=original)
+        [metrics: file_operations_total{operation="edit_image"}, file_bytes_total{direction="stored"};
+         logs: "[Engine] ✅ edit_image saved …"]
+```
+
+**Enabling it** (host wiring):
+
+```go
+// 1) record images the user sends as files
+coreHandler.SetFileRecorder(ag.RecordUserFile)
+// 2) enable editing via OpenRouter (default model: google/gemini-2.5-flash-image-preview)
+ag.UseOpenRouterImageEditor(imageedit.OpenRouterConfig{APIKey: openRouterKey})
+```
+
+Without (2) the `edit_image` action returns "image editing is not configured"; without
+(1) inbound images are not recorded as files (the `save` action still works for generated
+files).
 
 ## Where it is instrumented
 

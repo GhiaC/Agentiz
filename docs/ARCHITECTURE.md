@@ -185,8 +185,10 @@ sequenceDiagram
   loop, without the Core router.
 - **Vision**: `CoreHandler.ProcessMessageWithImage` ([core/vision.go:33](../core/vision.go))
   routes image input through a (usually cheaper) vision LLM, falling back to the main LLM.
-- **Planning**: `ProcessMessageWithPlanning` ([agentize.go:378](../agentize.go)) defers to
-  the plan `Orchestrator` when enabled.
+- **Planning**: `ProcessMessageWithPlanning` ([agentize.go:437](../agentize.go)) defers to
+  the plan `Orchestrator` when enabled; the Core LLM can also invoke it via the
+  `execute_plan` tool. See [PLANNING.md](./PLANNING.md) for the DAG/step model, runners,
+  store, and the debug page.
 
 ## 5. Cross-cutting concerns
 
@@ -194,7 +196,14 @@ sequenceDiagram
   `BeforeAction` (may return an error to **block** an LLM/tool/agent action) and
   `AfterAction` (records tokens, duration, errors). Fired from both the Core
   ([core/tools.go:212-241](../core/tools.go)) and each Engine. This single hook is the
-  richest place to meter the whole system.
+  richest place to meter the whole system. **Coverage**: Core/agent LLM calls, every
+  tool call, agent routing, and plan steps. **Media** is metered too — the **vision**
+  (image-input) LLM call fires a `llm_call` event with `Metadata{media:"image"}`
+  ([core/vision.go](../core/vision.go)), and **image edits** surface the underlying
+  image-model `Model` + token cost on the `manage_files` `edit_image` tool event
+  (`AfterAction`), with the sub-`action` exposed in `BeforeAction` so a host can
+  pre-block expensive edits. (Background **summarization** LLM calls are intentionally
+  *not* billed — they are a system cost, visible only via metrics.)
 - **Status updates** — `engine.NotifyStatus` / `WithStatusFunc`: a context-scoped
   stream of phases (Received, Analyzing, Routing, Thinking, ToolExecuting, ToolDone,
   AgentCalling, AgentDone, Completed) that the host renders as live progress.
@@ -216,7 +225,7 @@ sequenceDiagram
 | Billing / quota | `engine.Callback`, set with `CoreHandler.SetCallback` / `AgentManager.SetCallback` |
 | Live progress | inject a `StatusFunc` via `engine.WithStatusFunc(ctx, fn)` |
 | Multi-agent | register agents in `AgentManager` with capabilities + `CostTier` |
-| Planning | implement `planning.Planner` + `Runner`, enable via `UsePlanning` |
+| Planning | implement `planning.Planner` + `Runner`, enable via `UsePlanning` ([PLANNING.md](./PLANNING.md)) |
 | Knowledge | filesystem nodes (default `fsrepo`) or a custom `NodeRepository` |
 | Debug UI | `AddDebugPage`, served under `/agentize/debug/...` |
 

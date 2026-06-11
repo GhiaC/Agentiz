@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/ghiac/agentize/config"
+	"github.com/ghiac/agentize/filestore"
 	"github.com/ghiac/agentize/fsrepo"
 	"github.com/ghiac/agentize/log"
 	"github.com/ghiac/agentize/metrics"
@@ -67,6 +68,12 @@ type Engine struct {
 	Sessions  store.SessionStore
 	Functions *model.FunctionRegistry
 	Executor  ToolExecutor
+	// Files is the pluggable byte storage for user files. When nil, the
+	// manage_files tool and user-file recording are disabled.
+	Files filestore.FileStore
+	// ImageEditor, when set, performs real image edits for the manage_files
+	// edit_image action. Pluggable so the app can wire any image model.
+	ImageEditor ImageEditorFunc
 	// LLM client and configuration
 	llmClient *openai.Client
 	llmConfig LLMConfig
@@ -916,6 +923,12 @@ func (e *Engine) GetTools(session *model.Session) []openai.Tool {
 			},
 		})
 	}
+
+	// Expose the file-manager tool to the agent when a file store is configured.
+	// This makes manage_files available without editing every node's tools.json.
+	if e.Files != nil {
+		tools = append(tools, ManageFilesToolDefinition())
+	}
 	return tools
 }
 
@@ -1264,9 +1277,14 @@ func (e *Engine) processChatRequest(
 	// split that landed between an assistant tool-call and its result.
 	localMsgs := sanitizeOrphanedToolResults(session.Msgs)
 
+	// pendingImages holds transient multimodal image messages injected by
+	// manage_files "read" on an image. They are sent to the LLM for the rest of
+	// this turn but never persisted to session.Msgs (avoids base64 history bloat).
+	var pendingImages []openai.ChatCompletionMessage
+
 	for i := 0; i < maxIterations; i++ {
-		// Build request messages: system prompts + local messages
-		reqMessages := make([]openai.ChatCompletionMessage, 0, len(systemPrompts)+len(localMsgs))
+		// Build request messages: system prompts + local messages + open images
+		reqMessages := make([]openai.ChatCompletionMessage, 0, len(systemPrompts)+len(localMsgs)+len(pendingImages))
 		for _, prompt := range systemPrompts {
 			if prompt != "" {
 				reqMessages = append(reqMessages, openai.ChatCompletionMessage{
@@ -1276,6 +1294,7 @@ func (e *Engine) processChatRequest(
 			}
 		}
 		reqMessages = append(reqMessages, localMsgs...)
+		reqMessages = append(reqMessages, pendingImages...)
 
 		log.Log.Infof("[Engine] LLM request | iteration=%d/%d | messages=%d | tools=%d",
 			i+1, maxIterations, len(reqMessages), len(openaiTools))
@@ -1354,13 +1373,16 @@ func (e *Engine) processChatRequest(
 
 			// Execute each tool and add results to local messages
 			for _, toolCall := range choice.Message.ToolCalls {
-				result := e.executeTool(ctx, session, messageID, toolCall)
+				result, inject := e.executeTool(ctx, session, messageID, toolCall)
 				localMsgs = append(localMsgs, openai.ChatCompletionMessage{
 					Role:       openai.ChatMessageRoleTool,
 					Content:    result,
 					Name:       toolCall.Function.Name,
 					ToolCallID: toolCall.ID,
 				})
+				if inject != nil {
+					pendingImages = append(pendingImages, inject.message())
+				}
 			}
 
 			// Save session with updated messages after tool execution
@@ -1436,14 +1458,26 @@ func (e *Engine) saveMessage(
 	return msg.MessageID
 }
 
-// executeTool executes a single tool and returns the result string.
+// toolActionMetadata surfaces a tool's "action" argument (when present) as
+// usage-event metadata, so a host can price/limit by sub-action — e.g. the
+// manage_files edit_image action vs a cheap list/read.
+func toolActionMetadata(args map[string]interface{}) map[string]interface{} {
+	if a, ok := args["action"].(string); ok && a != "" {
+		return map[string]interface{}{"action": a}
+	}
+	return nil
+}
+
+// executeTool executes a single tool and returns the result string plus an
+// optional image to inject into the conversation (e.g. when manage_files reads
+// an image so a vision model can see it). inject is nil for ordinary tools.
 // SIMPLIFIED: Does not modify session messages - caller is responsible for that.
 func (e *Engine) executeTool(
 	ctx context.Context,
 	session *model.Session,
 	messageID string,
 	toolCall openai.ToolCall,
-) string {
+) (string, *injectedImage) {
 	sessionID := session.SessionID
 
 	log.Log.Infof("[Engine] 🔧 executeTool | Function=%s | SessionID=%s", toolCall.Function.Name, sessionID)
@@ -1471,19 +1505,21 @@ func (e *Engine) executeTool(
 	}
 	NotifyStatus(ctx, session.UserID, sessionID, StatusToolExecuting, toolDetail)
 
-	// Check callback before execution
+	// Check callback before execution. Expose a tool's "action" arg (e.g.
+	// manage_files edit_image) so the host can pre-block expensive media actions.
 	if e.Callback != nil {
 		if cbErr := e.Callback.BeforeAction(ctx, &UsageEvent{
 			UserID:    session.UserID,
 			SessionID: sessionID,
 			EventType: EventToolCall,
 			Name:      toolCall.Function.Name,
+			Metadata:  toolActionMetadata(args),
 		}); cbErr != nil {
 			result := FormatBlockedActionResult(cbErr)
 			if persister != nil {
 				persister.Update(toolID, result, cbErr)
 			}
-			return result
+			return result, nil
 		}
 	}
 
@@ -1500,16 +1536,30 @@ func (e *Engine) executeTool(
 		log.Log.Infof("[Engine] Tool result | name=%s | len=%d", toolCall.Function.Name, len(result))
 	}
 
-	// Callback after execution
+	// Callback after execution. A tool may hand back model/token usage via the
+	// shared args map (e.g. manage_files edit_image → the image-model cost); when
+	// present, attach it so the host meters the real cost, not a zero-cost tool.
 	if e.Callback != nil {
-		e.Callback.AfterAction(ctx, &UsageEvent{
+		ev := &UsageEvent{
 			UserID:    session.UserID,
 			SessionID: sessionID,
 			EventType: EventToolCall,
 			Name:      toolCall.Function.Name,
 			Duration:  toolDuration,
 			Error:     err,
-		})
+			Metadata:  toolActionMetadata(args),
+		}
+		if u, ok := args[usageArgKey].(*model.ImageEditResult); ok && u != nil {
+			ev.Model = u.Model
+			ev.InputTokens = u.InputTokens
+			ev.OutputTokens = u.OutputTokens
+			ev.Tokens = u.InputTokens + u.OutputTokens
+			if ev.Metadata == nil {
+				ev.Metadata = map[string]interface{}{}
+			}
+			ev.Metadata["media"] = "image"
+		}
+		e.Callback.AfterAction(ctx, ev)
 	}
 
 	NotifyStatus(ctx, session.UserID, sessionID, StatusToolDone, toolDetail)
@@ -1527,7 +1577,14 @@ func (e *Engine) executeTool(
 		persister.Update(toolID, processedResult, err)
 	}
 
-	return processedResult
+	// A tool (manage_files read on an image) may hand back an image to inject
+	// into the conversation via the shared args map.
+	var inject *injectedImage
+	if v, ok := args[injectImageArgKey]; ok {
+		inject, _ = v.(*injectedImage)
+	}
+
+	return processedResult, inject
 }
 
 // executeOneToolCall is kept for backward compatibility but deprecated.
@@ -1538,7 +1595,7 @@ func (e *Engine) executeOneToolCall(
 	messageID, sessionID string,
 	toolCall openai.ToolCall,
 ) openai.ChatCompletionMessage {
-	result := e.executeTool(ctx, session, messageID, toolCall)
+	result, _ := e.executeTool(ctx, session, messageID, toolCall)
 	return openai.ChatCompletionMessage{
 		Role:       openai.ChatMessageRoleTool,
 		Content:    result,

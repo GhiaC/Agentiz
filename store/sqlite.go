@@ -135,7 +135,25 @@ func (s *SQLiteStore) initSchema() error {
 	CREATE INDEX IF NOT EXISTS idx_opened_files_user_id ON opened_files(user_id);
 	CREATE INDEX IF NOT EXISTS idx_opened_files_file_path ON opened_files(file_path);
 	CREATE INDEX IF NOT EXISTS idx_opened_files_is_open ON opened_files(is_open);
-	
+
+	CREATE TABLE IF NOT EXISTS user_files (
+		file_id TEXT PRIMARY KEY,
+		user_id TEXT NOT NULL,
+		session_id TEXT NOT NULL,
+		name TEXT,
+		mime_type TEXT,
+		size INTEGER DEFAULT 0,
+		storage_key TEXT NOT NULL,
+		source TEXT DEFAULT 'uploaded',
+		parent_file_id TEXT DEFAULT '',
+		summary TEXT,
+		created_at INTEGER NOT NULL
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_user_files_user_id ON user_files(user_id);
+	CREATE INDEX IF NOT EXISTS idx_user_files_session_id ON user_files(session_id);
+	CREATE INDEX IF NOT EXISTS idx_user_files_created_at ON user_files(created_at);
+
 	CREATE TABLE IF NOT EXISTS tool_calls (
 		tool_call_id TEXT PRIMARY KEY,
 		tool_id TEXT DEFAULT '',
@@ -215,6 +233,15 @@ func (s *SQLiteStore) initSchema() error {
 	// Migration: Add display_label to tool_calls for dashboard distinction
 	_ = s.migrateAddToolCallDisplayLabel()
 
+	// Migration: Add parent_file_id to user_files for derived files (e.g. edited images)
+	_ = s.migrateAddUserFileParentColumn()
+
+	return nil
+}
+
+// migrateAddUserFileParentColumn adds parent_file_id to user_files if it doesn't exist
+func (s *SQLiteStore) migrateAddUserFileParentColumn() error {
+	_, _ = s.db.Exec(`ALTER TABLE user_files ADD COLUMN parent_file_id TEXT DEFAULT ''`)
 	return nil
 }
 
@@ -521,6 +548,9 @@ func (s *SQLiteStore) DeleteUserData(userID string) error {
 	}
 	if _, err := tx.Exec("DELETE FROM opened_files WHERE user_id = ?", userID); err != nil {
 		return fmt.Errorf("failed to delete opened_files: %w", err)
+	}
+	if _, err := tx.Exec("DELETE FROM user_files WHERE user_id = ?", userID); err != nil {
+		return fmt.Errorf("failed to delete user_files: %w", err)
 	}
 	if _, err := tx.Exec("DELETE FROM sessions WHERE user_id = ?", userID); err != nil {
 		return fmt.Errorf("failed to delete sessions: %w", err)
@@ -1602,6 +1632,148 @@ func (s *SQLiteStore) GetOpenedFilesByUser(userID string) ([]*model.OpenedFile, 
 	}
 
 	return files, nil
+}
+
+// PutUserFile inserts or updates a user file record.
+func (s *SQLiteStore) PutUserFile(f *model.UserFile) error {
+	if f == nil {
+		return fmt.Errorf("userFile cannot be nil")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err := s.db.Exec(
+		`INSERT OR REPLACE INTO user_files (
+			file_id, user_id, session_id, name, mime_type, size, storage_key, source, parent_file_id, summary, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		f.FileID,
+		f.UserID,
+		f.SessionID,
+		f.Name,
+		f.MIMEType,
+		f.Size,
+		f.StorageKey,
+		string(f.Source),
+		f.ParentFileID,
+		f.Summary,
+		f.CreatedAt.Unix(),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to store user file: %w", err)
+	}
+	return nil
+}
+
+// scanUserFile scans a single user_files row into a model.UserFile.
+func scanUserFile(scanner interface {
+	Scan(dest ...interface{}) error
+}) (*model.UserFile, error) {
+	f := &model.UserFile{}
+	var source string
+	var createdAt int64
+	err := scanner.Scan(
+		&f.FileID,
+		&f.UserID,
+		&f.SessionID,
+		&f.Name,
+		&f.MIMEType,
+		&f.Size,
+		&f.StorageKey,
+		&source,
+		&f.ParentFileID,
+		&f.Summary,
+		&createdAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	f.Source = model.FileSource(source)
+	f.CreatedAt = time.Unix(createdAt, 0)
+	return f, nil
+}
+
+const userFileColumns = `file_id, user_id, session_id, name, mime_type, size, storage_key, source, parent_file_id, summary, created_at`
+
+// GetUserFile returns a single user file by ID, or nil if not found.
+func (s *SQLiteStore) GetUserFile(fileID string) (*model.UserFile, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	row := s.db.QueryRow(
+		`SELECT `+userFileColumns+` FROM user_files WHERE file_id = ?`,
+		fileID,
+	)
+	f, err := scanUserFile(row)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to query user file: %w", err)
+	}
+	return f, nil
+}
+
+// queryUserFiles runs a user_files query and scans all rows.
+func (s *SQLiteStore) queryUserFiles(query string, args ...interface{}) ([]*model.UserFile, error) {
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query user files: %w", err)
+	}
+	defer rows.Close()
+
+	var files []*model.UserFile
+	for rows.Next() {
+		f, err := scanUserFile(rows)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan user file: %w", err)
+		}
+		files = append(files, f)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating user files: %w", err)
+	}
+	return files, nil
+}
+
+// GetUserFilesByUser returns all files for a user, newest first.
+func (s *SQLiteStore) GetUserFilesByUser(userID string) ([]*model.UserFile, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.queryUserFiles(
+		`SELECT `+userFileColumns+` FROM user_files WHERE user_id = ? ORDER BY created_at DESC`,
+		userID,
+	)
+}
+
+// GetUserFilesBySession returns all files for a session, newest first.
+func (s *SQLiteStore) GetUserFilesBySession(sessionID string) ([]*model.UserFile, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.queryUserFiles(
+		`SELECT `+userFileColumns+` FROM user_files WHERE session_id = ? ORDER BY created_at DESC`,
+		sessionID,
+	)
+}
+
+// GetAllUserFiles returns all user files, newest first.
+func (s *SQLiteStore) GetAllUserFiles() ([]*model.UserFile, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.queryUserFiles(
+		`SELECT ` + userFileColumns + ` FROM user_files ORDER BY created_at DESC`,
+	)
+}
+
+// DeleteUserFile removes a user file metadata record by ID.
+func (s *SQLiteStore) DeleteUserFile(fileID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, err := s.db.Exec("DELETE FROM user_files WHERE file_id = ?", fileID); err != nil {
+		return fmt.Errorf("failed to delete user file: %w", err)
+	}
+	return nil
 }
 
 // GetSession is an alias for Get to match DebugStore interface

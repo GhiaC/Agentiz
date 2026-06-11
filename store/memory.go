@@ -359,6 +359,36 @@ func (s *DBStore) GetOpenedFilesByUser(userID string) ([]*model.OpenedFile, erro
 	return s.sqliteStore.GetOpenedFilesByUser(userID)
 }
 
+// PutUserFile stores a user file record (delegates to SQLiteStore)
+func (s *DBStore) PutUserFile(f *model.UserFile) error {
+	return s.sqliteStore.PutUserFile(f)
+}
+
+// GetUserFile returns a user file by ID (delegates to SQLiteStore)
+func (s *DBStore) GetUserFile(fileID string) (*model.UserFile, error) {
+	return s.sqliteStore.GetUserFile(fileID)
+}
+
+// GetUserFilesByUser returns all files for a user (delegates to SQLiteStore)
+func (s *DBStore) GetUserFilesByUser(userID string) ([]*model.UserFile, error) {
+	return s.sqliteStore.GetUserFilesByUser(userID)
+}
+
+// GetUserFilesBySession returns all files for a session (delegates to SQLiteStore)
+func (s *DBStore) GetUserFilesBySession(sessionID string) ([]*model.UserFile, error) {
+	return s.sqliteStore.GetUserFilesBySession(sessionID)
+}
+
+// GetAllUserFiles returns all user files (delegates to SQLiteStore)
+func (s *DBStore) GetAllUserFiles() ([]*model.UserFile, error) {
+	return s.sqliteStore.GetAllUserFiles()
+}
+
+// DeleteUserFile removes a user file record (delegates to SQLiteStore)
+func (s *DBStore) DeleteUserFile(fileID string) error {
+	return s.sqliteStore.DeleteUserFile(fileID)
+}
+
 // GetSession is an alias for Get to match DebugStore interface
 func (s *DBStore) GetSession(sessionID string) (*model.Session, error) {
 	return s.Get(sessionID)

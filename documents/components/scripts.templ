@@ -442,7 +442,7 @@ templ scripts(treeData, nodesData, registeredTools string) {
 					const childData = nodesData[childPath];
 					const childTitle = childData ? (childData.title || childData.id || childPath) : childPath;
 					html += '<li class="children-list-item">' +
-						'<a href="#" onclick="event.preventDefault(); showNodeDetail(\'' + childPath + '\'); return false;">' +
+						'<a href="#" onclick="event.preventDefault(); showNodeDetail(\'' + escapeHtml(childPath) + '\'); return false;">' +
 						escapeHtml(childTitle) + ' <span style="color: #6c757d; font-size: 0.9em;">(' + escapeHtml(childPath) + ')</span>' +
 						'</a>' +
 						'</li>';
@@ -518,6 +518,13 @@ templ scripts(treeData, nodesData, registeredTools string) {
 			window.location.hash = '#tools';
 		}
 
+		// Tools view registration filter: 'all' | 'registered' | 'unregistered'.
+		var toolsFilter = 'all';
+		function setToolsFilter(f) {
+			toolsFilter = f;
+			renderAllTools();
+		}
+
 		function renderAllTools() {
 			const container = document.getElementById('tools-list-container');
 			if (!container) return;
@@ -556,10 +563,44 @@ templ scripts(treeData, nodesData, registeredTools string) {
 				return;
 			}
 
-			let html = '<div class="tools-summary">Total: <strong>' + toolsArray.length + '</strong> unique tools</div>';
+			// Registration coverage for the filter labels.
+			function entryRegistered(entry) {
+				return registeredTools && typeof registeredTools === 'object' && registeredTools[entry.tool.name] === true;
+			}
+			const registeredCount = toolsArray.filter(entryRegistered).length;
+			const unregisteredCount = toolsArray.length - registeredCount;
+
+			// Apply the active filter (default 'all'). Unregistered tools are
+			// usually dead or mis-typed names, so surfacing them is useful.
+			const visibleTools = toolsArray.filter(function(entry) {
+				if (toolsFilter === 'registered') return entryRegistered(entry);
+				if (toolsFilter === 'unregistered') return !entryRegistered(entry);
+				return true;
+			});
+
+			function filterBtn(key, label) {
+				const active = toolsFilter === key;
+				const style = 'cursor:pointer;border:1px solid #667eea;border-radius:4px;padding:4px 10px;margin-left:6px;font-size:0.85em;' +
+					(active ? 'background:#667eea;color:#fff;' : 'background:#fff;color:#667eea;');
+				return '<button style="' + style + '" onclick="setToolsFilter(\'' + key + '\')">' + label + '</button>';
+			}
+
+			let html = '<div class="tools-summary">Total: <strong>' + toolsArray.length + '</strong> unique tools' +
+				'<span style="float: right;">' +
+				filterBtn('all', 'All (' + toolsArray.length + ')') +
+				filterBtn('registered', '✓ Registered (' + registeredCount + ')') +
+				filterBtn('unregistered', '⚠️ Unregistered (' + unregisteredCount + ')') +
+				'</span></div>';
+
+			if (visibleTools.length === 0) {
+				html += '<div class="no-tools">No tools match this filter.</div>';
+				container.innerHTML = html;
+				return;
+			}
+
 			html += '<div class="tools-grid">';
 
-			toolsArray.forEach(function(entry, index) {
+			visibleTools.forEach(function(entry, index) {
 				const tool = entry.tool;
 				const statusClass = tool.status === 'active' ? 'status-active' : 
 									tool.status === 'disabled' ? 'status-disabled' : 

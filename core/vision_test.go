@@ -32,6 +32,17 @@ func newVisionTestHandler(t *testing.T, transport *MockLLMTransport) *CoreHandle
 	return ch
 }
 
+// visionRecordingCallback captures billing events for the vision path.
+type visionRecordingCallback struct {
+	before, after *engine.UsageEvent
+}
+
+func (c *visionRecordingCallback) BeforeAction(_ context.Context, ev *engine.UsageEvent) error {
+	c.before = ev
+	return nil
+}
+func (c *visionRecordingCallback) AfterAction(_ context.Context, ev *engine.UsageEvent) { c.after = ev }
+
 func TestProcessMessageWithImage_Success(t *testing.T) {
 	transport := &MockLLMTransport{}
 	transport.AddResponse(openai.ChatCompletionResponse{
@@ -41,7 +52,7 @@ func TestProcessMessageWithImage_Success(t *testing.T) {
 				Content: "I see a cat in the image",
 			},
 		}},
-		Usage: openai.Usage{TotalTokens: 100},
+		Usage: openai.Usage{PromptTokens: 80, CompletionTokens: 20, TotalTokens: 100},
 	})
 
 	ch := newVisionTestHandler(t, transport)
@@ -53,6 +64,8 @@ func TestProcessMessageWithImage_Success(t *testing.T) {
 	if err := ch.UseVisionLLMConfig(visionCfg); err != nil {
 		t.Fatalf("UseVisionLLMConfig: %v", err)
 	}
+	cb := &visionRecordingCallback{}
+	ch.SetCallback(cb)
 
 	resp, err := ch.ProcessMessageWithImage(
 		context.Background(),
@@ -66,6 +79,20 @@ func TestProcessMessageWithImage_Success(t *testing.T) {
 	}
 	if resp != "I see a cat in the image" {
 		t.Errorf("unexpected response: %q", resp)
+	}
+
+	// The vision (image-input) LLM call must be billed — previously it was not.
+	if cb.before == nil || cb.before.EventType != engine.EventLLMCall || cb.before.Model != "vision-model" {
+		t.Errorf("BeforeAction not fired for vision LLM: %+v", cb.before)
+	}
+	if cb.after == nil {
+		t.Fatal("AfterAction not fired for vision LLM")
+	}
+	if cb.after.InputTokens != 80 || cb.after.OutputTokens != 20 || cb.after.Tokens != 100 {
+		t.Errorf("vision usage wrong: in=%d out=%d total=%d", cb.after.InputTokens, cb.after.OutputTokens, cb.after.Tokens)
+	}
+	if cb.after.Metadata["media"] != "image" {
+		t.Errorf("expected media=image metadata, got %v", cb.after.Metadata)
 	}
 }
 

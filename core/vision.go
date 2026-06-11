@@ -85,6 +85,17 @@ func (ch *CoreHandler) ProcessMessageWithImage(
 		return "", fmt.Errorf("failed to get or create core session: %w", err)
 	}
 
+	// Record the inbound image as a user file (best-effort) when a recorder is wired.
+	if ch.fileRecorder != nil {
+		imageName := "image" + imageExtension(imageMimeType)
+		recStart := time.Now()
+		_, recErr := ch.fileRecorder(coreSession.SessionID, imageName, imageMimeType, model.FileSourceUploaded, imageData)
+		metrics.FileOp("upload", metrics.Status(recErr), time.Since(recStart))
+		if recErr != nil {
+			log.Log.Warnf("[CoreHandler] ⚠️  Failed to record uploaded image as user file: %v", recErr)
+		}
+	}
+
 	base64Image := base64.StdEncoding.EncodeToString(imageData)
 	dataURL := fmt.Sprintf("data:%s;base64,%s", imageMimeType, base64Image)
 
@@ -154,17 +165,50 @@ func (ch *CoreHandler) ProcessMessageWithImage(
 		Messages: messages,
 	}
 
+	// Billing: meter (and allow blocking of) the vision LLM call. Image input was
+	// previously instrumented for Prometheus but never sent to the usage Callback.
+	visionMeta := map[string]interface{}{"media": "image", "kind": "vision"}
+	if ch.Callback != nil {
+		if cbErr := ch.Callback.BeforeAction(ctx, &engine.UsageEvent{
+			UserID:    userID,
+			SessionID: coreSession.SessionID,
+			EventType: engine.EventLLMCall,
+			Name:      engine.EventNameLLMCall,
+			Model:     llmModel,
+			Metadata:  visionMeta,
+		}); cbErr != nil {
+			return cbErr.Error(), nil
+		}
+	}
+
 	visionStart := time.Now()
 	resp, err := llmClient.CreateChatCompletion(ctx, request)
+	visionDur := time.Since(visionStart)
 	if err != nil {
-		metrics.LLMCall("vision", llmModel, "error", time.Since(visionStart), 0, 0, 0)
+		metrics.LLMCall("vision", llmModel, "error", visionDur, 0, 0, 0)
+		if ch.Callback != nil {
+			ch.Callback.AfterAction(ctx, &engine.UsageEvent{
+				UserID: userID, SessionID: coreSession.SessionID,
+				EventType: engine.EventLLMCall, Name: engine.EventNameLLMCall,
+				Model: llmModel, Duration: visionDur, Error: err, Metadata: visionMeta,
+			})
+		}
 		return "", fmt.Errorf("vision LLM call failed: %w", err)
 	}
 	visionCached := 0
 	if resp.Usage.PromptTokensDetails != nil {
 		visionCached = resp.Usage.PromptTokensDetails.CachedTokens
 	}
-	metrics.LLMCall("vision", llmModel, "ok", time.Since(visionStart), resp.Usage.PromptTokens, resp.Usage.CompletionTokens, visionCached)
+	metrics.LLMCall("vision", llmModel, "ok", visionDur, resp.Usage.PromptTokens, resp.Usage.CompletionTokens, visionCached)
+	if ch.Callback != nil {
+		ch.Callback.AfterAction(ctx, &engine.UsageEvent{
+			UserID: userID, SessionID: coreSession.SessionID,
+			EventType: engine.EventLLMCall, Name: engine.EventNameLLMCall,
+			Model: llmModel, Tokens: resp.Usage.TotalTokens,
+			InputTokens: resp.Usage.PromptTokens, OutputTokens: resp.Usage.CompletionTokens,
+			CachedInputTokens: visionCached, Duration: visionDur, Metadata: visionMeta,
+		})
+	}
 
 	if len(resp.Choices) == 0 {
 		return "", fmt.Errorf("no response from vision LLM")
@@ -214,4 +258,20 @@ func (ch *CoreHandler) ProcessMessageWithImage(
 // HasVisionLLM returns true if a Vision LLM is configured.
 func (ch *CoreHandler) HasVisionLLM() bool {
 	return ch.visionLLMClient != nil && ch.visionLLMConfig != nil
+}
+
+// imageExtension returns a file extension for a known image MIME type.
+func imageExtension(mimeType string) string {
+	switch mimeType {
+	case "image/jpeg", "image/jpg":
+		return ".jpg"
+	case "image/png":
+		return ".png"
+	case "image/gif":
+		return ".gif"
+	case "image/webp":
+		return ".webp"
+	default:
+		return ".img"
+	}
 }

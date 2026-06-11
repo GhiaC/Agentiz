@@ -97,18 +97,24 @@ tool text and auto-expands matches). Navigation is hash-based
 swaps the ECharts asset URL for a CDN one and serves it. It is a separate renderer
 from this package and shows structure only (no tools/auth detail).
 
-> Note: `documents/main-echart.js` is a large bundled ECharts asset. The
-> `/agentize/docs` page does **not** use it (it loads `marked` from a CDN and builds
-> plain HTML). Confirm whether `main-echart.js` is still referenced anywhere before
-> relying on or removing it.
+> Note: a large bundled `documents/main-echart.js` ECharts asset used to live here
+> but was **removed** — it was dead weight (~106 KB, referenced nowhere; the graph
+> page loads ECharts from a CDN in `routes.go`). The `/agentize/docs` page loads
+> only `marked` from a CDN and builds plain HTML.
 
 ## 3. The Debug dashboards (`/agentize/debug/*`)
 
 These are the **data-driven** dashboards, backed by the `DebugStore` interface
 (implemented by the SQLite/Mongo session stores). They expose operational data:
-sessions, messages, tool-calls (with input/output), users, plans, summarization
-logs and opened files. This is where runtime/usage data already lives — important
-for the improvements below.
+sessions, messages, tool-calls (with input/output), users, summarization logs and
+opened files. This is where runtime/usage data already lives — important for the
+improvements below.
+
+> **Plans are the exception:** `/agentize/debug/plans` reads from the planning
+> `PlanStore` (in-memory `MemoryStore` by default), **not** the `DebugStore` — so it is
+> empty after a restart unless a durable `Persister` is wired. The detail page shows the
+> plan's steps with their dependencies (DAG edges), per-step status/duration/tokens, and
+> failure reasons. See [PLANNING.md](../docs/PLANNING.md).
 
 ---
 
@@ -154,9 +160,12 @@ Still open
 ### A. Surface data that already exists (cheap, high value)
 - ✅ Done: `Auth.Groups` / `Auth.Roles` / `Inherit` now shown; `Hash` + `LoadedAt`
   shown; **Registered Tools** coverage stat added; dead `policy` badges removed.
-- Next: add a **filter** to the Tools view for **defined-but-unregistered** tools
-  (likely dead/mis-typed) and **registered-but-undeclared** tools — the coverage
-  count is already computed, this is just a list + toggle.
+- ✅ Done: the Tools view now has an **All / ✓ Registered / ⚠️ Unregistered** filter
+  (with live counts) so defined-but-unregistered tools (likely dead/mis-typed) are
+  one click away (`setToolsFilter` in `scripts.templ`).
+- Next: also flag **registered-but-undeclared** tools (registered in the
+  `FunctionRegistry` but exposed by no node) — needs the registered set minus the
+  declared set, then a small list.
 
 ### B. Join runtime data from the DB (the "store more / show more" ask)
 The `DebugStore` already records `tool_calls` and `opened_files`. Aggregate them and

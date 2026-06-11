@@ -76,6 +76,20 @@ type CoreHandler struct {
 
 	// orchestrator is the planning orchestrator; when set, execute_plan tool and Planning prompt are available.
 	orchestrator *planning.Orchestrator
+
+	// fileRecorder, when set, records files the user sends (e.g. images) as
+	// user files. Wire it to Agentize.RecordUserFile via SetFileRecorder.
+	fileRecorder FileRecorder
+}
+
+// FileRecorder records an uploaded or generated file against a session. Its
+// signature matches engine.Engine.RecordUserFile / Agentize.RecordUserFile.
+type FileRecorder func(sessionID, name, mimeType string, source model.FileSource, data []byte) (*model.UserFile, error)
+
+// SetFileRecorder wires a function used to persist files the user sends (such as
+// images) as user files. Optional; when unset, inbound files are not recorded.
+func (ch *CoreHandler) SetFileRecorder(recorder FileRecorder) {
+	ch.fileRecorder = recorder
 }
 
 // NewCoreHandler creates a new CoreHandler with the given AgentManager.
@@ -256,6 +270,7 @@ func (ch *CoreHandler) processOneMessageCore(
 			isNonsense = banMessage != "" || shouldBan
 			if shouldBan {
 				metrics.Moderation("banned")
+				metrics.Ban("nonsense")
 				return banMessage, nil
 			}
 			if banMessage != "" {

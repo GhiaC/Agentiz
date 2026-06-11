@@ -80,6 +80,7 @@ type Session struct {
 	MessageSeq          int // Sequence counter for messages
 	ToolSeq             int // Sequence counter for tool calls
 	OpenedFileSeq       int // Sequence counter for opened files
+	UserFileSeq         int // Sequence counter for user files (uploaded/generated)
 	SummarizationLogSeq int // Sequence counter for summarization logs
 
 	// ==================== Internal (not persisted) ====================
@@ -119,6 +120,7 @@ func NewSessionWithID(userID string, sessionID string, agentType AgentType) *Ses
 		MessageSeq:          0,
 		ToolSeq:             0,
 		OpenedFileSeq:       0,
+		UserFileSeq:         0,
 		SummarizationLogSeq: 0,
 	}
 }
@@ -237,6 +239,15 @@ func (s *Session) GenerateFileID() string {
 	return fmt.Sprintf("%s-f%04d", s.SessionID, s.OpenedFileSeq)
 }
 
+// GenerateUserFileID generates a unique ID for a user file (uploaded or
+// generated) in this session. Format: {SessionID}-uf{seq}.
+func (s *Session) GenerateUserFileID() string {
+	s.seqMu.Lock()
+	defer s.seqMu.Unlock()
+	s.UserFileSeq++
+	return fmt.Sprintf("%s-uf%04d", s.SessionID, s.UserFileSeq)
+}
+
 // GenerateFileIDWithSeq generates a unique file ID and returns both the ID and sequence number
 // Format: {SessionID}-f{SeqID}
 // Returns: (fileID, seqID)
@@ -314,6 +325,7 @@ func (s *Session) Clone() *Session {
 		MessageSeq:          s.MessageSeq,
 		ToolSeq:             s.ToolSeq,
 		OpenedFileSeq:       s.OpenedFileSeq,
+		UserFileSeq:         s.UserFileSeq,
 		SummarizationLogSeq: s.SummarizationLogSeq,
 		// seqMu is NOT copied - new mutex for the clone
 	}

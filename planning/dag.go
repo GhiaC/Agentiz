@@ -122,7 +122,10 @@ func TopologicalSort(steps []*Step) ([]*Step, error) {
 	return sorted, nil
 }
 
-// ReadySteps returns steps that are pending and have all dependencies completed.
+// ReadySteps returns steps that are pending and whose dependencies are all
+// resolved. A dependency counts as resolved when it has completed OR was
+// skipped (e.g. by a conditional that did not select its branch); a skipped
+// dependency simply contributes no output to the dependent step.
 func ReadySteps(steps []*Step) []*Step {
 	idToStep := make(map[string]*Step)
 	for _, s := range steps {
@@ -139,7 +142,7 @@ func ReadySteps(steps []*Step) []*Step {
 		allDone := true
 		for _, depID := range s.DependsOn {
 			dep := idToStep[depID]
-			if dep == nil || dep.Status != StepCompleted {
+			if dep == nil || (dep.Status != StepCompleted && dep.Status != StepSkipped) {
 				allDone = false
 				break
 			}
@@ -149,4 +152,45 @@ func ReadySteps(steps []*Step) []*Step {
 		}
 	}
 	return ready
+}
+
+// PropagateSkips marks as skipped any pending step that has at least one
+// dependency and whose dependencies were ALL skipped — it has no surviving input
+// path, so it cannot meaningfully run. A step that still has a completed
+// dependency is left runnable (e.g. a collect/join after a conditional, which
+// aggregates whichever branches survived). It iterates to a fixed point so skips
+// cascade through a non-selected sub-DAG, and returns the number skipped.
+func PropagateSkips(steps []*Step) int {
+	idToStep := make(map[string]*Step)
+	for _, s := range steps {
+		if s != nil && s.ID != "" {
+			idToStep[s.ID] = s
+		}
+	}
+	total := 0
+	for {
+		changed := 0
+		for _, s := range steps {
+			if s == nil || s.Status != StepPending || len(s.DependsOn) == 0 {
+				continue
+			}
+			allSkipped := true
+			for _, depID := range s.DependsOn {
+				dep := idToStep[depID]
+				if dep == nil || dep.Status != StepSkipped {
+					allSkipped = false
+					break
+				}
+			}
+			if allSkipped {
+				s.Status = StepSkipped
+				changed++
+			}
+		}
+		total += changed
+		if changed == 0 {
+			break
+		}
+	}
+	return total
 }
