@@ -10,25 +10,17 @@ import (
 )
 
 // getOrCreateCoreSession gets or creates a Core session for a user.
+//
+// The whole check-and-create runs under the write lock: with a read-lock fast
+// path two goroutines could both miss, both create a session, and the second
+// would silently overwrite the first (TOCTOU). Creation is rare and per-user
+// messages are already serialized by getUserMutex, so the simpler single-lock
+// form costs nothing on the hot path.
 func (ch *CoreHandler) getOrCreateCoreSession(userID string) (*model.Session, error) {
-	ch.coreSessionsMu.RLock()
-	session, exists := ch.coreSessions[userID]
-	ch.coreSessionsMu.RUnlock()
-
-	if exists {
-		dbSession, err := ch.sessionHandler.GetSession(session.SessionID)
-		if err == nil && dbSession != nil {
-			ch.coreSessionsMu.Lock()
-			ch.coreSessions[userID] = dbSession
-			ch.coreSessionsMu.Unlock()
-			return dbSession, nil
-		}
-	}
-
 	ch.coreSessionsMu.Lock()
 	defer ch.coreSessionsMu.Unlock()
 
-	if session, exists = ch.coreSessions[userID]; exists {
+	if session, exists := ch.coreSessions[userID]; exists {
 		dbSession, err := ch.sessionHandler.GetSession(session.SessionID)
 		if err == nil && dbSession != nil {
 			ch.coreSessions[userID] = dbSession
@@ -165,8 +157,12 @@ func (ch *CoreHandler) createSessionForUser(userID string, agentType model.Agent
 		return nil, fmt.Errorf("failed to create session: %w", err)
 	}
 
+	// CreateSessionForUser mutated the user (session sequence, active-session
+	// bookkeeping); failing to persist that would leave the new session orphaned
+	// from the user record, so surface the error instead of swallowing it.
 	if err := ch.saveUser(user); err != nil {
-		log.Log.Warnf("[CoreHandler] ⚠️  Failed to save user after session creation | UserID: %s | Error: %v", userID, err)
+		log.Log.Errorf("[CoreHandler] ❌ Failed to save user after session creation | UserID: %s | Error: %v", userID, err)
+		return nil, fmt.Errorf("failed to save user after session creation: %w", err)
 	}
 
 	return session, nil

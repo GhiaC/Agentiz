@@ -39,7 +39,29 @@ type CoreHandlerConfig struct {
 	// rebuilds sooner when the user's Core session is re-summarized or when their
 	// sessions change. Zero falls back to the 10-minute default.
 	SystemPromptCacheTTL time.Duration
+
+	// MaxSystemPromptSize caps the total size (in characters) of the assembled
+	// system-prompt array. Required sections (controller, agent descriptions,
+	// agent tools) are always included; optional sections that would push the
+	// total past the cap are dropped (logged + counted in metrics). Zero falls
+	// back to the 120000-character default.
+	MaxSystemPromptSize int
+
+	// MaxUserFilesInPrompt bounds how many files the User Files prompt section
+	// lists. Zero falls back to the default of 50.
+	MaxUserFilesInPrompt int
+
+	// MaxLLMIterations bounds the Core's LLM tool loop per message. Zero falls
+	// back to the default of 10.
+	MaxLLMIterations int
 }
+
+// Default limits for CoreHandlerConfig zero values.
+const (
+	defaultMaxSystemPromptSize  = 120000
+	defaultMaxUserFilesInPrompt = 50
+	defaultMaxLLMIterations     = 10
+)
 
 // DefaultCoreHandlerConfig returns default configuration.
 func DefaultCoreHandlerConfig() CoreHandlerConfig {
@@ -48,7 +70,34 @@ func DefaultCoreHandlerConfig() CoreHandlerConfig {
 		AutoSummarizeThreshold: 5,
 		WebSearchDisabled:      true,
 		SystemPromptCacheTTL:   10 * time.Minute,
+		MaxSystemPromptSize:    defaultMaxSystemPromptSize,
+		MaxUserFilesInPrompt:   defaultMaxUserFilesInPrompt,
+		MaxLLMIterations:       defaultMaxLLMIterations,
 	}
+}
+
+// maxSystemPromptSize returns the configured prompt-size cap or its default.
+func (c CoreHandlerConfig) maxSystemPromptSize() int {
+	if c.MaxSystemPromptSize > 0 {
+		return c.MaxSystemPromptSize
+	}
+	return defaultMaxSystemPromptSize
+}
+
+// maxUserFilesInPrompt returns the configured user-files cap or its default.
+func (c CoreHandlerConfig) maxUserFilesInPrompt() int {
+	if c.MaxUserFilesInPrompt > 0 {
+		return c.MaxUserFilesInPrompt
+	}
+	return defaultMaxUserFilesInPrompt
+}
+
+// maxLLMIterations returns the configured tool-loop bound or its default.
+func (c CoreHandlerConfig) maxLLMIterations() int {
+	if c.MaxLLMIterations > 0 {
+		return c.MaxLLMIterations
+	}
+	return defaultMaxLLMIterations
 }
 
 // CoreHandler is the main orchestrator that manages user conversations
@@ -318,6 +367,22 @@ func (ch *CoreHandler) processOneMessageCore(
 	ctx = withRouteRecorder(ctx, rec)
 	traceStart := time.Now()
 	defer func() { ch.persistRouteTrace(rec, time.Since(traceStart)) }()
+
+	// Early quota check: fail before assembling the (potentially large) system
+	// prompt so an over-quota user costs nothing. processWithTools still runs
+	// the authoritative per-call check before each LLM call.
+	if ch.Callback != nil {
+		if cbErr := ch.Callback.BeforeAction(ctx, &engine.UsageEvent{
+			UserID:    userID,
+			SessionID: coreSession.SessionID,
+			EventType: engine.EventLLMCall,
+			Name:      engine.EventNameLLMCall,
+			Model:     ch.llmConfig.Model,
+		}); cbErr != nil {
+			rec.Fail(cbErr.Error())
+			return cbErr.Error(), nil
+		}
+	}
 
 	systemPrompts, err := ch.generateSystemPrompt(userID, coreSession)
 	if err != nil {

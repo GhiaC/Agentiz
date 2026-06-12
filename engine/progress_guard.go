@@ -17,6 +17,12 @@ type progressState struct {
 	Queue      []string
 }
 
+// maxQueuedPerKey bounds the per-key message queue so a client hammering the
+// endpoint while a request is in flight cannot grow memory without limit.
+// Messages beyond the cap are dropped (the caller still gets the "in progress"
+// response — the oldest queued messages are kept).
+const maxQueuedPerKey = 20
+
 // NewProgressGuard returns a new ProgressGuard.
 func NewProgressGuard() *ProgressGuard {
 	return &ProgressGuard{state: make(map[string]*progressState)}
@@ -38,7 +44,9 @@ func (p *ProgressGuard) TryQueue(key, message string) (queued bool) {
 	if p.state[key] == nil {
 		p.state[key] = &progressState{}
 	}
-	p.state[key].Queue = append(p.state[key].Queue, message)
+	if len(p.state[key].Queue) < maxQueuedPerKey {
+		p.state[key].Queue = append(p.state[key].Queue, message)
+	}
 	return true
 }
 

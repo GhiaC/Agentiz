@@ -62,6 +62,17 @@ A ready-made Grafana dashboard is in [`grafana/agentize-dashboard.json`](./grafa
 | `agent_routing_total` | counter | `agent`, `status` |
 | `agent_escalations_total` | counter | `agent` |
 
+### Core system prompt (assembly cache + size budget)
+| Metric | Type | Labels |
+|--------|------|--------|
+| `system_prompt_cache_total` | counter | `result` (hit/miss/stale) — per-user assembled-prompt cache lookups in `generateSystemPrompt` |
+| `system_prompt_sections_dropped_total` | counter | `section` — optional prompt sections dropped because the assembly hit `MaxSystemPromptSize` |
+
+A growing `stale` rate means summarization/invalidations outpace the TTL; any
+non-zero `sections_dropped_total` means some users' context (e.g. session
+summaries or the user-files catalog) is being cut — consider raising
+`CoreHandlerConfig.MaxSystemPromptSize`.
+
 ### Routing trace (Core decision/forward DAG)
 | Metric | Type | Labels |
 |--------|------|--------|

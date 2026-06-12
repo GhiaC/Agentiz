@@ -96,13 +96,21 @@ Two important properties:
   (`memorySummarizedSince`), or after `invalidateSystemPrompt` is called — which
   happens on `create_session` / `change_session` ([core/tools.go](../core/tools.go))
   and via the exported `InvalidateSystemPromptCache` (wired to summarization, §5).
+  Cache lookups are observable via `agentize_system_prompt_cache_total{result=hit|miss|stale}`.
+- **Size budget.** `buildSystemPrompts` assembles sections through a `promptBudget`
+  capped at `CoreHandlerConfig.MaxSystemPromptSize` (default **120000 chars**).
+  Sections 1–3 (controller, agent descriptions, agent tools) are required; the
+  per-user sections are optional and dropped — logged and counted in
+  `agentize_system_prompt_sections_dropped_total{section}` — when they would push
+  the total past the cap, so one user's huge history cannot inflate every message's
+  token cost.
 
 ### Section 6 — User Files (handing files to a worker agent)
 
 `buildUserFilesPrompt` ([core/llm.go](../core/llm.go)) type-asserts the store to
 `GetUserFilesByUser(userID)` and renders a compact table (File ID, Name, Type, Size,
-Source) of the user's uploaded/generated files, capped at `maxUserFilesInPrompt`
-(50). It is **metadata-only** — no extra LLM calls — and includes a file's existing
+Source) of the user's uploaded/generated files, capped at
+`CoreHandlerConfig.MaxUserFilesInPrompt` (default 50). It is **metadata-only** — no extra LLM calls — and includes a file's existing
 `Summary` when present. The Core is instructed (in `core_controller.md`) to pass a
 file's **ID and name** in the `call_agent_*` message rather than pasting bytes; the
 worker agent then reads it on demand via its own file tool. Files are user-scoped, so

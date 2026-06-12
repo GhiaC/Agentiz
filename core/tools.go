@@ -189,6 +189,18 @@ func (ch *CoreHandler) getCoreToolsForLLM() []openai.Tool {
 	return tools
 }
 
+// requireStringArg extracts a required string argument from parsed tool-call
+// arguments, returning a descriptive error when missing, empty or mistyped.
+// Use it for every required string field so validation reads the same at all
+// tool sites.
+func requireStringArg(args map[string]interface{}, key string) (string, error) {
+	v, ok := args[key].(string)
+	if !ok || v == "" {
+		return "", fmt.Errorf("%s is required and must be a non-empty string", key)
+	}
+	return v, nil
+}
+
 // executeCoreTool executes a Core tool and returns the result string.
 func (ch *CoreHandler) executeCoreTool(
 	ctx context.Context,
@@ -408,9 +420,9 @@ func (ch *CoreHandler) callAgent(
 	args map[string]interface{},
 	agent *agentmanager.RegisteredAgent,
 ) (string, error) {
-	message, ok := args["message"].(string)
-	if !ok || message == "" {
-		return "", fmt.Errorf("message is required")
+	message, err := requireStringArg(args, "message")
+	if err != nil {
+		return "", err
 	}
 
 	sessionID, err := ch.getOrCreateActiveSession(userID, agent.Config.AgentType)
@@ -464,9 +476,9 @@ func (ch *CoreHandler) findHigherTierAgent(currentTier agentmanager.CostTier) *a
 
 // createSessionTool creates a new session for a dynamic agent.
 func (ch *CoreHandler) createSessionTool(_ context.Context, userID string, args map[string]interface{}) (string, error) {
-	agentName, ok := args["agent_name"].(string)
-	if !ok || agentName == "" {
-		return "", fmt.Errorf("agent_name is required")
+	agentName, err := requireStringArg(args, "agent_name")
+	if err != nil {
+		return "", err
 	}
 
 	agent, ok := ch.agents.Get(agentName)
@@ -498,14 +510,14 @@ func (ch *CoreHandler) createSessionTool(_ context.Context, userID string, args 
 
 // changeSessionTool switches to an existing session.
 func (ch *CoreHandler) changeSessionTool(_ context.Context, userID string, args map[string]interface{}) (string, error) {
-	agentName, ok := args["agent_name"].(string)
-	if !ok || agentName == "" {
-		return "", fmt.Errorf("agent_name is required")
+	agentName, err := requireStringArg(args, "agent_name")
+	if err != nil {
+		return "", err
 	}
 
-	sessionID, ok := args["session_id"].(string)
-	if !ok || sessionID == "" {
-		return "", fmt.Errorf("session_id is required")
+	sessionID, err := requireStringArg(args, "session_id")
+	if err != nil {
+		return "", err
 	}
 
 	agent, ok := ch.agents.Get(agentName)
@@ -603,9 +615,9 @@ func (ch *CoreHandler) sleepTool(ctx context.Context, args map[string]interface{
 }
 
 func (ch *CoreHandler) webSearchWithModelTool(ctx context.Context, userID string, args map[string]interface{}, searchModel string) (string, error) {
-	query, ok := args["query"].(string)
-	if !ok || query == "" {
-		return "", fmt.Errorf("query is required")
+	query, err := requireStringArg(args, "query")
+	if err != nil {
+		return "", err
 	}
 	result, err := engine.PerformWebSearchWithModel(ctx, ch.llmClient, ch.llmConfig, query, userID, searchModel)
 	if err != nil {

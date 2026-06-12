@@ -64,7 +64,13 @@ func (ch *CoreHandler) generateSystemPrompt(userID string, coreSession *model.Se
 	ch.systemPromptCacheMu.RUnlock()
 
 	if ok && time.Since(entry.builtAt) < ttl && !memorySummarizedSince(coreSession, entry.builtAt) {
+		metrics.SystemPromptCache("hit")
 		return entry.prompts, nil
+	}
+	if ok {
+		metrics.SystemPromptCache("stale")
+	} else {
+		metrics.SystemPromptCache("miss")
 	}
 
 	prompts, err := ch.buildSystemPrompts(userID)
@@ -103,67 +109,96 @@ func (ch *CoreHandler) InvalidateSystemPromptCache(userID string) {
 	ch.invalidateSystemPrompt(userID)
 }
 
+// promptBudget tracks the running size of the assembled system-prompt array
+// against config.MaxSystemPromptSize. Required sections are always added;
+// optional sections that would push the total past the cap are dropped (with a
+// log line and a metric) so a user with huge histories cannot blow up the
+// token cost of every single message.
+type promptBudget struct {
+	prompts []string
+	used    int
+	limit   int
+	userID  string
+}
+
+func (b *promptBudget) addRequired(section string) {
+	if section == "" {
+		return
+	}
+	b.prompts = append(b.prompts, section)
+	b.used += len(section)
+}
+
+func (b *promptBudget) addOptional(name, section string) {
+	if section == "" {
+		return
+	}
+	if b.used+len(section) > b.limit {
+		metrics.SystemPromptSectionDropped(name)
+		log.Log.Warnf("[CoreHandler] ⚠️  System prompt over budget — dropping section | UserID: %s | Section: %s | SectionLen: %d | Used: %d | Limit: %d",
+			b.userID, name, len(section), b.used, b.limit)
+		return
+	}
+	b.prompts = append(b.prompts, section)
+	b.used += len(section)
+}
+
 // buildSystemPrompts builds the array of system prompts for the Core. Prefer
 // generateSystemPrompt on the hot path; this is the uncached builder it wraps.
+//
+// Sections are added in routing-priority order: the controller prompt, agent
+// descriptions and agent tools are required (the Core cannot route without
+// them); everything else is optional and subject to the size budget.
 func (ch *CoreHandler) buildSystemPrompts(userID string) ([]string, error) {
-	prompts := []string{coreControllerPrompt}
+	budget := &promptBudget{limit: ch.config.maxSystemPromptSize(), userID: userID}
+
+	budget.addRequired(coreControllerPrompt)
 
 	// Agent descriptions (replaces hardcoded UserAgent table)
-	prompts = append(prompts, ch.agents.BuildAgentsDescriptionPrompt())
+	budget.addRequired(ch.agents.BuildAgentsDescriptionPrompt())
 
 	// Agent tools (replaces buildUserAgentToolsPrompt)
-	prompts = append(prompts, ch.agents.BuildAgentToolsPrompt())
+	budget.addRequired(ch.agents.BuildAgentToolsPrompt())
 
 	// Core's own session context (Summary + Tags)
 	ch.coreSessionsMu.RLock()
 	coreSession := ch.coreSessions[userID]
 	ch.coreSessionsMu.RUnlock()
 	if coreSession != nil {
-		sessionContext := ch.buildCoreSessionContext(coreSession)
-		if sessionContext != "" {
-			prompts = append(prompts, sessionContext)
-		}
+		budget.addOptional("core_session_context", ch.buildCoreSessionContext(coreSession))
 	}
 
 	// All agents' session contexts (Summary + Tags from each agent's active session)
-	allContexts := ch.agents.BuildAllSessionContextsPrompt(
+	budget.addOptional("agent_session_contexts", ch.agents.BuildAllSessionContextsPrompt(
 		ch.getSessionFunc(),
 		ch.getActiveSessionIDFunc(),
 		userID,
-	)
-	if allContexts != "" {
-		prompts = append(prompts, allContexts)
-	}
+	))
 
 	// User files: a compact catalog of the user's uploaded/generated files so the
 	// Core can hand a file's ID and name to a worker agent when delegating.
-	if filesPrompt := ch.buildUserFilesPrompt(userID); filesPrompt != "" {
-		prompts = append(prompts, filesPrompt)
-	}
+	budget.addOptional("user_files", ch.buildUserFilesPrompt(userID))
 
 	// Active sessions prompt (which session is active per agent)
-	activePrompt := ch.agents.BuildActiveSessionsPrompt(
+	budget.addOptional("active_sessions", ch.agents.BuildActiveSessionsPrompt(
 		ch.getSessionFunc(),
 		ch.getActiveSessionIDFunc(),
 		userID,
-	)
-	if activePrompt != "" {
-		prompts = append(prompts, activePrompt)
-	}
+	))
 
 	// Sessions list prompt (for change_session)
 	sessionsPrompt, err := ch.sessionHandler.GetSessionsPrompt(userID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get sessions prompt: %w", err)
 	}
-	prompts = append(prompts, sessionsPrompt)
+	budget.addOptional("sessions_list", sessionsPrompt)
 
 	// Planning: when enabled, inject decision-making prompt so Core can choose execute_plan for multi-step tasks
 	if ch.orchestrator != nil {
-		prompts = append(prompts, planning.CorePrompt())
+		budget.addOptional("planning", planning.CorePrompt())
 	}
 
-	return prompts, nil
+	return budget.prompts, nil
 }
 
 // userFileLister is the subset of the store used to read a user's files. The
@@ -173,10 +208,6 @@ func (ch *CoreHandler) buildSystemPrompts(userID string) ([]string, error) {
 type userFileLister interface {
 	GetUserFilesByUser(userID string) ([]*model.UserFile, error)
 }
-
-// maxUserFilesInPrompt bounds how many files the User Files section lists, keeping
-// the prompt small for users with very large histories.
-const maxUserFilesInPrompt = 50
 
 // buildUserFilesPrompt builds the "User Files" system-prompt section: a compact
 // table of the files the user has uploaded or been given, so the Core can pass a
@@ -193,11 +224,12 @@ func (ch *CoreHandler) buildUserFilesPrompt(userID string) string {
 		return ""
 	}
 
+	maxFiles := ch.config.maxUserFilesInPrompt()
 	shown := files
 	truncated := 0
-	if len(shown) > maxUserFilesInPrompt {
-		truncated = len(shown) - maxUserFilesInPrompt
-		shown = shown[:maxUserFilesInPrompt]
+	if len(shown) > maxFiles {
+		truncated = len(shown) - maxFiles
+		shown = shown[:maxFiles]
 	}
 
 	var sb strings.Builder
@@ -255,7 +287,7 @@ func (ch *CoreHandler) processWithTools(
 	userID string,
 	coreSession *model.Session,
 ) (string, error) {
-	const maxIterations = 10
+	maxIterations := ch.config.maxLLMIterations()
 	currentMessages := messages
 
 	modelName := ch.llmConfig.Model
@@ -265,7 +297,10 @@ func (ch *CoreHandler) processWithTools(
 
 	if coreSession != nil && coreSession.Model != modelName {
 		coreSession.Model = modelName
-		_ = ch.saveCoreSession(coreSession)
+		if err := ch.saveCoreSession(coreSession); err != nil {
+			// Non-fatal: the model name is metadata, but a failing store is worth surfacing.
+			log.Log.Warnf("[CoreHandler] ⚠️  Failed to persist session model change | SessionID: %s | Error: %v", coreSession.SessionID, err)
+		}
 	}
 
 	if _, ok := model.GetUserIDFromContext(ctx); !ok && userID != "" {

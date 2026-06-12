@@ -175,6 +175,33 @@ func AgentEscalation(agent string) {
 }
 
 // ---------------------------------------------------------------------------
+// Core system prompt (assembly cache + size budget)
+// ---------------------------------------------------------------------------
+
+var (
+	systemPromptCacheLookups = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace, Subsystem: "system_prompt", Name: "cache_total",
+		Help: "Core system-prompt cache lookups by result: hit (served from cache), " +
+			"miss (no entry), stale (entry expired or invalidated by summarization).",
+	}, []string{"result"})
+
+	systemPromptSections = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace, Subsystem: "system_prompt", Name: "sections_dropped_total",
+		Help: "Optional system-prompt sections dropped because the assembled prompt hit MaxSystemPromptSize, by section.",
+	}, []string{"section"})
+)
+
+// SystemPromptCache records one cache lookup result: "hit", "miss" or "stale".
+func SystemPromptCache(result string) {
+	systemPromptCacheLookups.WithLabelValues(result).Inc()
+}
+
+// SystemPromptSectionDropped records an optional prompt section skipped due to the size budget.
+func SystemPromptSectionDropped(section string) {
+	systemPromptSections.WithLabelValues(section).Inc()
+}
+
+// ---------------------------------------------------------------------------
 // Routing trace (Core decision/forward DAG)
 // ---------------------------------------------------------------------------
 

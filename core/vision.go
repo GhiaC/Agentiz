@@ -85,6 +85,19 @@ func (ch *CoreHandler) ProcessMessageWithImage(
 		return "", fmt.Errorf("failed to get or create core session: %w", err)
 	}
 
+	// Record this vision message on the routing DAG too, so image messages are
+	// visible in /agentize/debug/routes like text messages are.
+	traceLabel := userMessage
+	if traceLabel == "" {
+		traceLabel = "(User sent an image)"
+	} else {
+		traceLabel = fmt.Sprintf("(User sent an image) %s", userMessage)
+	}
+	rec := model.NewRouteTraceBuilder(coreSession, traceLabel)
+	ctx = withRouteRecorder(ctx, rec)
+	traceStart := time.Now()
+	defer func() { ch.persistRouteTrace(rec, time.Since(traceStart)) }()
+
 	// Record the inbound image as a user file (best-effort) when a recorder is wired.
 	if ch.fileRecorder != nil {
 		imageName := "image" + imageExtension(imageMimeType)
@@ -189,6 +202,7 @@ func (ch *CoreHandler) ProcessMessageWithImage(
 	resp, err := llmClient.CreateChatCompletion(ctx, request)
 	visionDur := time.Since(visionStart)
 	if err != nil {
+		rec.Fail(err.Error())
 		metrics.LLMCall("vision", llmModel, "error", visionDur, 0, 0, 0)
 		if ch.Callback != nil {
 			ch.Callback.AfterAction(ctx, &engine.UsageEvent{
@@ -215,10 +229,13 @@ func (ch *CoreHandler) ProcessMessageWithImage(
 	}
 
 	if len(resp.Choices) == 0 {
+		rec.Fail("no response from vision LLM")
 		return "", fmt.Errorf("no response from vision LLM")
 	}
 
 	response := resp.Choices[0].Message.Content
+	rec.Decision("Vision", llmModel, resp.Usage.TotalTokens, visionDur.Milliseconds(), model.RouteStatusOK, "vision call")
+	rec.Response(response, false, model.RouteStatusOK)
 
 	if resp.Usage.TotalTokens > 0 {
 		log.Log.Infof("[CoreHandler] 📊 VISION TOKEN USAGE >> Model: %s | prompt=%d | completion=%d | total=%d",
@@ -235,6 +252,7 @@ func (ch *CoreHandler) ProcessMessageWithImage(
 	coreSession.UpdatedAt = time.Now()
 
 	if err := ch.saveCoreSession(coreSession); err != nil {
+		rec.Fail(err.Error())
 		return "", fmt.Errorf("failed to save core session: %w", err)
 	}
 
