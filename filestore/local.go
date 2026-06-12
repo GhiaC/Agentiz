@@ -30,6 +30,12 @@ func NewLocalFileStore(baseDir string) (*LocalFileStore, error) {
 	return &LocalFileStore{baseDir: baseDir}, nil
 }
 
+// BaseDir returns the root directory under which file bytes are stored. Used by
+// the debug dashboard to report where uploaded/generated files live on disk.
+func (l *LocalFileStore) BaseDir() string {
+	return l.baseDir
+}
+
 // keyToPath maps a forward-slash storage key to an absolute filesystem path
 // beneath baseDir, rejecting any key that would escape the base directory.
 func (l *LocalFileStore) keyToPath(key string) (string, error) {

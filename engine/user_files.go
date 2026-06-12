@@ -15,20 +15,20 @@ import (
 	"github.com/ghiac/agentize/model"
 )
 
-// userFileStore is the subset of store methods needed for user files. The
-// concrete stores (DBStore, SQLiteStore, MongoDBStore) implement these, but
-// Engine.Sessions is typed as the narrow store.SessionStore, so we access them
-// via a runtime type assertion (same pattern used elsewhere in the engine).
+// userFileStore is the subset of store methods used for user files. Engine.Sessions
+// is the full store.Store, which always provides these, so userFiles() never fails;
+// the interface is kept only to narrow the surface the file code depends on.
 type userFileStore interface {
 	PutUserFile(*model.UserFile) error
 	GetUserFile(string) (*model.UserFile, error)
 	GetUserFilesByUser(string) ([]*model.UserFile, error)
 }
 
-// userFiles returns the store as a userFileStore, or false if unsupported.
+// userFiles returns the store narrowed to the user-file methods. The bool is
+// always true (kept for call-site compatibility) because Engine.Sessions is a
+// store.Store, which implements the full contract.
 func (e *Engine) userFiles() (userFileStore, bool) {
-	s, ok := e.Sessions.(userFileStore)
-	return s, ok
+	return e.Sessions, true
 }
 
 // ImageEditorFunc edits an image given an instruction, returning the edited

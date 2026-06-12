@@ -3,6 +3,7 @@ package pages
 import (
 	"fmt"
 	"html/template"
+	"strings"
 
 	"github.com/ghiac/agentize/debuger"
 	"github.com/ghiac/agentize/debuger/data"
@@ -32,6 +33,7 @@ func RenderDocuments(handler *debuger.DebugHandler, page int) (string, error) {
 		content += components.InfoAlert("No documents found.")
 	} else {
 		columns := []components.ColumnConfig{
+			{Header: "Preview", Center: true, NoWrap: true},
 			{Header: "Name"},
 			{Header: "Source", Center: true, NoWrap: true},
 			{Header: "Type", NoWrap: true},
@@ -40,6 +42,7 @@ func RenderDocuments(handler *debuger.DebugHandler, page int) (string, error) {
 			{Header: "Created At", NoWrap: true},
 			{Header: "User", NoWrap: true},
 			{Header: "Session", NoWrap: true},
+			{Header: "Actions", Center: true, NoWrap: true},
 		}
 		content += components.TableStartWithConfig(columns, components.DefaultTableConfig())
 
@@ -48,7 +51,23 @@ func RenderDocuments(handler *debuger.DebugHandler, page int) (string, error) {
 			if f.ParentFileID != "" {
 				derived = components.InlineCode(template.HTMLEscapeString(f.ParentFileID))
 			}
+
+			rawURL := "/agentize/debug/documents/" + template.URLQueryEscaper(f.FileID) + "/raw"
+			escName := template.HTMLEscapeString(f.Name)
+
+			// Thumbnail for images; a neutral icon otherwise.
+			preview := `<span class="text-muted" style="font-size:1.5rem;">📄</span>`
+			if strings.HasPrefix(f.MIMEType, "image/") {
+				preview = fmt.Sprintf(`<a href="%s" target="_blank"><img src="%s" alt="%s" loading="lazy" style="max-height:42px; max-width:64px; border-radius:4px; object-fit:cover;"></a>`,
+					rawURL, rawURL, escName)
+			}
+
+			nameCell := fmt.Sprintf(`<a href="%s" target="_blank" class="text-decoration-none">%s</a>`, rawURL, escName)
+			actions := fmt.Sprintf(`<a href="%s" target="_blank" class="btn btn-sm btn-outline-secondary me-1" title="View">View</a><a href="%s?download=1" class="btn btn-sm btn-outline-primary" title="Download">Download</a>`,
+				rawURL, rawURL)
+
 			content += fmt.Sprintf(`<tr>
+                <td class="text-center">%s</td>
                 <td>%s</td>
                 <td class="text-center">%s</td>
                 <td class="text-nowrap">%s</td>
@@ -57,8 +76,10 @@ func RenderDocuments(handler *debuger.DebugHandler, page int) (string, error) {
                 <td class="text-nowrap">%s</td>
                 <td class="text-nowrap">%s</td>
                 <td class="text-nowrap">%s</td>
+                <td class="text-center text-nowrap">%s</td>
             </tr>`,
-				template.HTMLEscapeString(f.Name),
+				preview,
+				nameCell,
 				fileSourceBadge(f.Source),
 				components.InlineCode(template.HTMLEscapeString(f.MIMEType)),
 				formatBytes(f.Size),
@@ -66,6 +87,7 @@ func RenderDocuments(handler *debuger.DebugHandler, page int) (string, error) {
 				debuger.FormatTime(f.CreatedAt),
 				components.TruncatedLink(f.UserID, "/agentize/debug/users/"+template.URLQueryEscaper(f.UserID), 20),
 				components.TruncatedLink(f.SessionID, "/agentize/debug/sessions/"+template.URLQueryEscaper(f.SessionID), 20),
+				actions,
 			)
 		}
 

@@ -65,6 +65,24 @@ func (s *DBStore) Close() error {
 	return nil
 }
 
+// Path returns the underlying SQLite database path. Used by the debug dashboard
+// to report where session/file metadata is persisted.
+func (s *DBStore) Path() string {
+	if s.sqliteStore != nil {
+		return s.sqliteStore.Path()
+	}
+	return ""
+}
+
+// BackendInfo describes this backend for diagnostics and the debug dashboard.
+// DBStore is a read-cached SQLite store, so it reports its SQLite backend.
+func (s *DBStore) BackendInfo() debuger.BackendInfo {
+	if s.sqliteStore != nil {
+		return s.sqliteStore.BackendInfo()
+	}
+	return debuger.BackendInfo{Type: "SQLite"}
+}
+
 // getOrCreateLock gets or creates a mutex for a userID
 func (s *DBStore) getOrCreateLock(userID string) *sync.Mutex {
 	s.nodesMu.RLock()
@@ -143,6 +161,30 @@ func (s *DBStore) Delete(sessionID string) error {
 	delete(s.sessionsCache, sessionID)
 	s.sessionsMu.Unlock()
 
+	return nil
+}
+
+// GetCoreSession returns the user's core session, or (nil, nil) if none.
+// Delegates to SQLiteStore and warms the session cache on hit.
+func (s *DBStore) GetCoreSession(userID string) (*model.Session, error) {
+	session, err := s.sqliteStore.GetCoreSession(userID)
+	if err != nil || session == nil {
+		return session, err
+	}
+	s.sessionsMu.Lock()
+	s.sessionsCache[session.SessionID] = session.Clone()
+	s.sessionsMu.Unlock()
+	return session, nil
+}
+
+// PutCoreSession upserts the user's single core session (write-through).
+func (s *DBStore) PutCoreSession(session *model.Session) error {
+	if err := s.sqliteStore.PutCoreSession(session); err != nil {
+		return err
+	}
+	s.sessionsMu.Lock()
+	s.sessionsCache[session.SessionID] = session.Clone()
+	s.sessionsMu.Unlock()
 	return nil
 }
 

@@ -2,6 +2,8 @@ package pages
 
 import (
 	"fmt"
+	"html/template"
+	"strings"
 
 	"github.com/ghiac/agentize/debuger"
 	"github.com/ghiac/agentize/debuger/data"
@@ -11,12 +13,23 @@ import (
 
 // RenderDashboard generates the dashboard HTML page.
 // When showPlansLink is true, the Quick Links section includes a link to the Plans page.
-func RenderDashboard(handler *debuger.DebugHandler, showPlansLink bool) (string, error) {
+// sysInfo, when non-nil, renders a "System Info" panel describing the storage
+// backends (database, file store) and runtime configuration.
+func RenderDashboard(handler *debuger.DebugHandler, showPlansLink bool, sysInfo *debuger.SystemInfo) (string, error) {
 	dp := data.NewDataProvider(handler.GetStore())
 
 	stats, err := dp.GetDashboardStats()
 	if err != nil {
 		return "", fmt.Errorf("failed to get dashboard stats: %w", err)
+	}
+
+	// Documents count (recorded user files). Prefer the value from sysInfo so the
+	// dashboard and the System Info panel agree; fall back to a direct query.
+	documentCount := 0
+	if sysInfo != nil {
+		documentCount = sysInfo.TotalDocuments
+	} else if files, err := dp.GetAllUserFiles(); err == nil {
+		documentCount = len(files)
 	}
 
 	content := ui.ContainerStart()
@@ -50,11 +63,20 @@ func RenderDashboard(handler *debuger.DebugHandler, showPlansLink bool) (string,
 	)
 	content += `</div>`
 
-	// Files card
+	// Documents card (user-sent + generated files)
+	content += `<div class="col-md-6 col-lg-4 col-xl-2">`
+	content += components.StatCardWithLink(
+		fmt.Sprintf("%d", documentCount),
+		"Documents", "📄", "secondary",
+		"/agentize/debug/documents", "View Details",
+	)
+	content += `</div>`
+
+	// Files card (knowledge-tree files opened during sessions)
 	content += `<div class="col-md-6 col-lg-4 col-xl-2">`
 	content += components.StatCardWithLink(
 		fmt.Sprintf("%d", stats.TotalFiles),
-		"Files", "📁", "warning",
+		"Opened Files", "📁", "warning",
 		"/agentize/debug/files", "View Details",
 	)
 	content += `</div>`
@@ -69,6 +91,11 @@ func RenderDashboard(handler *debuger.DebugHandler, showPlansLink bool) (string,
 	content += `</div>`
 
 	content += `</div>`
+
+	// System Info panel (database, file store, runtime)
+	if sysInfo != nil {
+		content += systemInfoCard(sysInfo)
+	}
 
 	// Quick links card
 	content += `<div class="row">
@@ -95,6 +122,15 @@ func RenderDashboard(handler *debuger.DebugHandler, showPlansLink bool) (string,
 		"View All Messages",
 		"See all messages across all sessions with full context",
 		"💬", "/agentize/debug/messages",
+	)
+	content += `</div>`
+
+	// Documents link
+	content += `<div class="col-md-6 col-lg-3">`
+	content += components.LinkCard(
+		"View All Documents",
+		"Browse every file users sent or the agent generated, with preview and download",
+		"📄", "/agentize/debug/documents",
 	)
 	content += `</div>`
 
@@ -137,6 +173,76 @@ func RenderDashboard(handler *debuger.DebugHandler, showPlansLink bool) (string,
 }
 
 // RenderDashboardWithPlanning is like RenderDashboard with showPlansLink set by the caller.
-func RenderDashboardWithPlanning(handler *debuger.DebugHandler, showPlansLink bool) (string, error) {
-	return RenderDashboard(handler, showPlansLink)
+func RenderDashboardWithPlanning(handler *debuger.DebugHandler, showPlansLink bool, sysInfo *debuger.SystemInfo) (string, error) {
+	return RenderDashboard(handler, showPlansLink, sysInfo)
+}
+
+// systemInfoCard renders the System Info panel: storage backends and runtime
+// configuration, with secondary details tucked under a "More info" expander.
+func systemInfoCard(info *debuger.SystemInfo) string {
+	esc := template.HTMLEscapeString
+
+	row := func(label, valueHTML string) string {
+		return fmt.Sprintf(`<tr><td class="fw-bold" style="width: 30%%;">%s</td><td>%s</td></tr>`,
+			esc(label), valueHTML)
+	}
+	location := func(loc string) string {
+		if strings.TrimSpace(loc) == "" {
+			return `<span class="text-muted">—</span>`
+		}
+		return components.InlineCode(loc)
+	}
+
+	var b strings.Builder
+	b.WriteString(`<div class="card mb-4">
+    <div class="card-header">
+        <h5 class="mb-0"><i class="bi bi-hdd-stack-fill me-2"></i>System Info</h5>
+    </div>
+    <div class="card-body">
+        <table class="table table-sm mb-0"><tbody>`)
+
+	b.WriteString(row("Version", components.InlineCode(info.Version)))
+	b.WriteString(row("Database",
+		components.BadgeWithIcon(info.Database.Type, "🗄️", backendColor(info.Database.Type))+" "+location(info.Database.Location)))
+	b.WriteString(row("File store",
+		components.BadgeWithIcon(info.FileStore.Type, "📦", "secondary")+" "+location(info.FileStore.Location)))
+	b.WriteString(row("Documents", fmt.Sprintf("%d", info.TotalDocuments)))
+	b.WriteString(row("Registered tools", fmt.Sprintf("%d", info.RegisteredTools)))
+	b.WriteString(row("Planning", enabledBadge(info.PlanningEnabled)))
+
+	b.WriteString(`</tbody></table>`)
+
+	if len(info.More) > 0 {
+		b.WriteString(`<details class="mt-3"><summary class="text-muted" style="cursor: pointer;">More info</summary>
+        <table class="table table-sm mt-2 mb-0"><tbody>`)
+		for _, kv := range info.More {
+			b.WriteString(row(kv.Key, esc(kv.Value)))
+		}
+		b.WriteString(`</tbody></table></details>`)
+	}
+
+	b.WriteString(`</div></div>`)
+	return b.String()
+}
+
+// backendColor maps a backend type to a Bootstrap color for its badge.
+func backendColor(backendType string) string {
+	switch backendType {
+	case "MongoDB":
+		return "success"
+	case "SQLite":
+		return "info"
+	case "Local Disk":
+		return "primary"
+	default:
+		return "secondary"
+	}
+}
+
+// enabledBadge renders an enabled/disabled badge.
+func enabledBadge(enabled bool) string {
+	if enabled {
+		return components.Badge("enabled", "success")
+	}
+	return components.Badge("disabled", "secondary")
 }

@@ -24,6 +24,7 @@ type MongoDBStore struct {
 	client     *mongo.Client
 	database   *mongo.Database
 	collection *mongo.Collection // sessions collection
+	uri        string            // connection URI (retained for diagnostics/dashboard)
 	mu         sync.RWMutex
 
 	// Additional collections for DebugStore
@@ -54,6 +55,32 @@ func DefaultMongoDBStoreConfig() MongoDBStoreConfig {
 		Database:   "agentize",
 		Collection: "sessions",
 	}
+}
+
+// URI returns the MongoDB connection URI this store was created with. Used by
+// the debug dashboard to report the connection target (credentials should be
+// redacted before display).
+func (s *MongoDBStore) URI() string {
+	return s.uri
+}
+
+// DatabaseName returns the MongoDB database name in use. Used by the debug
+// dashboard to report where data is persisted.
+func (s *MongoDBStore) DatabaseName() string {
+	if s.database != nil {
+		return s.database.Name()
+	}
+	return ""
+}
+
+// BackendInfo describes this backend for diagnostics and the debug dashboard.
+// The connection URI is credential-redacted before display.
+func (s *MongoDBStore) BackendInfo() debuger.BackendInfo {
+	loc := redactURI(s.uri)
+	if db := s.DatabaseName(); db != "" {
+		loc = loc + "  (db: " + db + ")"
+	}
+	return debuger.BackendInfo{Type: "MongoDB", Location: loc}
 }
 
 // NewMongoDBStore creates a new MongoDB session store
@@ -98,6 +125,7 @@ func NewMongoDBStore(config MongoDBStoreConfig) (*MongoDBStore, error) {
 		client:                      client,
 		database:                    database,
 		collection:                  collection,
+		uri:                         config.URI,
 		usersCollection:             database.Collection("users"),
 		messagesCollection:          database.Collection("messages"),
 		toolCallsCollection:         database.Collection("tool_calls"),
@@ -762,12 +790,13 @@ func (s *MongoDBStore) GetCoreSession(userID string) (*model.Session, error) {
 	session.CreatedAt = doc.CreatedAt
 	session.UpdatedAt = doc.UpdatedAt
 
-	// Restore MessageSeq from database to ensure it's correct
-	// Use MAX(seq_id) from messages collection to get the highest sequence number
-	maxSeqID := s.getMaxSeqIDForSession(ctx, session.SessionID)
-	if maxSeqID > session.MessageSeq {
-		// Ensure MessageSeq is at least as high as the highest seq_id in the database
+	// Restore seq counters from persisted rows so core-session ID generation never
+	// reuses an ID. Mirrors Get() and the SQLite backend for cross-store parity.
+	if maxSeqID := s.getMaxSeqIDForSession(ctx, session.SessionID); maxSeqID > session.MessageSeq {
 		session.MessageSeq = maxSeqID
+	}
+	if maxToolSeq := s.getMaxToolSeqForSession(ctx, session.SessionID); maxToolSeq > session.ToolSeq {
+		session.ToolSeq = maxToolSeq
 	}
 
 	return session, nil
@@ -819,7 +848,10 @@ func (s *MongoDBStore) PutCoreSession(session *model.Session) error {
 		UpdatedAt:  session.UpdatedAt,
 	}
 
-	_, err = s.collection.InsertOne(ctx, doc)
+	// Upsert by _id (the session ID) so the operation is idempotent and matches
+	// the SQLite backend's INSERT OR REPLACE semantics.
+	opts := options.Replace().SetUpsert(true)
+	_, err = s.collection.ReplaceOne(ctx, bson.M{"_id": session.SessionID}, doc, opts)
 	if err != nil {
 		return fmt.Errorf("failed to store core session: %w", err)
 	}
@@ -1349,14 +1381,42 @@ func (s *MongoDBStore) AddOpenedFile(openedFile *model.OpenedFile) error {
 	return nil
 }
 
-// CloseOpenedFile marks a file as closed
+// CloseOpenedFile marks the currently-open record for (sessionID, filePath)
+// closed. It is a no-op when the file is not currently open, matching the SQLite
+// backend's "WHERE is_open = 1" guard. The embedded JSON is updated too so a
+// later read reflects the closed state (IsOpen=false, ClosedAt set), exactly as
+// the SQLite backend reconstructs it from columns.
 func (s *MongoDBStore) CloseOpenedFile(sessionID string, filePath string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	id := fmt.Sprintf("%s:%s", sessionID, filePath)
-	_, err := s.openedFilesCollection.UpdateOne(ctx, bson.M{"_id": id}, bson.M{
-		"$set": bson.M{"closed_at": time.Now()},
+
+	// Only act on a currently-open record (no closed_at yet).
+	var doc openedFileDocument
+	err := s.openedFilesCollection.FindOne(ctx, bson.M{
+		"_id":       id,
+		"closed_at": bson.M{"$exists": false},
+	}).Decode(&doc)
+	if err == mongo.ErrNoDocuments {
+		return nil // not open (or absent) → no-op, matching SQLite
+	}
+	if err != nil {
+		return fmt.Errorf("failed to query opened file: %w", err)
+	}
+
+	now := time.Now()
+	file := &model.OpenedFile{}
+	if uErr := unmarshalJSONOrBSON(doc.Data, file); uErr == nil {
+		file.IsOpen = false
+		file.ClosedAt = now
+		if data, mErr := json.Marshal(file); mErr == nil {
+			doc.Data = string(data)
+		}
+	}
+
+	_, err = s.openedFilesCollection.UpdateOne(ctx, bson.M{"_id": id}, bson.M{
+		"$set": bson.M{"closed_at": now, "data": doc.Data},
 	})
 	if err != nil {
 		return fmt.Errorf("failed to close opened file: %w", err)
@@ -1390,8 +1450,12 @@ func (s *MongoDBStore) GetOpenedFilesBySession(sessionID string) ([]*model.Opene
 
 		files = append(files, file)
 	}
+	if err := cursor.Err(); err != nil {
+		return nil, err
+	}
 
-	return files, cursor.Err()
+	sortOpenedFilesByOpenedAtAsc(files)
+	return files, nil
 }
 
 // GetCurrentlyOpenedFilesBySession returns only currently open files
@@ -1422,8 +1486,12 @@ func (s *MongoDBStore) GetCurrentlyOpenedFilesBySession(sessionID string) ([]*mo
 
 		files = append(files, file)
 	}
+	if err := cursor.Err(); err != nil {
+		return nil, err
+	}
 
-	return files, cursor.Err()
+	sortOpenedFilesByOpenedAtAsc(files)
+	return files, nil
 }
 
 // GetAllOpenedFiles returns all opened files
@@ -1849,7 +1917,9 @@ func (s *MongoDBStore) PutSummarizationLog(log *model.SummarizationLog) error {
 		return fmt.Errorf("failed to marshal summarization log: %w", err)
 	}
 
-	id := fmt.Sprintf("%s:%d", log.SessionID, log.CreatedAt.UnixNano())
+	// Key by LogID, identical to the SQLite primary key, so the same log upserts
+	// to the same document on both backends (contract parity).
+	id := log.LogID
 	doc := summarizationLogDocument{
 		ID:        id,
 		SessionID: log.SessionID,
@@ -1871,7 +1941,8 @@ func (s *MongoDBStore) GetSummarizationLogsBySession(sessionID string) ([]*model
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	cursor, err := s.summarizationLogsCollection.Find(ctx, bson.M{"session_id": sessionID}, options.Find().SetSort(bson.D{{Key: "created_at", Value: 1}}))
+	// Newest first, matching the SQLite backend (contract parity).
+	cursor, err := s.summarizationLogsCollection.Find(ctx, bson.M{"session_id": sessionID}, options.Find().SetSort(bson.D{{Key: "created_at", Value: -1}}))
 	if err != nil {
 		return nil, fmt.Errorf("failed to query summarization logs: %w", err)
 	}

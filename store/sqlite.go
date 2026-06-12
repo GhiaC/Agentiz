@@ -69,6 +69,17 @@ func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
 	return store, nil
 }
 
+// Path returns the SQLite database path (":memory:" for in-memory stores). Used
+// by the debug dashboard to report where session/file metadata is persisted.
+func (s *SQLiteStore) Path() string {
+	return s.path
+}
+
+// BackendInfo describes this backend for diagnostics and the debug dashboard.
+func (s *SQLiteStore) BackendInfo() debuger.BackendInfo {
+	return debuger.BackendInfo{Type: "SQLite", Location: sqlitePathLabel(s.path)}
+}
+
 // initSchema creates the necessary tables
 func (s *SQLiteStore) initSchema() error {
 	schema := `
@@ -718,6 +729,15 @@ func (s *SQLiteStore) GetCoreSession(userID string) (*model.Session, error) {
 	// Restore timestamps
 	session.CreatedAt = time.Unix(createdAt, 0)
 	session.UpdatedAt = time.Unix(updatedAt, 0)
+
+	// Restore seq counters from persisted rows so core-session ID generation never
+	// reuses an ID. Mirrors Get() and the MongoDB backend for cross-store parity.
+	if maxSeqID := s.getMaxSeqIDForSession(session.SessionID); maxSeqID > session.MessageSeq {
+		session.MessageSeq = maxSeqID
+	}
+	if maxToolSeq := s.getMaxToolSeqForSession(session.SessionID); maxToolSeq > session.ToolSeq {
+		session.ToolSeq = maxToolSeq
+	}
 
 	return session, nil
 }
@@ -2022,6 +2042,9 @@ func (s *SQLiteStore) GetToolCallByID(toolCallID string) (*model.ToolCall, error
 		&createdAt,
 		&updatedAt,
 	)
+	if err == sql.ErrNoRows {
+		return nil, nil // optional lookup: not found is not an error (contract parity)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to get tool call: %w", err)
 	}
@@ -2066,6 +2089,9 @@ func (s *SQLiteStore) GetToolCallByToolID(toolID string) (*model.ToolCall, error
 		&createdAt,
 		&updatedAt,
 	)
+	if err == sql.ErrNoRows {
+		return nil, nil // optional lookup: not found is not an error (contract parity)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to get tool call by tool ID: %w", err)
 	}

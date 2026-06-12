@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 
@@ -117,6 +118,15 @@ func NewWithOptions(path string, opts *Options) (*Agentize, error) {
 		sessionStore = dbStore
 	}
 
+	// The engine relies on the full, unified store.Store contract (sessions, users,
+	// messages, files, tool calls, summarization logs, visited nodes). Every
+	// built-in backend implements it; reject anything that doesn't, loudly and at
+	// startup, instead of silently skipping persistence later.
+	fullStore, ok := sessionStore.(store.Store)
+	if !ok {
+		return nil, fmt.Errorf("session store (%T) must implement the full store.Store interface", sessionStore)
+	}
+
 	// Determine function registry
 	functionRegistry := model.NewFunctionRegistry()
 	if opts != nil && opts.FunctionRegistry != nil {
@@ -142,7 +152,7 @@ func NewWithOptions(path string, opts *Options) (*Agentize, error) {
 	// Create engine
 	eng := &engine.Engine{
 		Repo:      repo,
-		Sessions:  sessionStore,
+		Sessions:  fullStore,
 		Functions: functionRegistry,
 		Files:     fileStore,
 	}
@@ -305,8 +315,9 @@ func (ag *Agentize) GetRepository() *fsrepo.NodeRepository {
 	return ag.engine.Repo
 }
 
-// GetSessionStore returns the session store
-func (ag *Agentize) GetSessionStore() store.SessionStore {
+// GetSessionStore returns the session store as the full store.Store contract.
+// (store.Store satisfies store.SessionStore, so existing callers keep working.)
+func (ag *Agentize) GetSessionStore() store.Store {
 	return ag.engine.Sessions
 }
 
@@ -411,6 +422,73 @@ func (ag *Agentize) InitializeSummaries(ctx context.Context, forceSummary bool) 
 // ProcessMessage routes a user message through the LLM workflow and tool executor
 func (ag *Agentize) ProcessMessage(ctx context.Context, sessionID string, userMessage string) (string, int, error) {
 	return ag.engine.ProcessMessage(ctx, sessionID, userMessage)
+}
+
+// UploadedFile describes a file the user sent alongside a message. Data holds the
+// raw bytes; MIMEType is optional and detected from the name/content when empty.
+type UploadedFile struct {
+	Name     string
+	MIMEType string
+	Data     []byte
+}
+
+// ProcessMessageWithFiles records each uploaded file against the session as an
+// uploaded user file — so it is persisted to the database, appears on the
+// Documents debug page, and can be read later via the manage_files tool — and
+// then processes the user message. A compact note listing the saved files is
+// appended to the message so the agent knows they arrived and can read them on
+// demand. It returns the assistant response, the token count, and the saved
+// file records.
+//
+// This is the entry point a chat/bot integration should call when a user sends
+// one or more attachments. Recording is best-effort: a file that fails to save
+// is logged and skipped rather than failing the whole message.
+func (ag *Agentize) ProcessMessageWithFiles(ctx context.Context, sessionID, userMessage string, files []UploadedFile) (string, int, []*model.UserFile, error) {
+	var saved []*model.UserFile
+	for _, f := range files {
+		uf, err := ag.RecordUserFile(sessionID, f.Name, f.MIMEType, model.FileSourceUploaded, f.Data)
+		if err != nil {
+			log.Log.Warnf("[Agentize] ⚠️  Failed to record uploaded file %q for session %s: %v", f.Name, sessionID, err)
+			continue
+		}
+		log.Log.Infof("[Agentize] 📎 Recorded uploaded file | id=%s | name=%q | type=%s | size=%dB | session=%s",
+			uf.FileID, uf.Name, uf.MIMEType, uf.Size, sessionID)
+		saved = append(saved, uf)
+	}
+
+	message := appendUploadedFilesNote(userMessage, saved)
+	response, tokens, err := ag.ProcessMessage(ctx, sessionID, message)
+	return response, tokens, saved, err
+}
+
+// ProcessMessageWithFile is a single-file convenience wrapper around
+// ProcessMessageWithFiles.
+func (ag *Agentize) ProcessMessageWithFile(ctx context.Context, sessionID, userMessage, name, mimeType string, data []byte) (string, int, *model.UserFile, error) {
+	resp, tokens, saved, err := ag.ProcessMessageWithFiles(ctx, sessionID, userMessage, []UploadedFile{{Name: name, MIMEType: mimeType, Data: data}})
+	var uf *model.UserFile
+	if len(saved) > 0 {
+		uf = saved[0]
+	}
+	return resp, tokens, uf, err
+}
+
+// appendUploadedFilesNote appends a compact note listing the saved files so the
+// agent can reference and read them (via the manage_files tool) on demand. When
+// no files were saved, the message is returned unchanged.
+func appendUploadedFilesNote(userMessage string, files []*model.UserFile) string {
+	if len(files) == 0 {
+		return userMessage
+	}
+	var b strings.Builder
+	b.WriteString(userMessage)
+	if strings.TrimSpace(userMessage) != "" {
+		b.WriteString("\n\n")
+	}
+	b.WriteString("[The user attached the following file(s). Use the manage_files tool (action=read) with the file_id to view a file when needed.]\n")
+	for _, f := range files {
+		b.WriteString(fmt.Sprintf("- file_id=%s name=%q type=%s size=%dB\n", f.FileID, f.Name, f.MIMEType, f.Size))
+	}
+	return b.String()
 }
 
 // UsePlanning enables the planning layer with the given planner and runner.

@@ -1,16 +1,53 @@
 # Store Package
 
-This package provides storage implementations for Agentize sessions.
+This package provides storage for Agentize. Every backend implements one
+unified interface, **`store.Store`**, and is guaranteed — at compile time and by
+a shared conformance test suite — to behave identically. Switching between SQLite
+and MongoDB is a configuration change, never a code change.
 
-## Available Stores
+## Unified interface & `store.Open`
 
-### DBStore (Default)
-In-memory storage that doesn't persist data across restarts. Suitable for testing and development.
+`store.Store` is the single, complete contract (sessions, core sessions, users,
+messages, opened files, user files, tool calls, summarization logs, visited
+nodes, lifecycle, and `BackendInfo`). `SQLiteStore`, `MongoDBStore`, and the
+cached `DBStore` all implement it; a compile-time assertion in `store.go` fails
+the build if any backend ever drifts.
+
+The simplest way to construct a backend is the `store.Open` factory:
 
 ```go
 import "github.com/ghiac/agentize/store"
 
-dbStore := store.NewDBStore()
+// SQLite (default). Empty path => ./data/sessions.db; ":memory:" => ephemeral.
+st, err := store.Open(store.Config{Backend: "sqlite", SQLitePath: "./data/sessions.db"})
+
+// MongoDB.
+st, err := store.Open(store.Config{Backend: "mongodb", MongoURI: "mongodb://localhost:27017"})
+```
+
+### Behavioral contract (identical on every backend)
+
+- Optional "get by id" lookups (`GetUser`, `GetCoreSession`, `GetUserFile`,
+  `GetToolCallByID`, `GetToolCallByToolID`) return `(nil, nil)` when not found.
+- `Get(sessionID)` returns an error when the session does not exist.
+- `Put*` methods are upserts.
+- List orderings are fixed (messages & summarization logs newest-first; opened
+  files oldest-first).
+- Timestamps round-trip at one-second precision.
+
+Parity is enforced by `conformance_test.go`, which runs the same suite against
+SQLite (file + in-memory) and a real MongoDB via testcontainers.
+
+## Available Stores
+
+### DBStore (Default)
+SQLite-backed storage with an in-memory read cache for sessions and users. It
+**persists** to a SQLite file and is the default returned by `agentize`.
+
+```go
+import "github.com/ghiac/agentize/store"
+
+dbStore, err := store.NewDBStore() // ./data/sessions.db
 ```
 
 ### SQLiteStore
@@ -121,18 +158,13 @@ if err != nil {
 
 ## Custom Store Implementation
 
-You can implement your own store by implementing the `model.SessionStore` interface:
+A custom backend must implement the full **`store.Store`** interface (defined in
+`store.go`) so it is a drop-in replacement for the built-ins. The easiest way to
+guarantee correctness is to run the shared conformance suite against it.
 
-```go
-type SessionStore interface {
-    Get(sessionID string) (*Session, error)
-    Put(session *Session) error
-    Delete(sessionID string) error
-    List(userID string) ([]*Session, error)
-}
-```
-
-For MongoDB implementation, you would create a similar structure to `SQLiteStore` but use MongoDB client instead.
+`agentize.NewWithOptions` accepts any `store.SessionStore` for `Options.SessionStore`,
+but verifies at startup that it also satisfies `store.Store`, failing fast with a
+clear error otherwise — so missing methods never silently skip persistence.
 
 ## Database Schema
 

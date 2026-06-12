@@ -35,6 +35,7 @@ func (ag *Agentize) RegisterRoutes(router *gin.Engine) {
 	router.GET("/agentize/debug/messages", ag.handleDebugMessages)
 	router.GET("/agentize/debug/files", ag.handleDebugFiles)
 	router.GET("/agentize/debug/documents", ag.handleDebugDocuments)
+	router.GET("/agentize/debug/documents/:fileID/raw", ag.handleDebugDocumentRaw)
 	router.GET("/agentize/debug/tool-calls", ag.handleDebugToolCalls)
 	router.GET("/agentize/debug/tool-calls/:toolID", ag.handleDebugToolCallDetail)
 	router.GET("/agentize/debug/summarized", ag.handleDebugSummarized)
@@ -163,7 +164,8 @@ func (ag *Agentize) handleDebug(c *gin.Context) {
 		return
 	}
 
-	html, err := pages.RenderDashboardWithPlanning(handler, ag.GetPlanStore() != nil)
+	sysInfo := ag.SystemInfo()
+	html, err := pages.RenderDashboardWithPlanning(handler, ag.GetPlanStore() != nil, &sysInfo)
 	if err != nil {
 		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to generate debug page: %v", err)})
 		return
@@ -380,6 +382,44 @@ func (ag *Agentize) handleDebugDocuments(c *gin.Context) {
 
 	c.Header("Content-Type", "text/html; charset=utf-8")
 	c.String(200, html)
+}
+
+// handleDebugDocumentRaw streams the bytes of a stored user file. By default the
+// file is served inline so images preview in the browser; add ?download=1 to
+// force a download.
+func (ag *Agentize) handleDebugDocumentRaw(c *gin.Context) {
+	fileID := c.Param("fileID")
+	if fileID == "" {
+		c.JSON(400, gin.H{"error": "fileID parameter is required"})
+		return
+	}
+
+	data, meta, err := ag.ReadUserFile(fileID)
+	if err != nil {
+		c.JSON(404, gin.H{"error": fmt.Sprintf("file not found: %v", err)})
+		return
+	}
+
+	mimeType := meta.MIMEType
+	if mimeType == "" {
+		mimeType = "application/octet-stream"
+	}
+
+	disposition := "inline"
+	if c.Query("download") == "1" {
+		disposition = "attachment"
+	}
+	c.Header("Content-Disposition", fmt.Sprintf("%s; filename=%q", disposition, sanitizeContentDispositionName(meta.Name)))
+	c.Data(200, mimeType, data)
+}
+
+// sanitizeContentDispositionName strips characters that would break a
+// Content-Disposition header's quoted filename.
+func sanitizeContentDispositionName(name string) string {
+	if name == "" {
+		return "file"
+	}
+	return strings.NewReplacer("\"", "", "\\", "", "\n", "", "\r", "").Replace(name)
 }
 
 // handleDebugToolCalls handles tool calls list page requests

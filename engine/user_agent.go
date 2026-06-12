@@ -28,7 +28,7 @@ var basePrompt string
 
 // Global scheduler once to ensure scheduler starts only once per session store
 var schedulerOnce sync.Once
-var schedulerOnceMap = make(map[store.SessionStore]*sync.Once)
+var schedulerOnceMap = make(map[store.Store]*sync.Once)
 var schedulerOnceMapMu sync.Mutex
 
 // LLMConfig holds configuration for LLM client
@@ -65,7 +65,7 @@ type ToolExecutor func(toolName string, args map[string]interface{}) (string, er
 // Engine uses SessionStore for all state management, including conversation history.
 type Engine struct {
 	Repo      *fsrepo.NodeRepository
-	Sessions  store.SessionStore
+	Sessions  store.Store
 	Functions *model.FunctionRegistry
 	Executor  ToolExecutor
 	// Files is the pluggable byte storage for user files. When nil, the
@@ -99,6 +99,13 @@ type Engine struct {
 
 	// Callback for billing/usage metering (optional, set by application)
 	Callback Callback
+
+	// userModelOverrides maps userID -> model id, set at runtime via SetUserModel.
+	// A non-empty override takes precedence over llmConfig.Model for that user's
+	// requests, enabling per-user runtime model switching without reconfiguring the
+	// engine. Empty/absent → engine default model. See user_model.go.
+	userModelOverrides   map[string]string
+	userModelOverridesMu sync.RWMutex
 }
 
 // Init initializes the engine by loading the root node and verifying Sessions store is ready.
@@ -457,11 +464,8 @@ func (e *Engine) OpenFile(sessionID string, path string) (string, error) {
 			}
 
 			// Check if file is recorded as open in database, if not, record it
-			if sqliteStore, ok := e.Sessions.(interface {
-				GetCurrentlyOpenedFilesBySession(string) ([]*model.OpenedFile, error)
-				AddOpenedFile(*model.OpenedFile) error
-			}); ok {
-				openedFiles, err := sqliteStore.GetCurrentlyOpenedFilesBySession(sessionID)
+			{
+				openedFiles, err := e.Sessions.GetCurrentlyOpenedFilesBySession(sessionID)
 				if err != nil {
 					log.Log.Warnf("[Engine] ⚠️  Failed to get opened files | SessionID: %s | Error: %v", sessionID, err)
 				} else {
@@ -481,7 +485,7 @@ func (e *Engine) OpenFile(sessionID string, path string) (string, error) {
 							fileName = node.Title
 						}
 						openedFile := model.NewOpenedFile(session, path, fileName)
-						if err := sqliteStore.AddOpenedFile(openedFile); err != nil {
+						if err := e.Sessions.AddOpenedFile(openedFile); err != nil {
 							log.Log.Warnf("[Engine] ⚠️  Failed to record opened file | SessionID: %s | Path: %s | Error: %v", sessionID, path, err)
 						}
 					}
@@ -508,19 +512,15 @@ func (e *Engine) OpenFile(sessionID string, path string) (string, error) {
 
 	// Record opened file in database (only if not already opened)
 	if !alreadyOpened {
-		if sqliteStore, ok := e.Sessions.(interface {
-			AddOpenedFile(*model.OpenedFile) error
-		}); ok {
-			fileName := path
-			if node.Title != "" {
-				fileName = node.Title
-			}
-			openedFile := model.NewOpenedFile(session, path, fileName)
-			if err := sqliteStore.AddOpenedFile(openedFile); err != nil {
-				log.Log.Warnf("[Engine] ⚠️  Failed to record opened file | SessionID: %s | Path: %s | Error: %v", sessionID, path, err)
-			} else {
-				log.Log.Infof("[Engine] 📂 File opened recorded | SessionID: %s | Path: %s | FileID: %s", sessionID, path, openedFile.FileID)
-			}
+		fileName := path
+		if node.Title != "" {
+			fileName = node.Title
+		}
+		openedFile := model.NewOpenedFile(session, path, fileName)
+		if err := e.Sessions.AddOpenedFile(openedFile); err != nil {
+			log.Log.Warnf("[Engine] ⚠️  Failed to record opened file | SessionID: %s | Path: %s | Error: %v", sessionID, path, err)
+		} else {
+			log.Log.Infof("[Engine] 📂 File opened recorded | SessionID: %s | Path: %s | FileID: %s", sessionID, path, openedFile.FileID)
 		}
 	}
 
@@ -564,14 +564,10 @@ func (e *Engine) CloseFile(sessionID string, path string) error {
 	}
 
 	// Record closed file in database
-	if sqliteStore, ok := e.Sessions.(interface {
-		CloseOpenedFile(string, string) error
-	}); ok {
-		if err := sqliteStore.CloseOpenedFile(sessionID, path); err != nil {
-			log.Log.Warnf("[Engine] ⚠️  Failed to record closed file | SessionID: %s | Path: %s | Error: %v", sessionID, path, err)
-		} else {
-			log.Log.Infof("[Engine] 📂 File closed recorded | SessionID: %s | Path: %s", sessionID, path)
-		}
+	if err := e.Sessions.CloseOpenedFile(sessionID, path); err != nil {
+		log.Log.Warnf("[Engine] ⚠️  Failed to record closed file | SessionID: %s | Path: %s | Error: %v", sessionID, path, err)
+	} else {
+		log.Log.Infof("[Engine] 📂 File closed recorded | SessionID: %s | Path: %s", sessionID, path)
 	}
 
 	return nil
@@ -679,10 +675,8 @@ func (e *Engine) processOneMessageBody(ctx context.Context, sessionID string, us
 		// Save user message to messages table
 		userMsgID, userSeqID := session.GenerateMessageIDWithSeq()
 		userMsg := model.NewUserMessage(userMsgID, userSeqID, session.UserID, sessionID, userMessage, model.ContentTypeText)
-		if sqliteStore, ok := e.Sessions.(interface{ PutMessage(*model.Message) error }); ok {
-			if err := sqliteStore.PutMessage(userMsg); err != nil {
-				log.Log.Warnf("[Engine] ⚠️  Failed to save user message | Error: %v", err)
-			}
+		if err := e.Sessions.PutMessage(userMsg); err != nil {
+			log.Log.Warnf("[Engine] ⚠️  Failed to save user message | Error: %v", err)
 		}
 	}
 
@@ -1258,8 +1252,14 @@ func (e *Engine) processChatRequest(
 	systemPrompts := e.GetSystemPrompts(session)
 	openaiTools := e.GetTools(session)
 
-	// Set model
+	// Set model: a per-user runtime override (SetUserModel) wins over the engine
+	// default, enabling live per-user model switching without reconfiguring the
+	// engine. Empty override → engine model → hard default. session.Model is kept in
+	// sync with the effective model for display/logging/usage records.
 	modelName := e.llmConfig.Model
+	if ov := e.UserModelOverride(session.UserID); ov != "" {
+		modelName = ov
+	}
 	if modelName == "" {
 		modelName = "openai/gpt-5-nano"
 	}
@@ -1445,15 +1445,11 @@ func (e *Engine) saveMessage(
 		choice,
 	)
 
-	// Try to save to database if store supports it
-	if sqliteStore, ok := e.Sessions.(interface {
-		PutMessage(*model.Message) error
-	}); ok {
-		if err := sqliteStore.PutMessage(msg); err != nil {
-			log.Log.Warnf("[Engine] ⚠️  Failed to save message | SessionID: %s | Error: %v", session.SessionID, err)
-		} else {
-			log.Log.Infof("[Engine] 💾 Message saved | MessageID: %s | Model: %s | Tokens: %d", msg.MessageID, msg.Model, msg.TotalTokens)
-		}
+	// Save to database
+	if err := e.Sessions.PutMessage(msg); err != nil {
+		log.Log.Warnf("[Engine] ⚠️  Failed to save message | SessionID: %s | Error: %v", session.SessionID, err)
+	} else {
+		log.Log.Infof("[Engine] 💾 Message saved | MessageID: %s | Model: %s | Tokens: %d", msg.MessageID, msg.Model, msg.TotalTokens)
 	}
 	return msg.MessageID
 }
