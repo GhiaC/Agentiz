@@ -29,7 +29,7 @@ func Page(treeData, nodesData, registeredTools string) templ.Component {
 			templ_7745c5c3_Var1 = templ.NopComponent
 		}
 		ctx = templ.ClearChildren(ctx)
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 1, "<!doctype html><html lang=\"en\"><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"><title>Agentize Knowledge Tree Documentation</title>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 1, "<!doctype html><html lang=\"en\"><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"><title>Agentize Knowledge Tree</title>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -37,35 +37,7 @@ func Page(treeData, nodesData, registeredTools string) templ.Component {
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 2, "</head><body><div class=\"container\">")
-		if templ_7745c5c3_Err != nil {
-			return templ_7745c5c3_Err
-		}
-		templ_7745c5c3_Err = header().Render(ctx, templ_7745c5c3_Buffer)
-		if templ_7745c5c3_Err != nil {
-			return templ_7745c5c3_Err
-		}
-		templ_7745c5c3_Err = stats().Render(ctx, templ_7745c5c3_Buffer)
-		if templ_7745c5c3_Err != nil {
-			return templ_7745c5c3_Err
-		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 3, "<div class=\"content\">")
-		if templ_7745c5c3_Err != nil {
-			return templ_7745c5c3_Err
-		}
-		templ_7745c5c3_Err = treeView().Render(ctx, templ_7745c5c3_Buffer)
-		if templ_7745c5c3_Err != nil {
-			return templ_7745c5c3_Err
-		}
-		templ_7745c5c3_Err = detailView().Render(ctx, templ_7745c5c3_Buffer)
-		if templ_7745c5c3_Err != nil {
-			return templ_7745c5c3_Err
-		}
-		templ_7745c5c3_Err = toolsView().Render(ctx, templ_7745c5c3_Buffer)
-		if templ_7745c5c3_Err != nil {
-			return templ_7745c5c3_Err
-		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 4, "</div></div>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 2, "</head><body><div class=\"app\"><aside class=\"sidebar\" id=\"sidebar\"><div class=\"brand\"><span class=\"brand-icon\">🧠</span><div class=\"brand-text\"><div class=\"brand-title\">Agentize</div><div class=\"brand-sub\">Knowledge Explorer</div></div></div><div class=\"search-wrap\"><svg class=\"search-icon\" viewBox=\"0 0 24 24\" width=\"14\" height=\"14\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><circle cx=\"11\" cy=\"11\" r=\"7\"></circle><line x1=\"21\" y1=\"21\" x2=\"16.5\" y2=\"16.5\"></line></svg> <input id=\"search-input\" type=\"search\" placeholder=\"Search nodes &amp; tools\" autocomplete=\"off\" spellcheck=\"false\"> <kbd class=\"search-kbd\">/</kbd></div><div id=\"search-meta\" class=\"search-meta\"></div><nav class=\"nav-tabs\"><a href=\"#\" id=\"nav-overview\" class=\"nav-tab active\"><span class=\"nav-tab-icon\">◧</span> Overview</a> <a href=\"#tools\" id=\"nav-tools\" class=\"nav-tab\"><span class=\"nav-tab-icon\">⚙</span> Tools <span id=\"nav-tools-count\" class=\"nav-count\"></span></a></nav><div class=\"tree-label\"><span>Knowledge tree</span> <span class=\"tree-label-actions\"><button class=\"tiny-btn\" id=\"expand-all\" title=\"Expand all\">＋</button> <button class=\"tiny-btn\" id=\"collapse-all\" title=\"Collapse all\">－</button></span></div><div id=\"tree-container\" class=\"tree\"></div><div class=\"sidebar-footer\"><a href=\"/agentize\">Home</a> <a href=\"/agentize/graph\">Graph</a> <a href=\"/agentize/debug\">Debug</a></div></aside><main class=\"main\"><header class=\"topbar\"><button id=\"sidebar-toggle\" class=\"icon-btn\" title=\"Toggle sidebar\">☰</button><nav id=\"breadcrumb\" class=\"breadcrumb\"></nav><div class=\"topbar-actions\"><button id=\"theme-toggle\" class=\"icon-btn\" title=\"Toggle theme\">◐</button></div></header><div class=\"content-scroll\"><div id=\"overview-view\" class=\"view active\"></div><div id=\"detail-view\" class=\"view\"><div id=\"detail-content\"></div></div><div id=\"tools-view\" class=\"view\"><div id=\"tools-list-container\"></div></div></div></main></div>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -73,7 +45,7 @@ func Page(treeData, nodesData, registeredTools string) templ.Component {
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 5, "</body></html>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 3, "</body></html>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}

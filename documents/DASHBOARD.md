@@ -53,40 +53,57 @@ Three global JS objects are injected:
 - `registeredTools` — a set `{toolName: true}` of tools that actually have a Go
   function registered in the `FunctionRegistry`. Used for the ✓/⚠️ badge.
 
-### 1.3 The three views (all logic in [`components/scripts.templ`](./components/scripts.templ))
+### 1.3 The app shell & views (all logic in [`components/scripts.templ`](./components/scripts.templ))
 
-1. **Tree view** (`renderTree` / `renderNode`) — indented, collapsible node tree.
-   Per node: level badge, title (link to detail), path, description, tool count,
-   an expandable Tools list (with registered badge), and a Markdown **Content
-   Preview** (rendered with `marked.js`, toggle to plain text, copy button).
-2. **Detail view** (`showNodeDetail`) — one node in full: path, id, description,
-   rendered content, **Auth** (per-user permission grid), children (clickable),
-   and tools with description, status and pretty-printed `input_schema`.
-3. **Tools view** (`showAllTools` / `renderAllTools`) — every tool across the tree,
-   **deduplicated by name**, sorted, with status, registered badge, input schema,
-   and the list of nodes that expose it.
+The page is a single-page app shell: a **left sidebar** (brand, search, view
+tabs, collapsible knowledge tree, footer links) and a **main pane** (topbar with
+breadcrumb + theme toggle, scrollable content). Dark/light theme follows
+`prefers-color-scheme` and persists via `localStorage` (`agentize-theme`).
 
-Plus a **Stats** bar (`calculateStats`: total nodes, total tools, tree depth) and a
-client-side **Search** box (`setupSearch`: filters nodes by title/description/path/
-tool text and auto-expands matches). Navigation is hash-based
-(`#tools`, `#node-<path>`) so views are linkable and survive reload.
+1. **Overview** (`renderOverview`) — stat cards (nodes/depth, unique vs declared
+   tools, registered-coverage progress bar), a **Problems** panel listing every
+   unregistered tool with a link to a declaring node, and **Recently loaded**
+   node cards (zero `LoadedAt` timestamps are hidden).
+2. **Node detail** (`showNodeDetail`) — clickable breadcrumb from the path,
+   metadata chips (id, children, tools, hash, loaded-at), description,
+   Markdown content card (raw/rendered toggle + copy, `dir="auto"` for RTL),
+   tools as accordions (status + registered badges, schema), an **Access**
+   table (users/groups/roles × read/edit/next/see/docs/graph + inherit badge),
+   and a children card grid.
+3. **Tools view** (`renderAllTools`) — every tool deduplicated by name, with its
+   own text filter (matches name/description/schema), All / Registered /
+   Unregistered filter chips with live counts, status badges, schema disclosure,
+   and "available in" node links.
+
+Sidebar **search** filters the tree (title/description/path/tool text), shows a
+match count, auto-expands ancestors; `/` focuses it, `Esc` clears. The tree has
+expand-all/collapse-all buttons and per-row tool-count badges. All interactions
+use event delegation on `data-*` attributes (no inline `onclick`). Navigation is
+hash-based (`#tools`, `#node-<path>`) so views are linkable and survive reload.
 
 ### 1.4 Rendering internals & gotchas
 
-- **templ codegen.** Markup lives in `components/*.templ`; the committed
-  `*_templ.go` files are **generated** — never hand-edit them. After changing a
-  `.templ` you must run `templ generate` (see [`components/INSTALL.md`](./components/INSTALL.md)).
-- **Placeholder injection is fragile.** `GenerateHTMLWithRegisteredTools` passes the
-  three `const …` JS strings into `Page(...)` *and* then does
-  `bytes.ReplaceAll("{ treeData }", …)` on the output. Keep the literal tokens
-  `{ treeData }`, `{ nodesData }`, `{ registeredTools }` in `scripts.templ` in sync
-  with that replace logic, or the data will be missing.
+- **templ codegen.** Markup lives in `components/*.templ` (now just `page`,
+  `styles`, `scripts`); the committed `*_templ.go` files are **generated** —
+  never hand-edit them. After changing a `.templ` you must run `templ generate`
+  (see [`components/INSTALL.md`](./components/INSTALL.md)).
+- **Data injection.** `GenerateHTMLWithRegisteredTools` builds three complete JS
+  statements (`const treeData = …;` etc.) and the `scripts` component injects
+  them verbatim into a dedicated `<script>` via `templ.Raw`. The old
+  `{ treeData }` token + `bytes.ReplaceAll` mechanism is gone. `json.Marshal`
+  escapes `<`, `>` and `&`, so the payload cannot break out of the script tag.
 - **Everything is inlined.** The full knowledge base — including every node's full
   Markdown `content` — is serialized into the page. Big trees ⇒ big pages.
-- **XSS.** Text goes through `escapeHtml`, but node `content` is rendered as HTML via
-  `marked.parse`. Treat knowledge content as trusted input.
+- **XSS.** Text goes through `esc()`, but node `content` is rendered as HTML via
+  `marked.parse` (with a plain-text fallback when the CDN is unavailable).
+  Treat knowledge content as trusted input.
 - **No per-user filtering.** `/agentize/docs` renders the whole tree regardless of
   the `auth` rules it displays; auth here is informational, not enforced.
+- **Admin login.** When admin credentials are configured (env
+  `AGENTIZE_ADMIN_USERNAME` / `AGENTIZE_ADMIN_PASSWORD` or
+  `SetAdminCredentials`), `/agentize/docs` — like every `/agentize` page except
+  `/agentize/health` — requires signing in at `/agentize/login` (HMAC-signed
+  24h cookie; see [`auth.go`](../auth.go)).
 
 ---
 

@@ -18,38 +18,50 @@ import (
 
 // RegisterRoutes registers HTTP routes on the given gin.Engine
 // Routes: /agentize, /agentize/graph, /agentize/docs, /agentize/health, /agentize/debug/*
+//
+// When admin credentials are configured (SetAdminCredentials or the
+// AGENTIZE_ADMIN_USERNAME / AGENTIZE_ADMIN_PASSWORD env vars), every route
+// except /agentize/health and the login endpoints requires a signed-in admin.
 func (ag *Agentize) RegisterRoutes(router *gin.Engine) {
-	router.GET("/agentize", ag.handleIndex)
-	router.GET("/agentize/metrics", metrics.GinHandler())
-	router.GET("/agentize/graph", ag.handleGraph)
-	router.GET("/agentize/docs", ag.handleDocs)
+	ag.initAdminAuth()
+
+	// Always-open endpoints
 	router.GET("/agentize/health", ag.handleHealth)
-	router.GET("/agentize/debug", ag.handleDebug)
-	router.GET("/agentize/debug/users", ag.handleDebugUsers)
-	router.GET("/agentize/debug/users/:userID", ag.handleDebugUserDetail)
-	router.POST("/agentize/debug/users/:userID/delete-data", ag.handleDebugUserDeleteData)
-	router.GET("/agentize/debug/sessions", ag.handleDebugSessions)
-	router.GET("/agentize/debug/sessions/:sessionID", ag.handleDebugSessionDetail)
-	router.GET("/agentize/debug/plans", ag.handleDebugPlans)
-	router.GET("/agentize/debug/plans/:planID", ag.handleDebugPlanDetail)
-	router.GET("/agentize/debug/messages", ag.handleDebugMessages)
-	router.GET("/agentize/debug/files", ag.handleDebugFiles)
-	router.GET("/agentize/debug/documents", ag.handleDebugDocuments)
-	router.GET("/agentize/debug/documents/:fileID/raw", ag.handleDebugDocumentRaw)
-	router.GET("/agentize/debug/tool-calls", ag.handleDebugToolCalls)
-	router.GET("/agentize/debug/tool-calls/:toolID", ag.handleDebugToolCallDetail)
-	router.GET("/agentize/debug/routes", ag.handleDebugRoutes)
-	router.GET("/agentize/debug/routes/:traceID", ag.handleDebugRouteDetail)
-	router.GET("/agentize/debug/summarized", ag.handleDebugSummarized)
-	router.GET("/agentize/debug/summarized/:logID", ag.handleDebugSummarizationLogDetail)
+	router.GET(adminLoginPath, ag.handleLoginPage)
+	router.POST(adminLoginPath, ag.handleLoginSubmit)
+	router.GET("/agentize/logout", ag.handleLogout)
+
+	p := ag.requireAdmin
+	router.GET("/agentize", p(ag.handleIndex))
+	router.GET("/agentize/metrics", p(metrics.GinHandler()))
+	router.GET("/agentize/graph", p(ag.handleGraph))
+	router.GET("/agentize/docs", p(ag.handleDocs))
+	router.GET("/agentize/debug", p(ag.handleDebug))
+	router.GET("/agentize/debug/users", p(ag.handleDebugUsers))
+	router.GET("/agentize/debug/users/:userID", p(ag.handleDebugUserDetail))
+	router.POST("/agentize/debug/users/:userID/delete-data", p(ag.handleDebugUserDeleteData))
+	router.GET("/agentize/debug/sessions", p(ag.handleDebugSessions))
+	router.GET("/agentize/debug/sessions/:sessionID", p(ag.handleDebugSessionDetail))
+	router.GET("/agentize/debug/plans", p(ag.handleDebugPlans))
+	router.GET("/agentize/debug/plans/:planID", p(ag.handleDebugPlanDetail))
+	router.GET("/agentize/debug/messages", p(ag.handleDebugMessages))
+	router.GET("/agentize/debug/files", p(ag.handleDebugFiles))
+	router.GET("/agentize/debug/documents", p(ag.handleDebugDocuments))
+	router.GET("/agentize/debug/documents/:fileID/raw", p(ag.handleDebugDocumentRaw))
+	router.GET("/agentize/debug/tool-calls", p(ag.handleDebugToolCalls))
+	router.GET("/agentize/debug/tool-calls/:toolID", p(ag.handleDebugToolCallDetail))
+	router.GET("/agentize/debug/routes", p(ag.handleDebugRoutes))
+	router.GET("/agentize/debug/routes/:traceID", p(ag.handleDebugRouteDetail))
+	router.GET("/agentize/debug/summarized", p(ag.handleDebugSummarized))
+	router.GET("/agentize/debug/summarized/:logID", p(ag.handleDebugSummarizationLogDetail))
 
 	// Register extra debug pages (with sidebar entry)
-	for _, p := range ag.extraDebugPages {
-		router.GET(p.Path, p.Handler)
+	for _, page := range ag.extraDebugPages {
+		router.GET(page.Path, p(page.Handler))
 	}
 	// Register extra debug routes (no sidebar entry, e.g. detail pages)
-	for _, p := range ag.extraDebugRoutes {
-		router.GET(p.Path, p.Handler)
+	for _, page := range ag.extraDebugRoutes {
+		router.GET(page.Path, p(page.Handler))
 	}
 }
 

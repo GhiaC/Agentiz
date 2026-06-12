@@ -1,696 +1,601 @@
 package components
 
+// scripts renders the data payload plus the single-page-app logic.
+// The three string params are complete JS statements built in documents.go
+// (e.g. "const treeData = {...};") and are injected verbatim via templ.Raw —
+// json.Marshal escapes <, > and & so the payload cannot break out of <script>.
 templ scripts(treeData, nodesData, registeredTools string) {
 	<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+	@templ.Raw("<script>\n" + treeData + "\n" + nodesData + "\n" + registeredTools + "\nif (typeof registeredTools === 'undefined' || registeredTools === null) { registeredTools = {}; }\n</script>")
 	<script>
-		{ treeData }
-		{ nodesData }
-		{ registeredTools }
-		// Ensure registeredTools is always an object
-		if (typeof registeredTools === 'undefined' || registeredTools === null) {
-			registeredTools = {};
+		'use strict';
+
+		/* ---------- helpers ---------- */
+		function esc(text) {
+			if (text === null || text === undefined) return '';
+			var div = document.createElement('div');
+			div.textContent = String(text);
+			return div.innerHTML;
 		}
-	</script>
-	<script>
-		function calculateStats() {
-			const totalNodes = Object.keys(nodesData).length;
-			let totalTools = 0;
-			let maxDepth = 0;
-
-			function countTools(node) {
-				if (nodesData[node.path] && nodesData[node.path].tools) {
-					totalTools += nodesData[node.path].tools.length;
-				}
-				if (node.level > maxDepth) {
-					maxDepth = node.level;
-				}
-				if (node.children) {
-					node.children.forEach(countTools);
-				}
+		function el(id) { return document.getElementById(id); }
+		function isRegistered(name) { return registeredTools && registeredTools[name] === true; }
+		// Go's zero time marshals as "0001-01-01T00:00:00Z" — treat it as unset.
+		function loadedAtOf(nd) {
+			if (!nd.loaded_at) return null;
+			var d = new Date(nd.loaded_at);
+			return d.getFullYear() > 1971 ? d : null;
+		}
+		function renderMarkdown(src) {
+			if (window.marked && typeof marked.parse === 'function') {
+				try { return marked.parse(src); } catch (e) { /* fall through */ }
 			}
+			return '<pre class="content-plain">' + esc(src) + '</pre>';
+		}
 
-			if (treeData) {
-				countTools(treeData);
-			}
+		/* ---------- index the tree ---------- */
+		var parentOf = {};   // path -> parent path
+		var levelOf = {};    // path -> depth
+		var maxDepth = 0;
+		(function indexTree(node, parent, level) {
+			if (!node) return;
+			parentOf[node.path] = parent;
+			levelOf[node.path] = level;
+			if (level + 1 > maxDepth) maxDepth = level + 1;
+			(node.children || []).forEach(function(c) { indexTree(c, node.path, level + 1); });
+		})(treeData, null, 0);
 
-			// Tool coverage: how many UNIQUE declared tools are actually registered.
-			const toolNames = new Set();
-			for (const p in nodesData) {
-				(nodesData[p].tools || []).forEach(function(t) { toolNames.add(t.name); });
+		function buildToolMap() {
+			var map = new Map();
+			for (var path in nodesData) {
+				var nd = nodesData[path];
+				(nd.tools || []).forEach(function(tool) {
+					if (!map.has(tool.name)) map.set(tool.name, { tool: tool, nodes: [] });
+					map.get(tool.name).nodes.push({ path: path, title: nd.title || nd.id || path });
+				});
 			}
-			let registeredCount = 0;
-			toolNames.forEach(function(name) {
-				if (registeredTools && registeredTools[name] === true) registeredCount++;
+			return map;
+		}
+		var toolMap = buildToolMap();
+
+		function ancestorsOf(path) {
+			var out = [];
+			var p = parentOf[path];
+			while (p !== null && p !== undefined) { out.push(p); p = parentOf[p]; }
+			return out;
+		}
+
+		/* ---------- theme ---------- */
+		function initTheme() {
+			var saved = null;
+			try { saved = localStorage.getItem('agentize-theme'); } catch (e) {}
+			var theme = saved || (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+			document.documentElement.setAttribute('data-theme', theme);
+		}
+		function toggleTheme() {
+			var cur = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+			document.documentElement.setAttribute('data-theme', cur);
+			try { localStorage.setItem('agentize-theme', cur); } catch (e) {}
+		}
+
+		/* ---------- sidebar tree ---------- */
+		function renderTreeNode(node) {
+			var nd = nodesData[node.path] || {};
+			var hasKids = node.children && node.children.length > 0;
+			var level = levelOf[node.path] || 0;
+			var indent = 6 + level * 14;
+			var toolCount = (nd.tools || []).length;
+
+			var html = '<div class="tree-item" data-item-path="' + esc(node.path) + '">';
+			html += '<div class="tree-row" data-path="' + esc(node.path) + '" style="padding-left:' + indent + 'px" title="' + esc(node.path) + '">';
+			html += '<span class="tree-row-chevron' + (hasKids ? (level === 0 ? ' open' : '') : ' leaf') + '" data-toggle="' + esc(node.path) + '">▶</span>';
+			html += '<span class="tree-row-title">' + esc(node.title || node.id || node.path) + '</span>';
+			if (toolCount > 0) html += '<span class="tree-row-badge">' + toolCount + '</span>';
+			html += '</div>';
+			if (hasKids) {
+				html += '<div class="tree-children' + (level === 0 ? ' open' : '') + '" data-kids="' + esc(node.path) + '">';
+				node.children.forEach(function(child) { html += renderTreeNode(child); });
+				html += '</div>';
+			}
+			html += '</div>';
+			return html;
+		}
+
+		function renderTree() {
+			var container = el('tree-container');
+			container.innerHTML = treeData ? renderTreeNode(treeData) : '<div class="empty-note" style="padding:8px 10px;">No tree data available</div>';
+		}
+
+		function findRow(path) {
+			var rows = document.querySelectorAll('.tree-row');
+			for (var i = 0; i < rows.length; i++) {
+				if (rows[i].getAttribute('data-path') === path) return rows[i];
+			}
+			return null;
+		}
+		function findKids(path) {
+			var kids = document.querySelectorAll('.tree-children');
+			for (var i = 0; i < kids.length; i++) {
+				if (kids[i].getAttribute('data-kids') === path) return kids[i];
+			}
+			return null;
+		}
+
+		function setBranch(path, open) {
+			var kids = findKids(path);
+			var row = findRow(path);
+			if (!kids) return;
+			kids.classList.toggle('open', open);
+			if (row) {
+				var chev = row.querySelector('.tree-row-chevron');
+				if (chev) chev.classList.toggle('open', open);
+			}
+		}
+
+		function expandTo(path) {
+			ancestorsOf(path).forEach(function(p) { setBranch(p, true); });
+		}
+
+		function setAllBranches(open) {
+			document.querySelectorAll('.tree-children').forEach(function(k) { k.classList.toggle('open', open); });
+			document.querySelectorAll('.tree-row-chevron:not(.leaf)').forEach(function(c) { c.classList.toggle('open', open); });
+		}
+
+		function markActive(path) {
+			document.querySelectorAll('.tree-row.active').forEach(function(r) { r.classList.remove('active'); });
+			if (!path) return;
+			var row = findRow(path);
+			if (row) {
+				row.classList.add('active');
+				expandTo(path);
+				if (typeof row.scrollIntoView === 'function') row.scrollIntoView({ block: 'nearest' });
+			}
+		}
+
+		/* ---------- breadcrumb & views ---------- */
+		function setBreadcrumb(parts) {
+			// parts: [{label, hash|null}] — last item rendered as current.
+			var html = '';
+			parts.forEach(function(p, i) {
+				if (i > 0) html += '<span class="crumb-sep">/</span>';
+				if (i === parts.length - 1 || !p.hash) {
+					html += '<span class="crumb-current">' + esc(p.label) + '</span>';
+				} else {
+					html += '<a href="' + esc(p.hash) + '">' + esc(p.label) + '</a>';
+				}
 			});
-
-			document.getElementById('total-nodes').textContent = totalNodes;
-			document.getElementById('total-tools').textContent = totalTools;
-			document.getElementById('tree-depth').textContent = maxDepth + 1;
-			const regEl = document.getElementById('total-registered');
-			if (regEl) regEl.textContent = registeredCount + ' / ' + toolNames.size;
+			el('breadcrumb').innerHTML = html;
 		}
 
-		function renderNode(node, isRoot = false) {
-			const nodeData = nodesData[node.path] || {};
-			const level = node.level || 0;
-			const indent = level * 30;
-			const hasChildren = node.children && node.children.length > 0;
-			const toggleStyle = hasChildren ? '' : 'visibility: hidden;';
+		function setActiveView(name) {
+			['overview', 'detail', 'tools'].forEach(function(v) {
+				el(v + '-view').classList.toggle('active', v === name);
+			});
+			el('nav-overview').classList.toggle('active', name === 'overview');
+			el('nav-tools').classList.toggle('active', name === 'tools');
+			el('overview-view').parentElement.scrollTop = 0;
+		}
 
-			let html = '<div class="tree-node" data-path="' + escapeHtml(node.path) + '" data-level="' + level + '" style="margin-left: ' + indent + 'px;">' +
-				'<div class="node-header">' +
-				'<div>' +
-				'<span class="toggle-icon" id="toggle-' + escapeHtml(node.path) + '" style="' + toggleStyle + '" onclick="event.stopPropagation(); toggleNode(\'' + escapeHtml(node.path) + '\')"></span>' +
-				'<span class="level-indicator">' + level + '</span>' +
-				'<a href="#" class="node-title-link" onclick="event.preventDefault(); showNodeDetail(\'' + escapeHtml(node.path) + '\'); return false;">' +
-				escapeHtml(node.title || node.id || node.path) +
-				'</a>' +
-				'</div>' +
-				'<span class="node-path">' + escapeHtml(node.path) + '</span>' +
+		/* ---------- overview ---------- */
+		function renderOverview() {
+			var totalNodes = Object.keys(nodesData).length;
+			var declared = 0;
+			for (var p in nodesData) declared += (nodesData[p].tools || []).length;
+			var unique = toolMap.size;
+			var registered = 0;
+			var unregisteredNames = [];
+			toolMap.forEach(function(entry, name) {
+				if (isRegistered(name)) registered++;
+				else unregisteredNames.push(name);
+			});
+			unregisteredNames.sort();
+			var pct = unique > 0 ? Math.round(registered * 100 / unique) : 100;
+
+			var html = '<div class="page-title">Knowledge Base</div>' +
+				'<div class="page-subtitle">Structure, tools and access rules of the agent knowledge tree</div>';
+
+			html += '<div class="stats-grid">' +
+				'<div class="stat-card"><div class="stat-value">' + totalNodes + '</div><div class="stat-label">Nodes</div><div class="stat-sub">max depth ' + maxDepth + '</div></div>' +
+				'<div class="stat-card"><div class="stat-value">' + unique + '</div><div class="stat-label">Unique tools</div><div class="stat-sub">' + declared + ' declarations</div></div>' +
+				'<div class="stat-card"><div class="stat-value">' + registered + '<span style="font-size:14px;color:var(--text-3);"> / ' + unique + '</span></div><div class="stat-label">Registered tools</div>' +
+					'<div class="progress"><span style="width:' + pct + '%"></span></div><div class="stat-sub">' + pct + '% coverage</div></div>' +
 				'</div>';
 
-			if (node.description || nodeData.description) {
-				html += '<div class="node-description">' + escapeHtml(node.description || nodeData.description || '') + '</div>';
+			// Problems panel
+			html += '<div class="card"><div class="card-title">Problems <span class="count-pill">' + unregisteredNames.length + '</span></div>';
+			if (unregisteredNames.length === 0) {
+				html += '<div class="empty-note">✓ Every declared tool has a registered function.</div>';
+			} else {
+				unregisteredNames.forEach(function(name) {
+					var nodes = toolMap.get(name).nodes;
+					html += '<div class="problem-item"><span class="badge badge-warn">unregistered</span>' +
+						'<code>' + esc(name) + '</code>' +
+						'<span style="color:var(--text-3);">declared in ' + nodes.length + ' node' + (nodes.length > 1 ? 's' : '') + '</span>' +
+						'<a href="#node-' + encodeURIComponent(nodes[0].path) + '" style="margin-left:auto;">view node →</a>' +
+						'</div>';
+				});
 			}
-
-			html += '<div class="node-meta">';
-
-			if (nodeData.children && nodeData.children.length > 0) {
-				html += '<span class="meta-item"><span class="meta-badge">Children: ' + nodeData.children.length + '</span></span>';
-			}
-
-			if (nodeData.tools && nodeData.tools.length > 0) {
-				html += '<span class="meta-item">Tools: <strong>' + nodeData.tools.length + '</strong></span>';
-			}
-
 			html += '</div>';
 
-			if (nodeData.tools && nodeData.tools.length > 0) {
-				html += '<div class="tools-section">';
-				html += '<div class="tools-title" onclick="toggleTools(\'' + escapeHtml(node.path) + '\')">' +
-					'<span class="toggle-icon" id="toggle-tools-' + escapeHtml(node.path) + '"></span>' +
-					'<span>🔧 Tools (' + nodeData.tools.length + ')</span>' +
-					'</div>';
-				html += '<div class="tools-content" id="tools-content-' + escapeHtml(node.path) + '">';
-				nodeData.tools.forEach(function(tool) {
-					const isRegistered = registeredTools && typeof registeredTools === 'object' && registeredTools[tool.name] === true;
-					html += '<div class="tool-item">' +
-						'<div class="tool-name-row">' +
-						'<div class="tool-name">' + escapeHtml(tool.name) + '</div>';
-					if (isRegistered) {
-						html += '<span class="tool-badge tool-badge-registered" title="This tool is registered in FunctionRegistry">✓ Registered</span>';
-					} else {
-						html += '<span class="tool-badge tool-badge-unregistered" title="This tool is not registered in FunctionRegistry">⚠️ Not Registered</span>';
-					}
-					html += '</div>' +
-						'<div class="tool-description">' + escapeHtml(tool.description || '') + '</div>' +
-						'</div>';
+			// Recently loaded nodes
+			var loaded = [];
+			for (var path in nodesData) {
+				var nd = nodesData[path];
+				var at = loadedAtOf(nd);
+				if (at) loaded.push({ path: path, title: nd.title || nd.id || path, at: at });
+			}
+			loaded.sort(function(a, b) { return b.at - a.at; });
+			if (loaded.length > 0) {
+				html += '<div class="card"><div class="card-title">Recently loaded</div><div class="children-grid">';
+				loaded.slice(0, 6).forEach(function(n) {
+					html += '<div class="child-card" data-goto="' + esc(n.path) + '">' +
+						'<div class="child-card-title">' + esc(n.title) + '</div>' +
+						'<div class="child-card-path">' + esc(n.at.toLocaleString()) + '</div></div>';
 				});
 				html += '</div></div>';
 			}
 
-			if (nodeData.content) {
-				const markdownHtml = marked.parse(nodeData.content);
-				html += '<details style="margin-top: 10px;">' +
-					'<summary style="cursor: pointer; color: #667eea; font-weight: bold;">📄 Content Preview</summary>' +
-					'<div style="margin-top: 10px;">' +
-					'<div class="button-group">' +
-					'<button class="markdown-toggle-btn" onclick="toggleMarkdown(\'content-preview-' + escapeHtml(node.path) + '\')">View as Plain Text</button>' +
-					'<button class="copy-btn" onclick="copyContent(\'' + escapeHtml(node.path) + '\', \'preview\')">📋 Copy Content</button>' +
-					'</div>' +
-					'<div id="content-preview-' + escapeHtml(node.path) + '" data-content-path="' + escapeHtml(node.path) + '" style="margin-top: 10px; padding: 10px; background: white; border-radius: 6px; font-size: 0.9em; color: #555;" class="content-markdown">' +
-					markdownHtml +
-					'</div>' +
-					'</div>' +
-					'</details>';
+			el('overview-view').innerHTML = html;
+		}
+
+		function showOverview() {
+			setActiveView('overview');
+			renderOverview();
+			setBreadcrumb([{ label: 'Overview', hash: null }]);
+			markActive(null);
+			if (window.location.hash !== '') {
+				try { history.replaceState(null, '', window.location.pathname); } catch (e) { window.location.hash = ''; }
 			}
+		}
 
-			html += '</div>';
+		/* ---------- node detail ---------- */
+		function statusBadge(status) {
+			if (status === 'active') return '<span class="badge badge-ok">active</span>';
+			if (status === 'disabled') return '<span class="badge badge-danger">disabled</span>';
+			if (status === 'hidden') return '<span class="badge badge-muted">hidden</span>';
+			return '<span class="badge badge-muted">' + esc(status || 'unknown') + '</span>';
+		}
+		function regBadge(name) {
+			return isRegistered(name)
+				? '<span class="badge badge-ok" title="Registered in FunctionRegistry">✓ registered</span>'
+				: '<span class="badge badge-warn" title="No function registered in FunctionRegistry">⚠ unregistered</span>';
+		}
 
-			if (node.children && node.children.length > 0) {
-				html += '<div class="children" id="children-' + escapeHtml(node.path) + '">';
-				node.children.forEach(function(child) {
-					html += renderNode(child);
-				});
-				html += '</div>';
-			}
+		function permCell(v) { return '<td class="' + (v ? 'yes' : 'no') + '">' + (v ? '✓' : '—') + '</td>'; }
+		function permRow(kind, name, p) {
+			return '<tr><td class="principal"><span class="principal-kind">' + kind + '</span>' + esc(name) + '</td>' +
+				permCell(p.can_read) + permCell(p.can_edit) + permCell(p.can_access_next) +
+				permCell(p.can_see) + permCell(p.visible_in_docs) + permCell(p.visible_in_graph) + '</tr>';
+		}
 
+		function toolAccordion(tool, idx) {
+			var html = '<div class="tool-acc" id="tool-acc-' + idx + '">';
+			html += '<div class="tool-acc-head" data-acc="tool-acc-' + idx + '">' +
+				'<span class="tree-row-chevron">▶</span>' +
+				'<span class="tool-acc-name">' + esc(tool.name) + '</span>' +
+				statusBadge(tool.status) + regBadge(tool.name) +
+				'</div>';
+			html += '<div class="tool-acc-body">';
+			if (tool.description) html += '<div class="tool-acc-desc">' + esc(tool.description) + '</div>';
+			if (tool.input_schema) html += '<div class="schema-block">' + esc(JSON.stringify(tool.input_schema, null, 2)) + '</div>';
+			html += '</div></div>';
 			return html;
 		}
 
-		function toggleNode(path) {
-			const childrenDiv = document.getElementById('children-' + path);
-			const toggleIcon = document.getElementById('toggle-' + path);
-			
-			if (!childrenDiv) return;
-			
-			if (childrenDiv.classList.contains('expanded')) {
-				childrenDiv.classList.remove('expanded');
-				if (toggleIcon) toggleIcon.classList.remove('expanded');
-			} else {
-				childrenDiv.classList.add('expanded');
-				if (toggleIcon) toggleIcon.classList.add('expanded');
-			}
-		}
-
-		function toggleTools(path) {
-			const toolsContent = document.getElementById('tools-content-' + path);
-			const toggleIcon = document.getElementById('toggle-tools-' + path);
-			
-			if (!toolsContent) return;
-			
-			if (toolsContent.classList.contains('expanded')) {
-				toolsContent.classList.remove('expanded');
-				if (toggleIcon) toggleIcon.classList.remove('expanded');
-			} else {
-				toolsContent.classList.add('expanded');
-				if (toggleIcon) toggleIcon.classList.add('expanded');
-			}
-		}
-
-		function toggleChildren(path) {
-			const childrenContent = document.getElementById('children-content-' + path);
-			const toggleIcon = document.getElementById('toggle-children-' + path);
-			
-			if (!childrenContent) return;
-			
-			if (childrenContent.classList.contains('expanded')) {
-				childrenContent.classList.remove('expanded');
-				if (toggleIcon) toggleIcon.classList.remove('expanded');
-			} else {
-				childrenContent.classList.add('expanded');
-				if (toggleIcon) toggleIcon.classList.add('expanded');
-			}
-		}
-
-		function renderTree() {
-			const container = document.getElementById('tree-container');
-			if (treeData) {
-				container.innerHTML = renderNode(treeData, true);
-			} else {
-				container.innerHTML = '<p>No tree data available</p>';
-			}
-			calculateStats();
-		}
-
-		function setupSearch() {
-			const searchInput = document.getElementById('search-input');
-			searchInput.addEventListener('input', function(e) {
-				const query = e.target.value.toLowerCase();
-				const nodes = document.querySelectorAll('.tree-node');
-				
-				nodes.forEach(function(node) {
-					const path = node.getAttribute('data-path');
-					const nodeData = nodesData[path] || {};
-					const toolText = (nodeData.tools || []).map(function(t) { return t.name + ' ' + t.description; }).join(' ');
-					const text = (nodeData.title || '') + ' ' + (nodeData.description || '') + ' ' + path + ' ' + toolText;
-					const lowerText = text.toLowerCase();
-					
-					if (lowerText.includes(query)) {
-						node.style.display = '';
-						let current = node.parentElement;
-						while (current) {
-							if (current.classList.contains('children')) {
-								current.style.display = '';
-								current.classList.add('expanded');
-								const parentNode = current.parentElement;
-								if (parentNode && parentNode.classList.contains('tree-node')) {
-									const parentPath = parentNode.getAttribute('data-path');
-									const toggleIcon = document.getElementById('toggle-' + parentPath);
-									if (toggleIcon) toggleIcon.classList.add('expanded');
-									current = parentNode.parentElement;
-								} else {
-									break;
-								}
-							} else {
-								current = current.parentElement;
-							}
-						}
-					} else {
-						node.style.display = 'none';
-					}
-				});
-			});
-		}
-
-		function escapeHtml(text) {
-			const div = document.createElement('div');
-			div.textContent = text;
-			return div.innerHTML;
-		}
-
-		function toggleMarkdown(elementId) {
-			const element = document.getElementById(elementId);
-			if (!element) return;
-
-			const button = element.previousElementSibling;
-			if (!button || !button.classList.contains('markdown-toggle-btn')) {
-				const parent = element.parentElement;
-				const btn = parent.querySelector('.markdown-toggle-btn');
-				if (btn) {
-					toggleMarkdownForElement(element, btn);
-				}
-				return;
-			}
-
-			toggleMarkdownForElement(element, button);
-		}
-
-		function toggleMarkdownForElement(element, button) {
-			// Get the path from data attribute to access original content from nodesData
-			const contentPath = element.getAttribute('data-content-path');
-			if (!contentPath) return;
-
-			// Always get the original content from nodesData (source of truth)
-			const nodeData = nodesData[contentPath];
-			if (!nodeData || !nodeData.content) return;
-
-			const originalMarkdown = nodeData.content;
-
-			if (element.classList.contains('content-plain')) {
-				// Switch from plain text to markdown
-				const markdownHtml = marked.parse(originalMarkdown);
-				element.innerHTML = markdownHtml;
-				element.classList.remove('content-plain');
-				element.classList.add('content-markdown');
-				button.textContent = 'View as Plain Text';
-			} else {
-				// Switch from markdown to plain text
-				element.textContent = originalMarkdown;
-				element.classList.remove('content-markdown');
-				element.classList.add('content-plain');
-				button.textContent = 'View as Markdown';
-			}
-		}
-
-		function copyContent(path, type) {
-			const nodeData = nodesData[path];
-			if (!nodeData || !nodeData.content) return;
-
-			const content = nodeData.content;
-			
-			if (navigator.clipboard && navigator.clipboard.writeText) {
-				navigator.clipboard.writeText(content).then(function() {
-					showCopyFeedback(path, type);
-				}).catch(function(err) {
-					console.error('Failed to copy:', err);
-					fallbackCopyTextToClipboard(content, path, type);
-				});
-			} else {
-				fallbackCopyTextToClipboard(content, path, type);
-			}
-		}
-
-		function fallbackCopyTextToClipboard(text, path, type) {
-			const textArea = document.createElement('textarea');
-			textArea.value = text;
-			textArea.style.position = 'fixed';
-			textArea.style.left = '-999999px';
-			textArea.style.top = '-999999px';
-			document.body.appendChild(textArea);
-			textArea.focus();
-			textArea.select();
-			
-			try {
-				const successful = document.execCommand('copy');
-				if (successful) {
-					showCopyFeedback(path, type);
-				}
-			} catch (err) {
-				console.error('Fallback copy failed:', err);
-			}
-			
-			document.body.removeChild(textArea);
-		}
-
-		function showCopyFeedback(path, type) {
-			const buttons = document.querySelectorAll('.copy-btn');
-			buttons.forEach(function(btn) {
-				if (btn.getAttribute('onclick') && btn.getAttribute('onclick').indexOf(path) !== -1 && btn.getAttribute('onclick').indexOf(type) !== -1) {
-					const originalText = btn.textContent;
-					btn.textContent = '✓ Copied!';
-					btn.style.background = '#28a745';
-					
-					setTimeout(function() {
-						btn.textContent = originalText;
-						btn.style.background = '';
-					}, 2000);
-				}
-			});
-		}
-
 		function showNodeDetail(path) {
-			const nodeData = nodesData[path];
-			if (!nodeData) return;
+			var nd = nodesData[path];
+			if (!nd) { showOverview(); return; }
 
-			const treeView = document.getElementById('tree-view');
-			const detailView = document.getElementById('detail-view');
-			const toolsView = document.getElementById('tools-view');
-			const detailContent = document.getElementById('detail-content');
+			setActiveView('detail');
+			markActive(path);
 
-			treeView.classList.add('hidden');
-			detailView.classList.add('active');
-			if (toolsView) toolsView.classList.remove('active');
+			// breadcrumb from path segments that map to real nodes
+			var crumbs = [{ label: 'Overview', hash: '#' }];
+			var segs = path.split('/');
+			var acc = '';
+			segs.forEach(function(seg) {
+				acc = acc === '' ? seg : acc + '/' + seg;
+				if (nodesData[acc]) {
+					crumbs.push({ label: nodesData[acc].title || seg, hash: '#node-' + encodeURIComponent(acc) });
+				}
+			});
+			crumbs[crumbs.length - 1].hash = null;
+			setBreadcrumb(crumbs);
 
-			let html = '';
+			var html = '<div class="page-title">' + esc(nd.title || nd.id || path) + '</div>' +
+				'<div class="page-subtitle"><code>' + esc(path) + '</code></div>';
 
-			html += '<div class="detail-section">' +
-				'<div class="detail-section-title">' + escapeHtml(nodeData.title || nodeData.id || path) + '</div>' +
-				'<div class="detail-field">' +
-				'<div class="detail-field-label">Path:</div>' +
-				'<div class="detail-field-value"><code>' + escapeHtml(path) + '</code></div>' +
-				'</div>' +
-				'<div class="detail-field">' +
-				'<div class="detail-field-label">ID:</div>' +
-				'<div class="detail-field-value"><code>' + escapeHtml(nodeData.id || 'N/A') + '</code></div>' +
-				'</div>';
-			if (nodeData.loaded_at) {
-				html += '<div class="detail-field">' +
-					'<div class="detail-field-label">Loaded At:</div>' +
-					'<div class="detail-field-value">' + escapeHtml(new Date(nodeData.loaded_at).toLocaleString()) + '</div>' +
-					'</div>';
-			}
-			if (nodeData.hash) {
-				html += '<div class="detail-field">' +
-					'<div class="detail-field-label">Hash:</div>' +
-					'<div class="detail-field-value"><code>' + escapeHtml(String(nodeData.hash).substring(0, 12)) + '</code></div>' +
-					'</div>';
-			}
+			html += '<div class="card"><div class="chip-row" style="margin-top:0;">';
+			html += '<span class="chip">id <b>' + esc(nd.id || '—') + '</b></span>';
+			html += '<span class="chip">children <b>' + ((nd.children || []).length) + '</b></span>';
+			html += '<span class="chip">tools <b>' + ((nd.tools || []).length) + '</b></span>';
+			if (nd.hash) html += '<span class="chip">hash <b>' + esc(String(nd.hash).substring(0, 12)) + '</b></span>';
+			var loadedAt = loadedAtOf(nd);
+			if (loadedAt) html += '<span class="chip">loaded <b>' + esc(loadedAt.toLocaleString()) + '</b></span>';
+			html += '</div>';
+			if (nd.description) html += '<div style="margin-top:12px;color:var(--text-2);" dir="auto">' + esc(nd.description) + '</div>';
 			html += '</div>';
 
-			if (nodeData.description) {
-				html += '<div class="detail-section">' +
-					'<div class="detail-section-title">Description</div>' +
-					'<div class="detail-field-value">' + escapeHtml(nodeData.description) + '</div>' +
+			if (nd.content) {
+				html += '<div class="card"><div class="card-title">Content</div>' +
+					'<div class="content-toolbar">' +
+					'<button class="soft-btn" id="content-mode-btn" data-content-path="' + esc(path) + '">View raw</button>' +
+					'<button class="soft-btn" id="content-copy-btn" data-content-path="' + esc(path) + '">⧉ Copy</button>' +
+					'</div>' +
+					'<div id="content-body" class="markdown-body" dir="auto">' + renderMarkdown(nd.content) + '</div>' +
 					'</div>';
 			}
 
-			if (nodeData.content) {
-				const markdownHtml = marked.parse(nodeData.content);
-				html += '<div class="detail-section">' +
-					'<div class="detail-section-title">Content</div>' +
-					'<div class="button-group">' +
-					'<button class="markdown-toggle-btn" onclick="toggleMarkdown(\'content-detail-' + path + '\')">View as Plain Text</button>' +
-					'<button class="copy-btn" onclick="copyContent(\'' + path + '\', \'detail\')">📋 Copy Content</button>' +
-					'</div>' +
-					'<div id="content-detail-' + path + '" data-content-path="' + path + '" class="detail-field-value content-markdown" style="margin-top: 10px;">' +
-					markdownHtml +
-					'</div>' +
-					'</div>';
-			}
-
-			const auth = nodeData.auth || {};
-			const authUsers = auth.users || [];
-			const authGroups = auth.groups || [];
-			const authRoles = auth.roles || [];
-			if (authUsers.length > 0 || authGroups.length > 0 || authRoles.length > 0) {
-				html += '<div class="detail-section">' +
-					'<div class="detail-section-title">Auth</div>';
-				html += '<div class="detail-field" style="margin-bottom: 8px;">Inherit from parent: <strong>' + (auth.inherit ? 'Yes' : 'No') + '</strong></div>';
-
-				const permRow = function(kind, name, p) {
-					return '<div class="detail-field" style="margin-bottom: 12px; padding: 10px; background-color: #f9f9f9; border-radius: 4px;">' +
-						'<div class="detail-field-label" style="font-weight: bold; margin-bottom: 5px;">' + kind + ': ' + escapeHtml(name) + '</div>' +
-						'<div class="detail-field-value" style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px;">' +
-						'<div>Read: ' + (p.can_read ? '✅' : '—') + '</div>' +
-						'<div>Edit: ' + (p.can_edit ? '✅' : '—') + '</div>' +
-						'<div>Access Next: ' + (p.can_access_next ? '✅' : '—') + '</div>' +
-						'<div>See: ' + (p.can_see ? '✅' : '—') + '</div>' +
-						'<div>Docs: ' + (p.visible_in_docs ? '✅' : '—') + '</div>' +
-						'<div>Graph: ' + (p.visible_in_graph ? '✅' : '—') + '</div>' +
-						'</div>' +
-						'</div>';
-				};
-
-				authUsers.forEach(function(u) { html += permRow('User', u.user_id, u); });
-				authGroups.forEach(function(g) { html += permRow('Group', g.name, g); });
-				authRoles.forEach(function(r) { html += permRow('Role', r.name, r); });
-
+			if (nd.tools && nd.tools.length > 0) {
+				html += '<div class="card"><div class="card-title">Tools <span class="count-pill">' + nd.tools.length + '</span></div>';
+				nd.tools.forEach(function(tool, idx) { html += toolAccordion(tool, idx); });
 				html += '</div>';
 			}
 
-			if (nodeData.children && nodeData.children.length > 0) {
-				html += '<div class="detail-section">' +
-					'<div class="children-section">' +
-					'<div class="children-title" onclick="toggleChildren(\'' + path + '\')">' +
-					'<span class="toggle-icon" id="toggle-children-' + path + '"></span>' +
-					'<span>👶 Children Nodes (' + nodeData.children.length + ')</span>' +
-					'</div>' +
-					'<div class="children-content" id="children-content-' + path + '">' +
-					'<div class="detail-field-value"><ul class="children-list">';
-				nodeData.children.forEach(function(childPath) {
-					const childData = nodesData[childPath];
-					const childTitle = childData ? (childData.title || childData.id || childPath) : childPath;
-					html += '<li class="children-list-item">' +
-						'<a href="#" onclick="event.preventDefault(); showNodeDetail(\'' + escapeHtml(childPath) + '\'); return false;">' +
-						escapeHtml(childTitle) + ' <span style="color: #6c757d; font-size: 0.9em;">(' + escapeHtml(childPath) + ')</span>' +
-						'</a>' +
-						'</li>';
+			var auth = nd.auth || {};
+			var users = auth.users || [], groups = auth.groups || [], roles = auth.roles || [];
+			if (users.length || groups.length || roles.length) {
+				html += '<div class="card"><div class="card-title">Access ' +
+					'<span class="badge ' + (auth.inherit ? 'badge-ok' : 'badge-muted') + '">' + (auth.inherit ? 'inherits parent' : 'no inheritance') + '</span></div>';
+				html += '<div class="auth-table-wrap"><table class="auth-table"><thead><tr>' +
+					'<th style="text-align:left;">Principal</th><th>Read</th><th>Edit</th><th>Next</th><th>See</th><th>Docs</th><th>Graph</th>' +
+					'</tr></thead><tbody>';
+				users.forEach(function(u) { html += permRow('user', u.user_id, u); });
+				groups.forEach(function(g) { html += permRow('group', g.name, g); });
+				roles.forEach(function(r) { html += permRow('role', r.name, r); });
+				html += '</tbody></table></div></div>';
+			}
+
+			if (nd.children && nd.children.length > 0) {
+				html += '<div class="card"><div class="card-title">Children <span class="count-pill">' + nd.children.length + '</span></div><div class="children-grid">';
+				nd.children.forEach(function(childPath) {
+					var cd = nodesData[childPath] || {};
+					html += '<div class="child-card" data-goto="' + esc(childPath) + '">' +
+						'<div class="child-card-title">' + esc(cd.title || cd.id || childPath) + '</div>' +
+						'<div class="child-card-path">' + esc(childPath) + '</div></div>';
 				});
-				html += '</ul></div></div></div></div>';
+				html += '</div></div>';
 			}
 
-			if (nodeData.tools && nodeData.tools.length > 0) {
-				html += '<div class="detail-section">' +
-					'<div class="tools-section">' +
-					'<div class="tools-title" onclick="toggleTools(\'' + path + '\')">' +
-					'<span class="toggle-icon" id="toggle-tools-' + path + '"></span>' +
-					'<span>🔧 Tools (' + nodeData.tools.length + ')</span>' +
-					'</div>' +
-					'<div class="tools-content" id="tools-content-' + path + '">';
-				
-				nodeData.tools.forEach(function(tool, index) {
-					const isRegistered = registeredTools && typeof registeredTools === 'object' && registeredTools[tool.name] === true;
-					html += '<div class="detail-field" style="margin-bottom: 12px;">' +
-						'<div class="detail-field-label" style="display: flex; align-items: center; gap: 10px;">' +
-						'<span>' + (index + 1) + '. ' + escapeHtml(tool.name) + '</span>';
-					if (isRegistered) {
-						html += '<span class="tool-badge tool-badge-registered" title="This tool is registered in FunctionRegistry">✓ Registered</span>';
-					} else {
-						html += '<span class="tool-badge tool-badge-unregistered" title="This tool is not registered in FunctionRegistry">⚠️ Not Registered</span>';
-					}
-					html += '</div>' +
-						'<div class="detail-field-value">' +
-						'<div style="margin-bottom: 6px;"><strong>Description:</strong> ' + escapeHtml(tool.description || 'N/A') + '</div>';
-					
-					if (tool.status) {
-						html += '<div style="margin-bottom: 6px;"><strong>Status:</strong> <code>' + escapeHtml(tool.status) + '</code></div>';
-					}
-					
-					if (tool.input_schema) {
-						html += '<div><strong>Input Schema:</strong>' +
-							'<pre class="json-viewer">' + JSON.stringify(tool.input_schema, null, 2) + '</pre>' +
-							'</div>';
-					}
-					
-					html += '</div></div>';
-				});
-				
-				html += '</div></div></div>';
+			el('detail-content').innerHTML = html;
+			var newHash = '#node-' + encodeURIComponent(path);
+			if (window.location.hash !== newHash) window.location.hash = newHash;
+		}
+
+		/* content raw/rendered toggle + copy */
+		function toggleContentMode(btn) {
+			var path = btn.getAttribute('data-content-path');
+			var nd = nodesData[path];
+			var body = el('content-body');
+			if (!nd || !body) return;
+			if (body.classList.contains('content-plain')) {
+				body.classList.remove('content-plain');
+				body.innerHTML = renderMarkdown(nd.content);
+				btn.textContent = 'View raw';
+			} else {
+				body.classList.add('content-plain');
+				body.textContent = nd.content;
+				btn.textContent = 'View rendered';
 			}
-
-			detailContent.innerHTML = html;
-			window.location.hash = 'node-' + encodeURIComponent(path);
 		}
 
-		function showTreeView() {
-			const treeView = document.getElementById('tree-view');
-			const detailView = document.getElementById('detail-view');
-			const toolsView = document.getElementById('tools-view');
-
-			treeView.classList.remove('hidden');
-			detailView.classList.remove('active');
-			if (toolsView) toolsView.classList.remove('active');
-			window.location.hash = '';
-		}
-
-		function showAllTools() {
-			const treeView = document.getElementById('tree-view');
-			const detailView = document.getElementById('detail-view');
-			const toolsView = document.getElementById('tools-view');
-
-			treeView.classList.add('hidden');
-			detailView.classList.remove('active');
-			if (toolsView) {
-				toolsView.classList.add('active');
-				renderAllTools();
+		function copyText(text, btn) {
+			function done(ok) {
+				if (!ok || !btn) return;
+				var orig = btn.textContent;
+				btn.textContent = '✓ Copied';
+				btn.classList.add('success');
+				setTimeout(function() { btn.textContent = orig; btn.classList.remove('success'); }, 1600);
 			}
-			window.location.hash = '#tools';
+			if (navigator.clipboard && navigator.clipboard.writeText) {
+				navigator.clipboard.writeText(text).then(function() { done(true); }, function() { done(fallbackCopy(text)); });
+			} else {
+				done(fallbackCopy(text));
+			}
+		}
+		function fallbackCopy(text) {
+			var ta = document.createElement('textarea');
+			ta.value = text;
+			ta.style.position = 'fixed';
+			ta.style.left = '-9999px';
+			document.body.appendChild(ta);
+			ta.select();
+			var ok = false;
+			try { ok = document.execCommand('copy'); } catch (e) {}
+			document.body.removeChild(ta);
+			return ok;
 		}
 
-		// Tools view registration filter: 'all' | 'registered' | 'unregistered'.
+		/* ---------- tools view ---------- */
 		var toolsFilter = 'all';
-		function setToolsFilter(f) {
-			toolsFilter = f;
-			renderAllTools();
-		}
+		var toolsQuery = '';
 
 		function renderAllTools() {
-			const container = document.getElementById('tools-list-container');
-			if (!container) return;
+			var container = el('tools-list-container');
+			var entries = Array.from(toolMap.values()).sort(function(a, b) { return a.tool.name.localeCompare(b.tool.name); });
+			var registeredCount = entries.filter(function(e) { return isRegistered(e.tool.name); }).length;
+			var unregisteredCount = entries.length - registeredCount;
 
-			// Collect all tools from all nodes
-			const allTools = [];
-			const toolMap = new Map(); // To deduplicate tools by name
-
-			for (const path in nodesData) {
-				const nodeData = nodesData[path];
-				if (nodeData.tools && nodeData.tools.length > 0) {
-					nodeData.tools.forEach(function(tool) {
-						// Use tool name as key to deduplicate
-						if (!toolMap.has(tool.name)) {
-							toolMap.set(tool.name, {
-								tool: tool,
-								nodes: []
-							});
-						}
-						const entry = toolMap.get(tool.name);
-						entry.nodes.push({
-							path: path,
-							title: nodeData.title || nodeData.id || path
-						});
-					});
+			var q = toolsQuery.toLowerCase();
+			var visible = entries.filter(function(e) {
+				if (toolsFilter === 'registered' && !isRegistered(e.tool.name)) return false;
+				if (toolsFilter === 'unregistered' && isRegistered(e.tool.name)) return false;
+				if (q !== '') {
+					var hay = (e.tool.name + ' ' + (e.tool.description || '') + ' ' + JSON.stringify(e.tool.input_schema || {})).toLowerCase();
+					if (hay.indexOf(q) === -1) return false;
 				}
-			}
-
-			// Convert map to array and sort by tool name
-			const toolsArray = Array.from(toolMap.values()).sort(function(a, b) {
-				return a.tool.name.localeCompare(b.tool.name);
-			});
-
-			if (toolsArray.length === 0) {
-				container.innerHTML = '<div class="no-tools">No tools found in the knowledge tree.</div>';
-				return;
-			}
-
-			// Registration coverage for the filter labels.
-			function entryRegistered(entry) {
-				return registeredTools && typeof registeredTools === 'object' && registeredTools[entry.tool.name] === true;
-			}
-			const registeredCount = toolsArray.filter(entryRegistered).length;
-			const unregisteredCount = toolsArray.length - registeredCount;
-
-			// Apply the active filter (default 'all'). Unregistered tools are
-			// usually dead or mis-typed names, so surfacing them is useful.
-			const visibleTools = toolsArray.filter(function(entry) {
-				if (toolsFilter === 'registered') return entryRegistered(entry);
-				if (toolsFilter === 'unregistered') return !entryRegistered(entry);
 				return true;
 			});
 
-			function filterBtn(key, label) {
-				const active = toolsFilter === key;
-				const style = 'cursor:pointer;border:1px solid #667eea;border-radius:4px;padding:4px 10px;margin-left:6px;font-size:0.85em;' +
-					(active ? 'background:#667eea;color:#fff;' : 'background:#fff;color:#667eea;');
-				return '<button style="' + style + '" onclick="setToolsFilter(\'' + key + '\')">' + label + '</button>';
+			function chip(key, label) {
+				return '<button class="filter-chip' + (toolsFilter === key ? ' active' : '') + '" data-filter="' + key + '">' + label + '</button>';
 			}
 
-			let html = '<div class="tools-summary">Total: <strong>' + toolsArray.length + '</strong> unique tools' +
-				'<span style="float: right;">' +
-				filterBtn('all', 'All (' + toolsArray.length + ')') +
-				filterBtn('registered', '✓ Registered (' + registeredCount + ')') +
-				filterBtn('unregistered', '⚠️ Unregistered (' + unregisteredCount + ')') +
-				'</span></div>';
+			var html = '<div class="page-title">Tools</div>' +
+				'<div class="page-subtitle">' + entries.length + ' unique tools across the knowledge tree</div>';
+			html += '<div class="tools-toolbar">' +
+				'<div class="tools-search"><input id="tools-search-input" type="search" placeholder="Filter by name, description or schema parameter" value="' + esc(toolsQuery) + '"/></div>' +
+				chip('all', 'All · ' + entries.length) +
+				chip('registered', '✓ Registered · ' + registeredCount) +
+				chip('unregistered', '⚠ Unregistered · ' + unregisteredCount) +
+				'</div>';
 
-			if (visibleTools.length === 0) {
-				html += '<div class="no-tools">No tools match this filter.</div>';
-				container.innerHTML = html;
+			if (visible.length === 0) {
+				html += '<div class="card"><div class="empty-note">No tools match this filter.</div></div>';
+			} else {
+				html += '<div class="tools-grid">';
+				visible.forEach(function(entry, i) {
+					var tool = entry.tool;
+					html += '<div class="tool-card">';
+					html += '<div class="tool-card-head"><div class="tool-card-name">' + esc(tool.name) + '</div>' +
+						'<div class="tool-card-badges">' + statusBadge(tool.status) + regBadge(tool.name) + '</div></div>';
+					if (tool.description) html += '<div class="tool-card-desc">' + esc(tool.description) + '</div>';
+					if (tool.input_schema) {
+						html += '<div><span class="disclosure" data-acc="tool-schema-' + i + '">Input schema ▾</span>' +
+							'<div class="tool-acc" id="tool-schema-' + i + '" style="border:none;background:none;"><div class="tool-acc-body" style="border:none;padding:0;">' +
+							'<div class="schema-block">' + esc(JSON.stringify(tool.input_schema, null, 2)) + '</div>' +
+							'</div></div></div>';
+					}
+					html += '<div class="tool-card-links">Available in: ';
+					entry.nodes.forEach(function(n) {
+						html += '<a href="#node-' + encodeURIComponent(n.path) + '">' + esc(n.title) + '</a>';
+					});
+					html += '</div></div>';
+				});
+				html += '</div>';
+			}
+			container.innerHTML = html;
+
+			var input = el('tools-search-input');
+			if (input) {
+				input.addEventListener('input', function(e) {
+					toolsQuery = e.target.value;
+					var pos = e.target.selectionStart;
+					renderAllTools();
+					var fresh = el('tools-search-input');
+					if (fresh) { fresh.focus(); try { fresh.setSelectionRange(pos, pos); } catch (err) {} }
+				});
+			}
+		}
+
+		function showAllTools() {
+			setActiveView('tools');
+			renderAllTools();
+			setBreadcrumb([{ label: 'Overview', hash: '#' }, { label: 'Tools', hash: null }]);
+			markActive(null);
+			if (window.location.hash !== '#tools') window.location.hash = '#tools';
+		}
+
+		/* ---------- sidebar search ---------- */
+		function applySearch(query) {
+			var q = query.trim().toLowerCase();
+			var meta = el('search-meta');
+			var items = document.querySelectorAll('.tree-item');
+			if (q === '') {
+				items.forEach(function(it) { it.classList.remove('tree-node-hidden'); });
+				document.querySelectorAll('.tree-row.search-hit').forEach(function(r) { r.classList.remove('search-hit'); });
+				meta.textContent = '';
+				return;
+			}
+			var matched = new Set();
+			for (var path in nodesData) {
+				var nd = nodesData[path];
+				var toolText = (nd.tools || []).map(function(t) { return t.name + ' ' + (t.description || ''); }).join(' ');
+				var hay = ((nd.title || '') + ' ' + (nd.description || '') + ' ' + path + ' ' + toolText).toLowerCase();
+				if (hay.indexOf(q) !== -1) matched.add(path);
+			}
+			var keep = new Set();
+			matched.forEach(function(path) {
+				keep.add(path);
+				ancestorsOf(path).forEach(function(a) { keep.add(a); });
+			});
+			items.forEach(function(it) {
+				var path = it.getAttribute('data-item-path');
+				var show = keep.has(path);
+				it.classList.toggle('tree-node-hidden', !show);
+				var row = it.querySelector(':scope > .tree-row');
+				if (row) row.classList.toggle('search-hit', matched.has(path));
+			});
+			// expand all kept branches so matches are visible
+			keep.forEach(function(path) { setBranch(path, true); });
+			meta.textContent = matched.size + ' match' + (matched.size === 1 ? '' : 'es');
+		}
+
+		/* ---------- routing ---------- */
+		function applyHash() {
+			var hash = window.location.hash;
+			if (hash === '#tools') showAllTools();
+			else if (hash && hash.indexOf('#node-') === 0) showNodeDetail(decodeURIComponent(hash.substring(6)));
+			else showOverview();
+		}
+
+		/* ---------- event wiring (delegation) ---------- */
+		document.addEventListener('click', function(e) {
+			var t = e.target;
+
+			var chev = t.closest ? t.closest('[data-toggle]') : null;
+			if (chev && !chev.classList.contains('leaf')) {
+				e.stopPropagation();
+				var path = chev.getAttribute('data-toggle');
+				var kids = findKids(path);
+				setBranch(path, kids ? !kids.classList.contains('open') : true);
 				return;
 			}
 
-			html += '<div class="tools-grid">';
+			var row = t.closest ? t.closest('.tree-row[data-path]') : null;
+			if (row) { showNodeDetail(row.getAttribute('data-path')); autoCollapseSidebar(); return; }
 
-			visibleTools.forEach(function(entry, index) {
-				const tool = entry.tool;
-				const statusClass = tool.status === 'active' ? 'status-active' : 
-									tool.status === 'disabled' ? 'status-disabled' : 
-									tool.status === 'hidden' ? 'status-hidden' : 'status-unknown';
-				const isRegistered = registeredTools && typeof registeredTools === 'object' && registeredTools[tool.name] === true;
-				
-				html += '<div class="tool-card">';
-				html += '<div class="tool-card-header">';
-				html += '<div class="tool-name-large">' + escapeHtml(tool.name) + '</div>';
-				html += '<div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">';
-				html += '<span class="tool-status ' + statusClass + '">' + escapeHtml(tool.status || 'unknown') + '</span>';
-				if (isRegistered) {
-					html += '<span class="tool-badge tool-badge-registered" title="This tool is registered in FunctionRegistry">✓ Registered</span>';
-				} else {
-					html += '<span class="tool-badge tool-badge-unregistered" title="This tool is not registered in FunctionRegistry">⚠️ Not Registered</span>';
-				}
-				html += '</div>';
-				html += '</div>';
-				
-				if (tool.description) {
-					html += '<div class="tool-description-full">' + escapeHtml(tool.description) + '</div>';
-				}
+			var goto_ = t.closest ? t.closest('[data-goto]') : null;
+			if (goto_) { showNodeDetail(goto_.getAttribute('data-goto')); return; }
 
-				if (tool.input_schema) {
-					html += '<div class="tool-schema-section">';
-					html += '<div class="tool-schema-title" onclick="toggleSchema(\'schema-' + index + '\')">';
-					html += '<span class="toggle-icon" id="toggle-schema-' + index + '"></span>';
-					html += '<span>📋 Input Schema</span>';
-					html += '</div>';
-					html += '<div class="tool-schema-content" id="schema-' + index + '">';
-					html += '<pre class="json-viewer">' + JSON.stringify(tool.input_schema, null, 2) + '</pre>';
-					html += '</div>';
-					html += '</div>';
-				}
-
-				if (entry.nodes.length > 0) {
-					html += '<div class="tool-nodes-section">';
-					html += '<div class="tool-nodes-title">📍 Available in ' + entry.nodes.length + ' node(s):</div>';
-					html += '<ul class="tool-nodes-list">';
-					entry.nodes.forEach(function(node) {
-						html += '<li><a href="#" onclick="event.preventDefault(); showNodeDetail(\'' + escapeHtml(node.path) + '\'); return false;">' + 
-								escapeHtml(node.title) + ' <span class="node-path-small">(' + escapeHtml(node.path) + ')</span></a></li>';
-					});
-					html += '</ul>';
-					html += '</div>';
-				}
-
-				html += '</div>';
-			});
-
-			html += '</div>';
-			container.innerHTML = html;
-		}
-
-		function toggleSchema(schemaId) {
-			const schemaContent = document.getElementById(schemaId);
-			const toggleIcon = document.getElementById('toggle-' + schemaId);
-			
-			if (!schemaContent) return;
-			
-			if (schemaContent.classList.contains('expanded')) {
-				schemaContent.classList.remove('expanded');
-				if (toggleIcon) toggleIcon.classList.remove('expanded');
-			} else {
-				schemaContent.classList.add('expanded');
-				if (toggleIcon) toggleIcon.classList.add('expanded');
+			var acc = t.closest ? t.closest('[data-acc]') : null;
+			if (acc) {
+				var target = el(acc.getAttribute('data-acc'));
+				if (target) target.classList.toggle('open');
+				return;
 			}
-		}
 
-		window.addEventListener('hashchange', function() {
-			const hash = window.location.hash;
-			if (hash === '#tools') {
-				showAllTools();
-			} else if (hash && hash.startsWith('#node-')) {
-				const path = decodeURIComponent(hash.substring(6));
-				showNodeDetail(path);
-			} else {
-				showTreeView();
+			var fc = t.closest ? t.closest('.filter-chip[data-filter]') : null;
+			if (fc) { toolsFilter = fc.getAttribute('data-filter'); renderAllTools(); return; }
+
+			if (t.id === 'content-mode-btn') { toggleContentMode(t); return; }
+			if (t.id === 'content-copy-btn') {
+				var nd = nodesData[t.getAttribute('data-content-path')];
+				if (nd && nd.content) copyText(nd.content, t);
+				return;
 			}
 		});
 
-		renderTree();
-		setupSearch();
-		
-		if (window.location.hash === '#tools') {
-			showAllTools();
-		} else if (window.location.hash && window.location.hash.startsWith('#node-')) {
-			const path = decodeURIComponent(window.location.hash.substring(6));
-			showNodeDetail(path);
+		el('theme-toggle').addEventListener('click', toggleTheme);
+		el('sidebar-toggle').addEventListener('click', function() { el('sidebar').classList.toggle('collapsed'); });
+		el('expand-all').addEventListener('click', function() { setAllBranches(true); });
+		el('collapse-all').addEventListener('click', function() { setAllBranches(false); });
+		el('nav-overview').addEventListener('click', function(e) { e.preventDefault(); showOverview(); });
+		el('nav-tools').addEventListener('click', function(e) { e.preventDefault(); showAllTools(); });
+
+		var searchInput = el('search-input');
+		searchInput.addEventListener('input', function(e) { applySearch(e.target.value); });
+		searchInput.addEventListener('keydown', function(e) {
+			if (e.key === 'Escape') { searchInput.value = ''; applySearch(''); searchInput.blur(); }
+		});
+		document.addEventListener('keydown', function(e) {
+			if (e.key === '/' && document.activeElement !== searchInput &&
+				document.activeElement.tagName !== 'INPUT' && document.activeElement.tagName !== 'TEXTAREA') {
+				e.preventDefault();
+				searchInput.focus();
+			}
+		});
+
+		window.addEventListener('hashchange', applyHash);
+
+		/* ---------- boot ---------- */
+		// On narrow screens the sidebar is an overlay — keep it out of the way.
+		function autoCollapseSidebar() {
+			if (window.innerWidth <= 860) el('sidebar').classList.add('collapsed');
 		}
+		initTheme();
+		renderTree();
+		autoCollapseSidebar();
+		el('nav-tools-count').textContent = toolMap.size > 0 ? String(toolMap.size) : '';
+		applyHash();
 	</script>
 }
-

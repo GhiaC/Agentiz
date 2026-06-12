@@ -289,24 +289,20 @@ func (d *AgentizeDocument) GenerateHTMLWithRegisteredTools(registeredTools []str
 	// Always marshal as an object (even if empty) to ensure it's never undefined in JS
 	registeredToolsJSON, _ := json.Marshal(registeredToolsSet)
 
-	// Construct JavaScript assignment strings
+	// Construct JavaScript assignment statements. json.Marshal escapes <, > and &
+	// so the payload cannot terminate the <script> tag it is embedded into.
 	treeDataJS := "const treeData = " + string(treeJSON) + ";"
 	nodesDataJS := "const nodesData = " + string(nodesJSON) + ";"
 	// Use let instead of const so we can reassign if needed
 	registeredToolsJS := "let registeredTools = " + string(registeredToolsJSON) + ";"
 
-	// Render using templ
+	// Render using templ; the data statements are injected verbatim inside a
+	// dedicated <script> tag by the scripts component (via templ.Raw).
 	var buf bytes.Buffer
 	ctx := context.Background()
 	if err := components.Page(treeDataJS, nodesDataJS, registeredToolsJS).Render(ctx, &buf); err != nil {
 		return nil, err
 	}
 
-	// Replace the literal string placeholders with actual JavaScript
-	html := buf.Bytes()
-	html = bytes.ReplaceAll(html, []byte("{ treeData }"), []byte(treeDataJS))
-	html = bytes.ReplaceAll(html, []byte("{ nodesData }"), []byte(nodesDataJS))
-	html = bytes.ReplaceAll(html, []byte("{ registeredTools }"), []byte(registeredToolsJS))
-
-	return html, nil
+	return buf.Bytes(), nil
 }

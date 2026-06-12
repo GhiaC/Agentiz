@@ -70,6 +70,12 @@ type Agentize struct {
 
 	// Optional: planning orchestrator (nil = planning disabled)
 	orchestrator *planning.Orchestrator
+
+	// Admin credentials protecting the /agentize web pages. When empty, the
+	// values of AGENTIZE_ADMIN_USERNAME / AGENTIZE_ADMIN_PASSWORD are used; if
+	// those are also empty, the pages are served without authentication.
+	adminUsername string
+	adminPassword string
 }
 
 // Options allows configuring Agentize behavior

@@ -20,6 +20,16 @@ type Config struct {
 
 	// Scheduler configuration
 	Scheduler SchedulerConfig
+
+	// Admin dashboard credentials. When both are set, every /agentize web page
+	// (docs, graph, debug, metrics) requires login; /agentize/health stays open.
+	Admin AdminConfig
+}
+
+// AdminConfig holds the credentials protecting the /agentize web dashboard.
+type AdminConfig struct {
+	Username string
+	Password string
 }
 
 // HTTPConfig holds HTTP server configuration
@@ -61,6 +71,10 @@ func Load() (*Config, error) {
 		},
 		KnowledgePath: getEnvString("AGENTIZE_KNOWLEDGE_PATH", "./knowledge"),
 		Scheduler:     loadSchedulerConfig(),
+		Admin: AdminConfig{
+			Username: getEnvString("AGENTIZE_ADMIN_USERNAME", ""),
+			Password: getEnvString("AGENTIZE_ADMIN_PASSWORD", ""),
+		},
 	}
 
 	// HTTP is enabled if both HTTP config and feature flag are enabled
