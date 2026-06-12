@@ -30,8 +30,15 @@ type DebugStore interface {
 	GetSummarizationLogsBySession(sessionID string) ([]*model.SummarizationLog, error)
 	GetAllSummarizationLogs() ([]*model.SummarizationLog, error)
 
+	// Route traces (Core decision/forward DAGs). Get-by-id returns (nil, nil)
+	// when not found; the list queries return newest-first.
+	GetRouteTraceByID(traceID string) (*model.RouteTrace, error)
+	GetRouteTracesBySession(sessionID string) ([]*model.RouteTrace, error)
+	GetRouteTracesByUser(userID string) ([]*model.RouteTrace, error)
+	GetAllRouteTraces() ([]*model.RouteTrace, error)
+
 	// DeleteUserData deletes all sessions, messages, tool calls, summarization logs,
-	// and opened files for a user. Resets user's ActiveSessionIDs and SessionSeqs.
+	// route traces, and opened files for a user. Resets user's ActiveSessionIDs and SessionSeqs.
 	DeleteUserData(userID string) error
 }
 

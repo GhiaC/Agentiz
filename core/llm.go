@@ -144,6 +144,9 @@ func (ch *CoreHandler) processWithTools(
 		sessionID = coreSession.SessionID
 	}
 
+	// Route-trace recorder for this message (nil-safe when tracing is disabled).
+	rec := routeRecorderFrom(ctx)
+
 	for i := 0; i < maxIterations; i++ {
 		log.Log.Infof("[CoreHandler] 🔄 processWithTools iteration %d/%d | UserID: %s | Messages: %d",
 			i+1, maxIterations, userID, len(currentMessages))
@@ -206,7 +209,18 @@ func (ch *CoreHandler) processWithTools(
 		log.Log.Infof("[CoreHandler] 📊 LLM response | Iteration: %d | FinishReason: %s | ToolCalls: %d | ContentLen: %d",
 			i+1, choice.FinishReason, len(choice.Message.ToolCalls), len(choice.Message.Content))
 
+		// Record this LLM turn as a decision node on the routing DAG.
+		rec.Decision(
+			fmt.Sprintf("Decision %d", i+1),
+			modelName,
+			resp.Usage.TotalTokens,
+			llmDuration.Milliseconds(),
+			model.RouteStatusOK,
+			fmt.Sprintf("finish_reason=%s · tool_calls=%d", choice.FinishReason, len(choice.Message.ToolCalls)),
+		)
+
 		if len(choice.Message.ToolCalls) == 0 {
+			rec.Response(choice.Message.Content, false, model.RouteStatusOK)
 			return choice.Message.Content, nil
 		}
 
@@ -217,6 +231,25 @@ func (ch *CoreHandler) processWithTools(
 		var didDispatch bool
 
 		for _, toolCall := range choice.Message.ToolCalls {
+			isAgentCall := strings.HasPrefix(toolCall.Function.Name, "call_agent_")
+
+			// Once the Core has dispatched this turn, a second call_agent_* would
+			// run another full worker agent (real LLM cost + latency) only for the
+			// Core to discard its answer — it returns the FIRST agent's answer
+			// verbatim (see below). So skip the redundant dispatch, recording it on
+			// the DAG for visibility. Non-agent tools still run even after a
+			// dispatch: they may carry side effects the user wants (status updates,
+			// session changes, bans).
+			if isAgentCall && didDispatch {
+				result := ch.skipRedundantAgentCall(ctx, toolCall)
+				currentMessages = append(currentMessages, openai.ChatCompletionMessage{
+					Role:       openai.ChatMessageRoleTool,
+					Content:    result,
+					ToolCallID: toolCall.ID,
+				})
+				continue
+			}
+
 			result := ch.executeCoreTool(ctx, userID, sessionID, coreSession, messageID, toolCall)
 
 			log.Log.Infof("[CoreHandler] 🔧 Tool executed | Name: %s | ResultLen: %d",
@@ -233,13 +266,16 @@ func (ch *CoreHandler) processWithTools(
 			// re-enter Core's LLM, so no closed graph is formed. If deeper /
 			// longer planning is needed it must be done by the high-tier agent,
 			// not by Core looping back on itself.
-			if !didDispatch && strings.HasPrefix(toolCall.Function.Name, "call_agent_") {
+			if isAgentCall && !didDispatch {
 				dispatched = result
 				didDispatch = true
 			}
 		}
 
 		if didDispatch {
+			// The dispatched agent's answer is returned verbatim — record it as the
+			// terminal response, linked from the agent node it came from.
+			rec.Response(dispatched, true, model.RouteStatusOK)
 			log.Log.Infof("[CoreHandler] ↩️  Returning agent answer directly (Core dispatch only) | UserID: %s | ResultLen: %d",
 				userID, len(dispatched))
 			return dispatched, nil

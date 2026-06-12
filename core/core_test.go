@@ -3,11 +3,14 @@ package core
 import (
 	"context"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/ghiac/agentize/agentmanager"
 	"github.com/ghiac/agentize/engine"
+	"github.com/ghiac/agentize/fsrepo"
 	"github.com/ghiac/agentize/model"
 	"github.com/ghiac/agentize/planning"
 	"github.com/ghiac/agentize/store"
@@ -257,6 +260,244 @@ func TestProcessMessage_AgentNotReady(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "ready") && !strings.Contains(err.Error(), "Init") {
 		t.Errorf("expected ready/Init related error, got %q", err.Error())
+	}
+}
+
+// TestProcessMessage_RecordsRouteTrace verifies that handling a message records and
+// persists a Core routing DAG (user message → decision → response) with the right
+// metadata. This is the end-to-end wiring of the routing-DAG feature.
+func TestProcessMessage_RecordsRouteTrace(t *testing.T) {
+	ch, st := newTestCoreHandler(t, nil) // no agents → AgentManager.IsReady() is true
+	transport := &MockLLMTransport{}
+	transport.AddResponse(openai.ChatCompletionResponse{
+		Choices: []openai.ChatCompletionChoice{{
+			Message:      openai.ChatCompletionMessage{Content: "the answer", Role: openai.ChatMessageRoleAssistant},
+			FinishReason: openai.FinishReasonStop,
+		}},
+		Usage: openai.Usage{PromptTokens: 10, CompletionTokens: 5, TotalTokens: 15},
+	})
+	cfg := engine.LLMConfig{
+		APIKey:         "test",
+		Model:          "test-model",
+		HTTPClient:     &http.Client{Transport: transport},
+		BackupDisabled: true,
+	}
+	if err := ch.UseLLMConfig(cfg); err != nil {
+		t.Fatalf("UseLLMConfig: %v", err)
+	}
+	ch.userModeration = nil // skip the nonsense check so it doesn't consume a mock response
+
+	resp, err := ch.ProcessMessage(context.Background(), "user1", "hello there")
+	if err != nil {
+		t.Fatalf("ProcessMessage: %v", err)
+	}
+	if resp != "the answer" {
+		t.Fatalf("response = %q, want %q", resp, "the answer")
+	}
+
+	traces, err := st.GetRouteTracesByUser("user1")
+	if err != nil {
+		t.Fatalf("GetRouteTracesByUser: %v", err)
+	}
+	if len(traces) != 1 {
+		t.Fatalf("got %d traces, want 1", len(traces))
+	}
+	tr := traces[0]
+	if tr.Status != "ok" {
+		t.Errorf("status = %q, want ok", tr.Status)
+	}
+	if tr.Message != "hello there" {
+		t.Errorf("message = %q, want %q", tr.Message, "hello there")
+	}
+	if tr.Response != "the answer" {
+		t.Errorf("response = %q, want %q", tr.Response, "the answer")
+	}
+	if tr.TotalTokens != 15 {
+		t.Errorf("total tokens = %d, want 15", tr.TotalTokens)
+	}
+
+	var hasUser, hasDecision, hasResponse bool
+	for _, n := range tr.Nodes {
+		switch n.Type {
+		case model.RouteNodeUserMessage:
+			hasUser = true
+		case model.RouteNodeDecision:
+			hasDecision = true
+		case model.RouteNodeResponse:
+			hasResponse = true
+		}
+	}
+	if !hasUser || !hasDecision || !hasResponse {
+		t.Errorf("missing node types: user=%v decision=%v response=%v (nodes=%+v)", hasUser, hasDecision, hasResponse, tr.Nodes)
+	}
+}
+
+// newReadyAgentEngine builds a fully DB-ready worker Engine that shares the given
+// Sessions store (so the Core can dispatch into it) and is backed by its own
+// MockLLMTransport — letting a test detect whether the agent actually ran by
+// checking transport.Calls(). The API key is left empty so engine.UseLLMConfig
+// does not start a background summarization scheduler.
+func newReadyAgentEngine(t *testing.T, sessions store.Store, transport *MockLLMTransport) *engine.Engine {
+	t.Helper()
+	root := filepath.Join(t.TempDir(), "root")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatalf("MkdirAll root: %v", err)
+	}
+	for name, body := range map[string]string{
+		"node.yaml":  "id: \"root\"\ntitle: \"Root\"\n",
+		"node.md":    "# Root",
+		"tools.json": `{"tools": []}`,
+	} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(body), 0o644); err != nil {
+			t.Fatalf("WriteFile %s: %v", name, err)
+		}
+	}
+	repo, err := fsrepo.NewNodeRepository(filepath.Dir(root))
+	if err != nil {
+		t.Fatalf("NewNodeRepository: %v", err)
+	}
+	eng := &engine.Engine{Repo: repo, Sessions: sessions, Functions: model.NewFunctionRegistry()}
+	if err := eng.UseLLMConfig(engine.LLMConfig{
+		Model:          "agent-model",
+		HTTPClient:     &http.Client{Transport: transport},
+		BackupDisabled: true,
+	}); err != nil {
+		t.Fatalf("agent UseLLMConfig: %v", err)
+	}
+	if err := eng.Init(); err != nil {
+		t.Fatalf("agent Init: %v", err)
+	}
+	return eng
+}
+
+// newDispatchableCore wires a CoreHandler whose registered agents are all
+// dispatch-ready: they share one in-memory store and each has its own
+// MockLLMTransport. Returns the handler, the store (for route-trace lookups), the
+// Core's own transport, and the per-agent transports keyed by name.
+func newDispatchableCore(t *testing.T, agentNames ...string) (*CoreHandler, *store.SQLiteStore, *MockLLMTransport, map[string]*MockLLMTransport) {
+	t.Helper()
+	sqliteStore, err := store.NewSQLiteStore(":memory:")
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	cfg := model.DefaultSessionHandlerConfig()
+	cfg.DisableLogs = true
+	sh := model.NewSessionHandler(sqliteStore, cfg)
+	am := agentmanager.New(sh)
+
+	agentTx := make(map[string]*MockLLMTransport, len(agentNames))
+	for _, name := range agentNames {
+		tx := &MockLLMTransport{}
+		agentTx[name] = tx
+		ac := agentmanager.AgentConfig{
+			Name:        name,
+			DisplayName: name,
+			AgentType:   model.AgentType(name),
+			CostTier:    agentmanager.CostTierLow,
+		}
+		if err := am.Register(ac, newReadyAgentEngine(t, sqliteStore, tx)); err != nil {
+			t.Fatalf("Register %s: %v", name, err)
+		}
+	}
+
+	ch := NewCoreHandler(sh, am, DefaultCoreHandlerConfig())
+	coreTx := &MockLLMTransport{}
+	if err := ch.UseLLMConfig(engine.LLMConfig{
+		APIKey:         "test",
+		Model:          "core-model",
+		HTTPClient:     &http.Client{Transport: coreTx},
+		BackupDisabled: true,
+	}); err != nil {
+		t.Fatalf("core UseLLMConfig: %v", err)
+	}
+	ch.userModeration = nil // skip the nonsense check so it doesn't consume a mock response
+	return ch, sqliteStore, coreTx, agentTx
+}
+
+// TestProcessMessage_MultipleAgentCalls_OnlyFirstDispatched verifies that when a
+// single Core turn emits MORE THAN ONE call_agent_* tool call, only the first
+// agent actually runs. The Core dispatches only — it returns the first agent's
+// answer verbatim — so running later agents would burn a full worker-agent call
+// (LLM cost + latency) for an answer that is discarded. The redundant call is
+// skipped and recorded on the routing DAG as a skipped dispatch.
+func TestProcessMessage_MultipleAgentCalls_OnlyFirstDispatched(t *testing.T) {
+	ch, st, coreTx, agentTx := newDispatchableCore(t, "alpha", "beta")
+
+	// One Core turn that asks to call two agents at once.
+	coreTx.AddResponse(openai.ChatCompletionResponse{
+		Choices: []openai.ChatCompletionChoice{{
+			Message: openai.ChatCompletionMessage{
+				Role: openai.ChatMessageRoleAssistant,
+				ToolCalls: []openai.ToolCall{
+					{ID: "c1", Type: openai.ToolTypeFunction, Function: openai.FunctionCall{Name: "call_agent_alpha", Arguments: `{"message":"hi alpha"}`}},
+					{ID: "c2", Type: openai.ToolTypeFunction, Function: openai.FunctionCall{Name: "call_agent_beta", Arguments: `{"message":"hi beta"}`}},
+				},
+			},
+			FinishReason: openai.FinishReasonToolCalls,
+		}},
+		Usage: openai.Usage{PromptTokens: 10, CompletionTokens: 5, TotalTokens: 15},
+	})
+	// alpha answers; beta would answer "beta answer" if it (wrongly) ran.
+	agentTx["alpha"].AddResponse(openai.ChatCompletionResponse{
+		Choices: []openai.ChatCompletionChoice{{
+			Message:      openai.ChatCompletionMessage{Role: openai.ChatMessageRoleAssistant, Content: "alpha answer"},
+			FinishReason: openai.FinishReasonStop,
+		}},
+		Usage: openai.Usage{PromptTokens: 3, CompletionTokens: 2, TotalTokens: 5},
+	})
+	agentTx["beta"].AddResponse(openai.ChatCompletionResponse{
+		Choices: []openai.ChatCompletionChoice{{
+			Message:      openai.ChatCompletionMessage{Role: openai.ChatMessageRoleAssistant, Content: "beta answer"},
+			FinishReason: openai.FinishReasonStop,
+		}},
+	})
+
+	resp, err := ch.ProcessMessage(context.Background(), "user1", "do both")
+	if err != nil {
+		t.Fatalf("ProcessMessage: %v", err)
+	}
+
+	// The first agent is dispatched and its answer returned verbatim.
+	if resp != "alpha answer" {
+		t.Fatalf("response = %q, want %q (first agent's answer)", resp, "alpha answer")
+	}
+	// The second agent must never run: its LLM transport stays untouched.
+	if got := agentTx["beta"].Calls(); got != 0 {
+		t.Errorf("beta agent made %d LLM call(s); want 0 (redundant call_agent_* must be skipped)", got)
+	}
+	if got := agentTx["alpha"].Calls(); got == 0 {
+		t.Error("alpha agent never ran; want it dispatched")
+	}
+
+	// The routing DAG records alpha as a real dispatch and beta as a skipped one.
+	traces, err := st.GetRouteTracesByUser("user1")
+	if err != nil {
+		t.Fatalf("GetRouteTracesByUser: %v", err)
+	}
+	if len(traces) != 1 {
+		t.Fatalf("got %d traces, want 1", len(traces))
+	}
+	tr := traces[0]
+
+	var ran, skipped []model.RouteNode
+	for _, n := range tr.Nodes {
+		if n.Type != model.RouteNodeAgentDispatch {
+			continue
+		}
+		if n.Status == model.RouteStatusSkipped {
+			skipped = append(skipped, n)
+		} else {
+			ran = append(ran, n)
+		}
+	}
+	if len(ran) != 1 || ran[0].Agent != "alpha" {
+		t.Errorf("dispatched nodes = %+v, want exactly one for alpha", ran)
+	}
+	if len(skipped) != 1 || skipped[0].Agent != "beta" {
+		t.Errorf("skipped nodes = %+v, want exactly one for beta", skipped)
+	}
+	if agents := tr.DispatchedAgents(); len(agents) != 1 || agents[0] != "alpha" {
+		t.Errorf("DispatchedAgents() = %v, want [alpha] (skipped agent excluded)", agents)
 	}
 }
 

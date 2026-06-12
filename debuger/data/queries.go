@@ -262,6 +262,35 @@ func (dp *DataProvider) GetToolCallByToolID(toolID string) (*model.ToolCall, err
 	return dp.store.GetToolCallByToolID(toolID)
 }
 
+// GetAllRouteTraces returns all Core routing-decision DAGs, newest first.
+func (dp *DataProvider) GetAllRouteTraces() ([]*model.RouteTrace, error) {
+	traces, err := dp.store.GetAllRouteTraces()
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(traces, func(i, j int) bool {
+		return traces[i].CreatedAt.After(traces[j].CreatedAt)
+	})
+	return traces, nil
+}
+
+// GetRouteTracesBySession returns routing DAGs for a session, newest first.
+func (dp *DataProvider) GetRouteTracesBySession(sessionID string) ([]*model.RouteTrace, error) {
+	traces, err := dp.store.GetRouteTracesBySession(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(traces, func(i, j int) bool {
+		return traces[i].CreatedAt.After(traces[j].CreatedAt)
+	})
+	return traces, nil
+}
+
+// GetRouteTraceByID returns a single routing DAG by its trace ID, or (nil, nil).
+func (dp *DataProvider) GetRouteTraceByID(traceID string) (*model.RouteTrace, error) {
+	return dp.store.GetRouteTraceByID(traceID)
+}
+
 // GetAllSummarizationLogs returns all summarization logs
 func (dp *DataProvider) GetAllSummarizationLogs() ([]*model.SummarizationLog, error) {
 	logs, err := dp.store.GetAllSummarizationLogs()

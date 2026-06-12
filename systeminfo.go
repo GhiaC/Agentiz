@@ -45,6 +45,16 @@ func (ag *Agentize) SystemInfo() debuger.SystemInfo {
 		{Key: "Scheduler", Value: boolLabel(schedulerRunning, "running", "stopped")},
 		{Key: "Image editor", Value: imageEditor},
 	}
+
+	// Count recorded routing DAGs (one per Core-processed message), best-effort.
+	if traces, err := st.GetAllRouteTraces(); err == nil {
+		info.More = append(info.More, debuger.InfoKV{Key: "Route traces", Value: fmt.Sprintf("%d", len(traces))})
+	}
+
+	// Application-supplied extra rows (e.g. config provenance).
+	if ag.extraSystemInfoProvider != nil {
+		info.More = append(info.More, ag.extraSystemInfoProvider()...)
+	}
 	return info
 }
 

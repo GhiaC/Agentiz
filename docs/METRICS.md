@@ -62,6 +62,15 @@ A ready-made Grafana dashboard is in [`grafana/agentize-dashboard.json`](./grafa
 | `agent_routing_total` | counter | `agent`, `status` |
 | `agent_escalations_total` | counter | `agent` |
 
+### Routing trace (Core decision/forward DAG)
+| Metric | Type | Labels |
+|--------|------|--------|
+| `route_trace_recorded_total` | counter | `status` (ok/error) — one per Core-processed message; `error` = failed message or failed persist |
+| `route_trace_nodes` | histogram | — (nodes per DAG: decisions + tool calls + forwards + response) |
+
+See [ROUTING_DAG.md](./ROUTING_DAG.md) for the trace this comes from and the
+`/agentize/debug/routes` visualization.
+
 ### Backup LLM chain
 | Metric | Type | Labels |
 |--------|------|--------|
@@ -154,6 +163,10 @@ histogram_quantile(0.95, rate(agentize_scheduler_run_duration_seconds_bucket[1h]
 # Agent escalation ratio
 sum(rate(agentize_agent_escalations_total[30m])) / sum(rate(agentize_agent_routing_total[30m]))
 
+# Routing DAGs recorded per minute, and median DAG size (decision complexity)
+sum by (status) (rate(agentize_route_trace_recorded_total[5m])) * 60
+histogram_quantile(0.5, sum by (le) (rate(agentize_route_trace_nodes_bucket[1h])))
+
 # File operations by action (/min), and p95 latency
 sum by (operation, status) (rate(agentize_file_operations_total[5m])) * 60
 histogram_quantile(0.95, sum by (le, operation) (rate(agentize_file_operation_duration_seconds_bucket[10m])))
@@ -217,6 +230,7 @@ files).
 | Core message lifecycle + moderation + queue | `core/core.go` |
 | Core LLM loop | `core/llm.go` (`processWithTools`) |
 | Core tools + agent routing/escalation | `core/tools.go` |
+| Routing-decision DAG (record + persist) | `core/route_trace.go`, `core/core.go` |
 | Vision LLM | `core/vision.go` |
 | Plan execution | `core/planning.go` |
 | Agent message lifecycle + LLM + tools + queue | `engine/user_agent.go` |

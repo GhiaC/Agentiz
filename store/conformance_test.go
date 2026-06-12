@@ -135,6 +135,7 @@ func TestStoreConformance(t *testing.T) {
 			run("ToolCalls", testToolCalls)
 			run("ToolCallNotFound", testToolCallNotFound)
 			run("SummarizationLogs", testSummarizationLogs)
+			run("RouteTraces", testRouteTraces)
 			run("VisitedNodes", testVisitedNodes)
 			run("DeleteUserData", testDeleteUserData)
 			run("BackendInfo", testBackendInfo)
@@ -513,6 +514,79 @@ func testSummarizationLogs(t *testing.T, st Store) {
 	}
 }
 
+// buildRouteTrace assembles a small dispatch trace via the model builder so the
+// test exercises the same DAG shape the Core produces in production.
+func buildRouteTrace(s *model.Session, msg, agent string, createdAt time.Time) *model.RouteTrace {
+	b := model.NewRouteTraceBuilder(s, msg)
+	b.Decision("Decision", "test-model", 42, 10, model.RouteStatusOK, "finish_reason=tool_calls")
+	b.Dispatch(agent, "Agent "+agent, msg, model.RouteStatusOK, 100)
+	b.Response("final answer", true, model.RouteStatusOK)
+	tr := b.Build(0)
+	tr.CreatedAt = createdAt
+	return tr
+}
+
+func testRouteTraces(t *testing.T, st Store) {
+	s := newSession("user-1", model.AgentTypeCore)
+	mustPutSession(t, st, s)
+
+	base := time.Now().Add(-time.Hour)
+	t1 := buildRouteTrace(s, "first", "low", base.Add(1*time.Second))
+	t2 := buildRouteTrace(s, "second", "high", base.Add(2*time.Second))
+	for _, tr := range []*model.RouteTrace{t1, t2} {
+		if err := st.PutRouteTrace(tr); err != nil {
+			t.Fatalf("PutRouteTrace %s: %v", tr.TraceID, err)
+		}
+	}
+
+	// Get-by-id round-trips the full DAG (nodes + edges + dispatched agent).
+	got, err := st.GetRouteTraceByID(t1.TraceID)
+	if err != nil || got == nil {
+		t.Fatalf("GetRouteTraceByID: got=%v err=%v", got, err)
+	}
+	if len(got.Nodes) != len(t1.Nodes) || len(got.Edges) != len(t1.Edges) {
+		t.Errorf("DAG not preserved: nodes=%d/%d edges=%d/%d", len(got.Nodes), len(t1.Nodes), len(got.Edges), len(t1.Edges))
+	}
+	if agents := got.DispatchedAgents(); len(agents) != 1 || agents[0] != "low" {
+		t.Errorf("DispatchedAgents = %v, want [low]", agents)
+	}
+	if got.TotalTokens != 42 {
+		t.Errorf("TotalTokens = %d, want 42", got.TotalTokens)
+	}
+
+	// Not found -> (nil, nil), never an error.
+	if missing, err := st.GetRouteTraceByID("nope-rt9999"); err != nil || missing != nil {
+		t.Errorf("GetRouteTraceByID(missing) = %v, %v; want nil, nil", missing, err)
+	}
+
+	// Contract: newest-first ordering.
+	bySession, err := st.GetRouteTracesBySession(s.SessionID)
+	if err != nil {
+		t.Fatalf("GetRouteTracesBySession: %v", err)
+	}
+	if len(bySession) != 2 {
+		t.Fatalf("GetRouteTracesBySession = %d, want 2", len(bySession))
+	}
+	if bySession[0].TraceID != t2.TraceID || bySession[1].TraceID != t1.TraceID {
+		t.Errorf("not newest-first: [%s, %s]", bySession[0].TraceID, bySession[1].TraceID)
+	}
+	if byUser, _ := st.GetRouteTracesByUser("user-1"); len(byUser) != 2 {
+		t.Errorf("GetRouteTracesByUser = %d, want 2", len(byUser))
+	}
+	if all, _ := st.GetAllRouteTraces(); len(all) != 2 {
+		t.Errorf("GetAllRouteTraces = %d, want 2", len(all))
+	}
+
+	// Contract: re-putting the same TraceID upserts (no duplicate).
+	t1.Status = "error"
+	if err := st.PutRouteTrace(t1); err != nil {
+		t.Fatalf("PutRouteTrace (upsert): %v", err)
+	}
+	if all, _ := st.GetAllRouteTraces(); len(all) != 2 {
+		t.Errorf("upsert created a duplicate: len = %d, want 2", len(all))
+	}
+}
+
 func testVisitedNodes(t *testing.T, st Store) {
 	st.AddVisitedNode("user-1", &model.NodeDigest{Path: "root", ID: "n1", Title: "Root"})
 	st.AddVisitedNode("user-1", &model.NodeDigest{Path: "root/a", ID: "n2", Title: "A"})
@@ -548,6 +622,10 @@ func testDeleteUserData(t *testing.T, st Store) {
 	if err := st.PutUserFile(uf); err != nil {
 		t.Fatalf("PutUserFile: %v", err)
 	}
+	tr := buildRouteTrace(s, "hi", "low", time.Now())
+	if err := st.PutRouteTrace(tr); err != nil {
+		t.Fatalf("PutRouteTrace: %v", err)
+	}
 
 	if err := st.DeleteUserData("user-del"); err != nil {
 		t.Fatalf("DeleteUserData: %v", err)
@@ -561,6 +639,9 @@ func testDeleteUserData(t *testing.T, st Store) {
 	}
 	if files, _ := st.GetUserFilesByUser("user-del"); len(files) != 0 {
 		t.Errorf("user files remain after DeleteUserData: %d", len(files))
+	}
+	if traces, _ := st.GetRouteTracesByUser("user-del"); len(traces) != 0 {
+		t.Errorf("route traces remain after DeleteUserData: %d", len(traces))
 	}
 }
 

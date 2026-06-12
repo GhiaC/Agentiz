@@ -8,8 +8,8 @@ and MongoDB is a configuration change, never a code change.
 ## Unified interface & `store.Open`
 
 `store.Store` is the single, complete contract (sessions, core sessions, users,
-messages, opened files, user files, tool calls, summarization logs, visited
-nodes, lifecycle, and `BackendInfo`). `SQLiteStore`, `MongoDBStore`, and the
+messages, opened files, user files, tool calls, summarization logs, route traces,
+visited nodes, lifecycle, and `BackendInfo`). `SQLiteStore`, `MongoDBStore`, and the
 cached `DBStore` all implement it; a compile-time assertion in `store.go` fails
 the build if any backend ever drifts.
 
@@ -31,8 +31,8 @@ st, err := store.Open(store.Config{Backend: "mongodb", MongoURI: "mongodb://loca
   `GetToolCallByID`, `GetToolCallByToolID`) return `(nil, nil)` when not found.
 - `Get(sessionID)` returns an error when the session does not exist.
 - `Put*` methods are upserts.
-- List orderings are fixed (messages & summarization logs newest-first; opened
-  files oldest-first).
+- List orderings are fixed (messages, summarization logs & route traces
+  newest-first; opened files oldest-first).
 - Timestamps round-trip at one-second precision.
 
 Parity is enforced by `conformance_test.go`, which runs the same suite against

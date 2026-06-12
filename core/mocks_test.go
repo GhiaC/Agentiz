@@ -238,3 +238,12 @@ func (t *MockLLMTransport) Reset() {
 	defer t.mu.Unlock()
 	t.Index = 0
 }
+
+// Calls returns how many responses have been consumed — i.e. how many LLM
+// round-trips have hit this transport. Used to assert whether a worker agent
+// actually ran.
+func (t *MockLLMTransport) Calls() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.Index
+}

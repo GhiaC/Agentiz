@@ -175,6 +175,35 @@ func AgentEscalation(agent string) {
 }
 
 // ---------------------------------------------------------------------------
+// Routing trace (Core decision/forward DAG)
+// ---------------------------------------------------------------------------
+
+var (
+	routeTraces = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace, Subsystem: "route_trace", Name: "recorded_total",
+		Help: "Core routing-decision DAGs recorded, by status (ok|error). " +
+			"\"error\" covers both a failed message and a failed trace persist.",
+	}, []string{"status"})
+
+	routeTraceNodes = promauto.NewHistogram(prometheus.HistogramOpts{
+		Namespace: namespace, Subsystem: "route_trace", Name: "nodes",
+		Help:    "Number of nodes (decisions + tool calls + forwards + response) per routing DAG.",
+		Buckets: []float64{1, 2, 3, 4, 5, 7, 10, 15, 20, 30, 50},
+	})
+)
+
+// RouteTrace records one Core routing DAG: its terminal status and node count.
+func RouteTrace(status string, nodes int) {
+	if status == "" {
+		status = "unknown"
+	}
+	routeTraces.WithLabelValues(status).Inc()
+	if nodes > 0 {
+		routeTraceNodes.Observe(float64(nodes))
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Backup LLM chain
 // ---------------------------------------------------------------------------
 

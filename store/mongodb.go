@@ -34,6 +34,7 @@ type MongoDBStore struct {
 	openedFilesCollection       *mongo.Collection
 	userFilesCollection         *mongo.Collection
 	summarizationLogsCollection *mongo.Collection
+	routeTracesCollection       *mongo.Collection
 
 	// UserNodes tracks visited nodes for each user (user-level, not session-level)
 	userNodes sync.Map
@@ -132,6 +133,7 @@ func NewMongoDBStore(config MongoDBStoreConfig) (*MongoDBStore, error) {
 		openedFilesCollection:       database.Collection("opened_files"),
 		userFilesCollection:         database.Collection("user_files"),
 		summarizationLogsCollection: database.Collection("summarization_logs"),
+		routeTracesCollection:       database.Collection("route_traces"),
 		userLock:                    make(map[string]*sync.Mutex),
 	}
 
@@ -352,6 +354,32 @@ func (s *MongoDBStore) initIndexes(ctx context.Context) error {
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create summarization_logs session_id+created_at index: %w", err)
+	}
+
+	// ============================================================================
+	// RouteTraces Collection Indexes
+	// ============================================================================
+
+	// Index for GetRouteTracesBySession: session_id + created_at DESC (newest first)
+	_, err = s.routeTracesCollection.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{
+			{Key: "session_id", Value: 1},
+			{Key: "created_at", Value: -1},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create route_traces session_id+created_at index: %w", err)
+	}
+
+	// Index for GetRouteTracesByUser: user_id + created_at DESC (newest first)
+	_, err = s.routeTracesCollection.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{
+			{Key: "user_id", Value: 1},
+			{Key: "created_at", Value: -1},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create route_traces user_id+created_at index: %w", err)
 	}
 
 	return nil
@@ -640,6 +668,11 @@ func (s *MongoDBStore) DeleteUserData(userID string) error {
 	// Delete user_files by user_id
 	if _, err := s.userFilesCollection.DeleteMany(ctx, userFilter); err != nil {
 		return fmt.Errorf("failed to delete user_files: %w", err)
+	}
+
+	// Delete route_traces by user_id
+	if _, err := s.routeTracesCollection.DeleteMany(ctx, userFilter); err != nil {
+		return fmt.Errorf("failed to delete route_traces: %w", err)
 	}
 
 	// Delete tool_calls and summarization_logs by session_id (these don't have user_id at top level)
@@ -1993,6 +2026,114 @@ func (s *MongoDBStore) GetAllSummarizationLogs() ([]*model.SummarizationLog, err
 	}
 
 	return logs, cursor.Err()
+}
+
+// ============================================================================
+// Route traces (Core decision/forward DAGs)
+// ============================================================================
+
+// routeTraceDocument represents a route trace document in MongoDB. The full DAG
+// is JSON-serialized into Data; SessionID/UserID are denormalized for indexed
+// lookups, mirroring the SQLite columns for contract parity.
+type routeTraceDocument struct {
+	ID        string    `bson:"_id"`
+	SessionID string    `bson:"session_id"`
+	UserID    string    `bson:"user_id"`
+	Status    string    `bson:"status"`
+	Data      string    `bson:"data"`
+	CreatedAt time.Time `bson:"created_at"`
+}
+
+// PutRouteTrace upserts a route trace keyed by TraceID.
+func (s *MongoDBStore) PutRouteTrace(trace *model.RouteTrace) error {
+	if trace == nil {
+		return fmt.Errorf("route trace cannot be nil")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	data, err := json.Marshal(trace)
+	if err != nil {
+		return fmt.Errorf("failed to marshal route trace: %w", err)
+	}
+
+	doc := routeTraceDocument{
+		ID:        trace.TraceID,
+		SessionID: trace.SessionID,
+		UserID:    trace.UserID,
+		Status:    trace.Status,
+		Data:      string(data),
+		CreatedAt: trace.CreatedAt,
+	}
+
+	opts := options.Replace().SetUpsert(true)
+	_, err = s.routeTracesCollection.ReplaceOne(ctx, bson.M{"_id": trace.TraceID}, doc, opts)
+	if err != nil {
+		return fmt.Errorf("failed to store route trace: %w", err)
+	}
+	return nil
+}
+
+// GetRouteTraceByID returns the trace by id, or (nil, nil) when not found.
+func (s *MongoDBStore) GetRouteTraceByID(traceID string) (*model.RouteTrace, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	var doc routeTraceDocument
+	err := s.routeTracesCollection.FindOne(ctx, bson.M{"_id": traceID}).Decode(&doc)
+	if err == mongo.ErrNoDocuments {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to query route trace: %w", err)
+	}
+	trace := &model.RouteTrace{}
+	if err := unmarshalJSONOrBSON(doc.Data, trace); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal route trace: %w", err)
+	}
+	return trace, nil
+}
+
+// GetRouteTracesBySession returns all traces for a session, newest first.
+func (s *MongoDBStore) GetRouteTracesBySession(sessionID string) ([]*model.RouteTrace, error) {
+	return s.queryRouteTraces(bson.M{"session_id": sessionID})
+}
+
+// GetRouteTracesByUser returns all traces for a user, newest first.
+func (s *MongoDBStore) GetRouteTracesByUser(userID string) ([]*model.RouteTrace, error) {
+	return s.queryRouteTraces(bson.M{"user_id": userID})
+}
+
+// GetAllRouteTraces returns all traces across all sessions, newest first.
+func (s *MongoDBStore) GetAllRouteTraces() ([]*model.RouteTrace, error) {
+	return s.queryRouteTraces(bson.M{})
+}
+
+// queryRouteTraces runs a filter and decodes the matching traces, newest first.
+func (s *MongoDBStore) queryRouteTraces(filter bson.M) ([]*model.RouteTrace, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cursor, err := s.routeTracesCollection.Find(ctx, filter, options.Find().SetSort(bson.D{{Key: "created_at", Value: -1}, {Key: "_id", Value: -1}}))
+	if err != nil {
+		return nil, fmt.Errorf("failed to query route traces: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	var traces []*model.RouteTrace
+	for cursor.Next(ctx) {
+		var doc routeTraceDocument
+		if err := cursor.Decode(&doc); err != nil {
+			return nil, fmt.Errorf("failed to decode route trace: %w", err)
+		}
+		trace := &model.RouteTrace{}
+		if err := unmarshalJSONOrBSON(doc.Data, trace); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal route trace: %w", err)
+		}
+		traces = append(traces, trace)
+	}
+	return traces, cursor.Err()
 }
 
 // Ensure MongoDBStore implements model.SessionStore and debuger.DebugStore

@@ -61,6 +61,10 @@ type Agentize struct {
 	// Optional: provider for user billing/credit HTML on debug user detail page
 	userBillingHTMLProvider debuger.UserBillingHTMLProvider
 
+	// Optional: provider for extra rows appended to the System Info panel's "more
+	// info" section (e.g. application config provenance). Called on each render.
+	extraSystemInfoProvider func() []debuger.InfoKV
+
 	// Optional: hook called after DeleteUserData (sessions/messages) so app can delete quota/consumption etc.
 	userDeleteDataHook func(userID string) error
 
@@ -587,6 +591,13 @@ func (ag *Agentize) AddDebugPage(page DebugPage) {
 // When set, the returned HTML is rendered on the user detail page below the user info card.
 func (ag *Agentize) SetUserBillingHTMLProvider(fn debuger.UserBillingHTMLProvider) {
 	ag.userBillingHTMLProvider = fn
+}
+
+// SetExtraSystemInfoProvider sets an optional provider whose rows are appended to
+// the System Info panel's "more info" section on every render. Applications use it
+// to surface their own runtime facts (e.g. where each config value was read from).
+func (ag *Agentize) SetExtraSystemInfoProvider(fn func() []debuger.InfoKV) {
+	ag.extraSystemInfoProvider = fn
 }
 
 // SetUserDeleteDataHook sets an optional hook called after DeleteUserData (sessions, messages) for a user.

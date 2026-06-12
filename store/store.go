@@ -64,6 +64,10 @@ type Store interface {
 	PutToolCall(toolCall *model.ToolCall) error
 	UpdateToolCallResponse(toolID string, response string, execErr error) error
 
+	// PutRouteTrace upserts a Core routing-decision DAG for one user message.
+	// The read side lives on debuger.DebugStore (GetRouteTrace* / GetAllRouteTraces).
+	PutRouteTrace(trace *model.RouteTrace) error
+
 	// --- Visited-node tracking (user-scoped, in-memory, not persisted) ---
 
 	AddVisitedNode(userID string, nodeDigest *model.NodeDigest)

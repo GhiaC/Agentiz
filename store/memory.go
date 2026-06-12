@@ -471,6 +471,31 @@ func (s *DBStore) GetAllSummarizationLogs() ([]*model.SummarizationLog, error) {
 	return s.sqliteStore.GetAllSummarizationLogs()
 }
 
+// PutRouteTrace stores a Core routing-decision DAG (delegates to SQLiteStore)
+func (s *DBStore) PutRouteTrace(trace *model.RouteTrace) error {
+	return s.sqliteStore.PutRouteTrace(trace)
+}
+
+// GetRouteTraceByID returns a route trace by ID (delegates to SQLiteStore)
+func (s *DBStore) GetRouteTraceByID(traceID string) (*model.RouteTrace, error) {
+	return s.sqliteStore.GetRouteTraceByID(traceID)
+}
+
+// GetRouteTracesBySession returns route traces for a session (delegates to SQLiteStore)
+func (s *DBStore) GetRouteTracesBySession(sessionID string) ([]*model.RouteTrace, error) {
+	return s.sqliteStore.GetRouteTracesBySession(sessionID)
+}
+
+// GetRouteTracesByUser returns route traces for a user (delegates to SQLiteStore)
+func (s *DBStore) GetRouteTracesByUser(userID string) ([]*model.RouteTrace, error) {
+	return s.sqliteStore.GetRouteTracesByUser(userID)
+}
+
+// GetAllRouteTraces returns all route traces (delegates to SQLiteStore)
+func (s *DBStore) GetAllRouteTraces() ([]*model.RouteTrace, error) {
+	return s.sqliteStore.GetAllRouteTraces()
+}
+
 // PutToolCall stores a tool call (delegates to SQLiteStore)
 func (s *DBStore) PutToolCall(toolCall *model.ToolCall) error {
 	return s.sqliteStore.PutToolCall(toolCall)

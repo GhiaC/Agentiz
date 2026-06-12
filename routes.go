@@ -38,6 +38,8 @@ func (ag *Agentize) RegisterRoutes(router *gin.Engine) {
 	router.GET("/agentize/debug/documents/:fileID/raw", ag.handleDebugDocumentRaw)
 	router.GET("/agentize/debug/tool-calls", ag.handleDebugToolCalls)
 	router.GET("/agentize/debug/tool-calls/:toolID", ag.handleDebugToolCallDetail)
+	router.GET("/agentize/debug/routes", ag.handleDebugRoutes)
+	router.GET("/agentize/debug/routes/:traceID", ag.handleDebugRouteDetail)
 	router.GET("/agentize/debug/summarized", ag.handleDebugSummarized)
 	router.GET("/agentize/debug/summarized/:logID", ag.handleDebugSummarizationLogDetail)
 
@@ -459,6 +461,49 @@ func (ag *Agentize) handleDebugToolCallDetail(c *gin.Context) {
 	html, err := pages.RenderToolCallDetail(handler, toolID)
 	if err != nil {
 		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to generate tool call detail page: %v", err)})
+		return
+	}
+
+	c.Header("Content-Type", "text/html; charset=utf-8")
+	c.String(200, html)
+}
+
+// handleDebugRoutes handles the routing-DAG list page (one trace per user message)
+func (ag *Agentize) handleDebugRoutes(c *gin.Context) {
+	handler, err := ag.createDebugHandler()
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+
+	page := getPageParam(c)
+	html, err := pages.RenderRoutes(handler, page)
+	if err != nil {
+		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to generate routes page: %v", err)})
+		return
+	}
+
+	c.Header("Content-Type", "text/html; charset=utf-8")
+	c.String(200, html)
+}
+
+// handleDebugRouteDetail handles the routing-DAG detail page (interactive graph)
+func (ag *Agentize) handleDebugRouteDetail(c *gin.Context) {
+	traceID := c.Param("traceID")
+	if traceID == "" {
+		c.JSON(400, gin.H{"error": "traceID parameter is required"})
+		return
+	}
+
+	handler, err := ag.createDebugHandler()
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+
+	html, err := pages.RenderRouteDetail(handler, traceID)
+	if err != nil {
+		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to generate route detail page: %v", err)})
 		return
 	}
 

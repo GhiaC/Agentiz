@@ -82,6 +82,7 @@ type Session struct {
 	OpenedFileSeq       int // Sequence counter for opened files
 	UserFileSeq         int // Sequence counter for user files (uploaded/generated)
 	SummarizationLogSeq int // Sequence counter for summarization logs
+	TraceSeq            int // Sequence counter for route traces (Core decision DAGs)
 
 	// ==================== Internal (not persisted) ====================
 	seqMu sync.Mutex `bson:"-" json:"-"` // Mutex for thread-safe sequence operations
@@ -122,6 +123,7 @@ func NewSessionWithID(userID string, sessionID string, agentType AgentType) *Ses
 		OpenedFileSeq:       0,
 		UserFileSeq:         0,
 		SummarizationLogSeq: 0,
+		TraceSeq:            0,
 	}
 }
 
@@ -282,6 +284,17 @@ func (s *Session) GenerateSummarizationLogIDWithSeq() (string, int) {
 	return logID, s.SummarizationLogSeq
 }
 
+// GenerateRouteTraceID generates a unique route-trace ID for this session.
+// Format: {SessionID}-rt{SeqID}
+// Example: user123-core-s0001-rt0001
+// Thread-safe via mutex.
+func (s *Session) GenerateRouteTraceID() string {
+	s.seqMu.Lock()
+	defer s.seqMu.Unlock()
+	s.TraceSeq++
+	return fmt.Sprintf("%s-rt%04d", s.SessionID, s.TraceSeq)
+}
+
 // ==================== Backward Compatibility Methods ====================
 
 // GetConversationState returns a ConversationState-like view of the session
@@ -327,6 +340,7 @@ func (s *Session) Clone() *Session {
 		OpenedFileSeq:       s.OpenedFileSeq,
 		UserFileSeq:         s.UserFileSeq,
 		SummarizationLogSeq: s.SummarizationLogSeq,
+		TraceSeq:            s.TraceSeq,
 		// seqMu is NOT copied - new mutex for the clone
 	}
 

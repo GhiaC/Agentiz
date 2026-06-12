@@ -219,6 +219,8 @@ func (ch *CoreHandler) executeCoreTool(
 		}); cbErr != nil {
 			result := engine.FormatBlockedActionResult(cbErr)
 			persister.Update(toolID, result, cbErr)
+			// Surface the block on the routing DAG (e.g. a quota callback denied it).
+			routeRecorderFrom(ctx).Tool(model.RouteNodeToolCall, toolCall.Function.Name, toolDetail, "blocked: "+cbErr.Error(), model.RouteStatusBlocked, 0)
 			return result
 		}
 	}
@@ -245,7 +247,44 @@ func (ch *CoreHandler) executeCoreTool(
 	engine.NotifyStatus(ctx, userID, sessionID, engine.StatusToolDone, toolDetail)
 	persister.Update(toolID, result, err)
 
+	// Record into the routing DAG. Agent dispatch/escalation nodes are recorded
+	// in runCoreToolImpl (with per-agent timing), so skip call_agent_* here.
+	if rec := routeRecorderFrom(ctx); rec != nil && !strings.HasPrefix(toolCall.Function.Name, "call_agent_") {
+		nodeType := model.RouteNodeToolCall
+		if toolCall.Function.Name == "execute_plan" {
+			nodeType = model.RouteNodePlan
+		}
+		rec.Tool(nodeType, toolCall.Function.Name, toolDetail, toolCall.Function.Arguments, routeStatus(err), toolDuration.Milliseconds())
+	}
+
 	return result
+}
+
+// skipRedundantAgentCall records — but does NOT execute — a call_agent_* tool
+// call the Core emitted after it had already dispatched earlier in the same
+// turn. Running it would spin up another full worker agent whose answer the Core
+// would immediately discard (it returns the first agent's answer verbatim), so
+// the Core skips it. The skip is logged and marked on the routing DAG; the
+// returned string is the synthetic tool result that keeps the message history
+// well-formed. See processWithTools for the dispatch-only rationale.
+func (ch *CoreHandler) skipRedundantAgentCall(ctx context.Context, toolCall openai.ToolCall) string {
+	agentName := strings.TrimPrefix(toolCall.Function.Name, "call_agent_")
+	label := agentName
+	if agent, ok := ch.agents.Get(agentName); ok {
+		agentName = agent.Config.Name
+		label = agentDispatchLabel(agent)
+	}
+
+	var message string
+	var args map[string]interface{}
+	if json.Unmarshal([]byte(toolCall.Function.Arguments), &args) == nil {
+		message, _ = args["message"].(string)
+	}
+
+	routeRecorderFrom(ctx).SkipDispatch(agentName, label, message)
+	log.Log.Infof("[CoreHandler] ⏭️  Skipping redundant agent call (already dispatched this turn) | Agent: %s", agentName)
+
+	return fmt.Sprintf("Skipped: the Core already routed to another agent in this turn, so %s was not called.", agentName)
 }
 
 // runCoreToolImpl runs the Core tool logic (switch on tool name).
@@ -279,7 +318,11 @@ func (ch *CoreHandler) runCoreToolImpl(
 			}
 		}
 
+		dispatchStart := time.Now()
 		result, err := ch.callAgent(ctx, userID, args, agent)
+		dispatchMsg, _ := args["message"].(string)
+		// Record the forward (routing decision) on the DAG, with per-agent timing.
+		routeRecorderFrom(ctx).Dispatch(agent.Config.Name, agentDispatchLabel(agent), dispatchMsg, routeStatus(err), time.Since(dispatchStart).Milliseconds())
 
 		// Escalation: if this is not the highest-tier agent and result starts with "ESCALATE:"
 		if err == nil && strings.HasPrefix(strings.TrimSpace(result), "ESCALATE:") {
@@ -293,7 +336,10 @@ func (ch *CoreHandler) runCoreToolImpl(
 			if higherAgent != nil {
 				metrics.AgentEscalation(agentName)
 				engine.NotifyStatus(ctx, userID, "", engine.StatusAgentCalling, higherAgent.Config.Name+" (escalated)")
+				escStart := time.Now()
 				result, err = ch.callAgent(ctx, userID, args, higherAgent)
+				// Record the escalation (forward to a higher tier) on the DAG.
+				routeRecorderFrom(ctx).Escalate(higherAgent.Config.Name, agentDispatchLabel(higherAgent), dispatchMsg, routeStatus(err), time.Since(escStart).Milliseconds())
 				metrics.AgentRouting(higherAgent.Config.Name, metrics.Status(err))
 				if ch.Callback != nil {
 					ch.Callback.AfterAction(ctx, &engine.UsageEvent{

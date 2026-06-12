@@ -177,6 +177,13 @@ sequenceDiagram
 9. **Finalize** — the Core appends the final answer as its own assistant reply (whether
    Core composed it or it came verbatim from a dispatched agent), saves the session,
    emits **Status: Completed**, and returns the text ([core/core.go:290-299](../core/core.go)).
+10. **Routing DAG** — alongside the loop above, the Core records a `model.RouteTrace`:
+    a directed acyclic graph of this message's decisions (each LLM turn), tool calls,
+    and forwards (dispatch + escalation), ending at the response. It is persisted to the
+    store and rendered at `/agentize/debug/routes` ([core/route_trace.go](../core/route_trace.go),
+    [model/route_trace.go](../model/route_trace.go)). See [ROUTING_DAG.md](./ROUTING_DAG.md).
+    The dispatch-only short-circuit above is exactly the shape the DAG makes visible: the
+    forwarded agent's node connects straight to the response.
 
 ### Variants
 

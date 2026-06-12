@@ -247,7 +247,31 @@ func (s *SQLiteStore) initSchema() error {
 	// Migration: Add parent_file_id to user_files for derived files (e.g. edited images)
 	_ = s.migrateAddUserFileParentColumn()
 
+	// Migration: Create the route_traces table (Core decision/forward DAGs)
+	_ = s.migrateAddRouteTracesTable()
+
 	return nil
+}
+
+// migrateAddRouteTracesTable creates the route_traces table and its indexes.
+// The full DAG (nodes + edges) is stored as JSON in the data column, like the
+// MongoDB backend; only the columns used for lookup/sorting are denormalized.
+// CREATE TABLE IF NOT EXISTS makes this safe on both fresh and existing databases.
+func (s *SQLiteStore) migrateAddRouteTracesTable() error {
+	_, err := s.db.Exec(`
+	CREATE TABLE IF NOT EXISTS route_traces (
+		trace_id TEXT PRIMARY KEY,
+		session_id TEXT NOT NULL,
+		user_id TEXT NOT NULL,
+		status TEXT DEFAULT '',
+		data TEXT NOT NULL,
+		created_at INTEGER NOT NULL
+	);
+	CREATE INDEX IF NOT EXISTS idx_route_traces_session_id ON route_traces(session_id);
+	CREATE INDEX IF NOT EXISTS idx_route_traces_user_id ON route_traces(user_id);
+	CREATE INDEX IF NOT EXISTS idx_route_traces_created_at ON route_traces(created_at);
+	`)
+	return err
 }
 
 // migrateAddUserFileParentColumn adds parent_file_id to user_files if it doesn't exist
@@ -562,6 +586,9 @@ func (s *SQLiteStore) DeleteUserData(userID string) error {
 	}
 	if _, err := tx.Exec("DELETE FROM user_files WHERE user_id = ?", userID); err != nil {
 		return fmt.Errorf("failed to delete user_files: %w", err)
+	}
+	if _, err := tx.Exec("DELETE FROM route_traces WHERE user_id = ?", userID); err != nil {
+		return fmt.Errorf("failed to delete route_traces: %w", err)
 	}
 	if _, err := tx.Exec("DELETE FROM sessions WHERE user_id = ?", userID); err != nil {
 		return fmt.Errorf("failed to delete sessions: %w", err)
@@ -2291,6 +2318,127 @@ func (s *SQLiteStore) scanSummarizationLogs(rows *sql.Rows) ([]*model.Summarizat
 	}
 
 	return logs, nil
+}
+
+// ============================================================================
+// Route traces (Core decision/forward DAGs)
+// ============================================================================
+
+// PutRouteTrace upserts a route trace keyed by TraceID. The full DAG is stored
+// as JSON in the data column.
+func (s *SQLiteStore) PutRouteTrace(trace *model.RouteTrace) error {
+	if trace == nil {
+		return fmt.Errorf("route trace cannot be nil")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	createdAt := trace.CreatedAt.Unix()
+	if createdAt <= 0 {
+		createdAt = time.Now().Unix()
+		trace.CreatedAt = time.Unix(createdAt, 0)
+	}
+
+	data, err := json.Marshal(trace)
+	if err != nil {
+		return fmt.Errorf("failed to marshal route trace: %w", err)
+	}
+
+	_, err = s.db.Exec(
+		`INSERT OR REPLACE INTO route_traces (trace_id, session_id, user_id, status, data, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		trace.TraceID, trace.SessionID, trace.UserID, trace.Status, string(data), createdAt,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to store route trace: %w", err)
+	}
+	return nil
+}
+
+// GetRouteTraceByID returns the trace by id, or (nil, nil) when not found.
+func (s *SQLiteStore) GetRouteTraceByID(traceID string) (*model.RouteTrace, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var data string
+	err := s.db.QueryRow(`SELECT data FROM route_traces WHERE trace_id = ?`, traceID).Scan(&data)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to query route trace: %w", err)
+	}
+	trace := &model.RouteTrace{}
+	if err := json.Unmarshal([]byte(data), trace); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal route trace: %w", err)
+	}
+	return trace, nil
+}
+
+// GetRouteTracesBySession returns all traces for a session, newest first.
+func (s *SQLiteStore) GetRouteTracesBySession(sessionID string) ([]*model.RouteTrace, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.Query(
+		`SELECT data FROM route_traces WHERE session_id = ? ORDER BY created_at DESC, trace_id DESC`,
+		sessionID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query route traces: %w", err)
+	}
+	defer rows.Close()
+	return scanRouteTraces(rows)
+}
+
+// GetRouteTracesByUser returns all traces for a user, newest first.
+func (s *SQLiteStore) GetRouteTracesByUser(userID string) ([]*model.RouteTrace, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.Query(
+		`SELECT data FROM route_traces WHERE user_id = ? ORDER BY created_at DESC, trace_id DESC`,
+		userID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query route traces: %w", err)
+	}
+	defer rows.Close()
+	return scanRouteTraces(rows)
+}
+
+// GetAllRouteTraces returns all traces across all sessions, newest first.
+func (s *SQLiteStore) GetAllRouteTraces() ([]*model.RouteTrace, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.Query(`SELECT data FROM route_traces ORDER BY created_at DESC, trace_id DESC`)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query route traces: %w", err)
+	}
+	defer rows.Close()
+	return scanRouteTraces(rows)
+}
+
+// scanRouteTraces decodes the JSON data column of each row into a RouteTrace.
+func scanRouteTraces(rows *sql.Rows) ([]*model.RouteTrace, error) {
+	var traces []*model.RouteTrace
+	for rows.Next() {
+		var data string
+		if err := rows.Scan(&data); err != nil {
+			return nil, fmt.Errorf("failed to scan route trace: %w", err)
+		}
+		trace := &model.RouteTrace{}
+		if err := json.Unmarshal([]byte(data), trace); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal route trace: %w", err)
+		}
+		traces = append(traces, trace)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating route traces: %w", err)
+	}
+	return traces, nil
 }
 
 // Ensure SQLiteStore implements model.SessionStore and debuger.DebugStore

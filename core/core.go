@@ -285,8 +285,20 @@ func (ch *CoreHandler) processOneMessageCore(
 	if err != nil {
 		return "", fmt.Errorf("failed to get or create core session: %w", err)
 	}
+
+	// Start recording the routing DAG for this message: every Core decision,
+	// tool call, and forward (dispatch/escalation) to a worker agent, ending at
+	// the response. The builder rides in the context so the LLM loop and the
+	// tool layer record into the same trace; the deferred call persists it on
+	// every exit path (with metrics + a summary log line).
+	rec := model.NewRouteTraceBuilder(coreSession, userMessage)
+	ctx = withRouteRecorder(ctx, rec)
+	traceStart := time.Now()
+	defer func() { ch.persistRouteTrace(rec, time.Since(traceStart)) }()
+
 	systemPrompts, err := ch.buildSystemPrompts(userID)
 	if err != nil {
+		rec.Fail(err.Error())
 		return "", fmt.Errorf("failed to build system prompts: %w", err)
 	}
 
@@ -299,6 +311,7 @@ func (ch *CoreHandler) processOneMessageCore(
 	userMsg.IsNonsense = isNonsense
 	ch.saveMessage(userMsg)
 	if err := ch.saveCoreSession(coreSession); err != nil {
+		rec.Fail(err.Error())
 		return "", fmt.Errorf("failed to save core session: %w", err)
 	}
 
@@ -309,6 +322,7 @@ func (ch *CoreHandler) processOneMessageCore(
 
 	response, err := ch.processWithTools(ctx, messages, tools, userID, coreSession)
 	if err != nil {
+		rec.Fail(err.Error())
 		return "", fmt.Errorf("failed to process message: %w", err)
 	}
 
