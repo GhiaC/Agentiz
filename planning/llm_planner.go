@@ -264,5 +264,10 @@ func (p *LLMPlanner) parsePlanJSON(content string, input PlanInput) (*Plan, erro
 	if len(plan.Steps) > p.maxSteps {
 		plan.Steps = plan.Steps[:p.maxSteps]
 	}
+	// Reject invalid plans (bad DAG, missing tool_name, unknown condition
+	// operators, conditional inside parallel) before they reach the runner.
+	if err := ValidatePlan(plan); err != nil {
+		return nil, err
+	}
 	return plan, nil
 }

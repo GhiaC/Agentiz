@@ -2,6 +2,7 @@ package planning
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/ghiac/agentize/engine"
+	"github.com/ghiac/agentize/log"
 	"github.com/ghiac/agentize/model"
 	"github.com/sashabaranov/go-openai"
 )
@@ -28,16 +30,61 @@ type ToolExecutor interface {
 // so plans containing review gates still run in-process.
 type ReviewFunc func(ctx context.Context, plan *Plan, step *Step, content string) (approved bool, note string, err error)
 
+// PersistErrorFunc is invoked when persisting plan state to the store fails.
+// Wire it with WithLocalPersistErrorHandler so host apps can halt or alert when
+// in-memory and persisted plan state start to diverge.
+type PersistErrorFunc func(plan *Plan, err error)
+
+// cancelRegistry tracks the cancel function of each running plan so Cancel can
+// interrupt in-flight steps. It is shared by pointer across the per-run shallow
+// copies of LocalRunner.
+type cancelRegistry struct {
+	mu sync.Mutex
+	m  map[string]context.CancelFunc
+}
+
+func newCancelRegistry() *cancelRegistry {
+	return &cancelRegistry{m: make(map[string]context.CancelFunc)}
+}
+
+func (r *cancelRegistry) add(id string, fn context.CancelFunc) {
+	r.mu.Lock()
+	r.m[id] = fn
+	r.mu.Unlock()
+}
+
+func (r *cancelRegistry) remove(id string) {
+	r.mu.Lock()
+	delete(r.m, id)
+	r.mu.Unlock()
+}
+
+// cancel signals the running plan with the given ID, if any, and reports
+// whether a running plan was found.
+func (r *cancelRegistry) cancel(id string) bool {
+	r.mu.Lock()
+	fn, ok := r.m[id]
+	delete(r.m, id)
+	r.mu.Unlock()
+	if ok {
+		fn()
+	}
+	return ok
+}
+
 // LocalRunner runs plans in-process using the Engine and FunctionRegistry.
 type LocalRunner struct {
-	engine    LLMCaller
-	llmClient model.LLMClient
-	llmModel  string
-	functions ToolExecutor
-	callback  engine.Callback
-	store     PlanStore
-	observer  Observer
-	reviewer  ReviewFunc
+	engine         LLMCaller
+	llmClient      model.LLMClient
+	llmModel       string
+	functions      ToolExecutor
+	callback       engine.Callback
+	store          PlanStore
+	observer       Observer
+	reviewer       ReviewFunc
+	logger         *log.Logger
+	onPersistError PersistErrorFunc
+	cancels        *cancelRegistry
 }
 
 // Ensure LocalRunner can still be constructed with *engine.Engine and *model.FunctionRegistry.
@@ -70,6 +117,22 @@ func WithLocalReviewer(fn ReviewFunc) LocalRunnerOption {
 	return func(lr *LocalRunner) { lr.reviewer = fn }
 }
 
+// WithLocalLogger sets the logger for plan/step transitions and store failures
+// (default: log.Log).
+func WithLocalLogger(l *log.Logger) LocalRunnerOption {
+	return func(lr *LocalRunner) {
+		if l != nil {
+			lr.logger = l
+		}
+	}
+}
+
+// WithLocalPersistErrorHandler wires a callback invoked whenever persisting
+// plan state to the store fails. Store failures are also logged.
+func WithLocalPersistErrorHandler(fn PersistErrorFunc) LocalRunnerOption {
+	return func(lr *LocalRunner) { lr.onPersistError = fn }
+}
+
 // WithLocalLLMClient sets a direct LLM client for plan steps, bypassing Engine.ProcessMessage.
 // Use this when the Engine may not have LLM configured or sessions are managed externally (e.g. CoreHandler).
 func WithLocalLLMClient(client model.LLMClient, modelName string) LocalRunnerOption {
@@ -81,89 +144,142 @@ func WithLocalLLMClient(client model.LLMClient, modelName string) LocalRunnerOpt
 
 // NewLocalRunner returns a new LocalRunner. eng and funcs can be *engine.Engine and *model.FunctionRegistry.
 func NewLocalRunner(eng LLMCaller, funcs ToolExecutor, opts ...LocalRunnerOption) *LocalRunner {
-	lr := &LocalRunner{engine: eng, functions: funcs}
+	lr := &LocalRunner{
+		engine:    eng,
+		functions: funcs,
+		logger:    log.Log,
+		cancels:   newCancelRegistry(),
+	}
 	for _, opt := range opts {
 		opt(lr)
+	}
+	if lr.logger == nil {
+		lr.logger = log.Log
 	}
 	return lr
 }
 
-// Run executes the plan: topological sort, then run ready steps until all done.
+// persist writes the plan to the store, logging and reporting failures via the
+// persist-error handler instead of dropping them silently.
+func (lr *LocalRunner) persist(ctx context.Context, plan *Plan) {
+	if lr.store == nil {
+		return
+	}
+	// Persist even when the run context was cancelled or timed out — the final
+	// state transition (failed/cancelled) must still reach the store.
+	ctx = context.WithoutCancel(ctx)
+	if err := lr.store.Update(ctx, plan); err != nil {
+		lr.logger.Warnf("planning: persist plan %s failed: %v", plan.ID, err)
+		if lr.onPersistError != nil {
+			lr.onPersistError(plan, err)
+		}
+	}
+}
+
+// failPlan applies a plan-level failure (or cancellation): all mutations first,
+// one store update, one OnPlanFailed notification.
+func (lr *LocalRunner) failPlan(ctx context.Context, plan *Plan, status PlanStatus, err error) error {
+	now := time.Now()
+	plan.Status = status
+	plan.Error = err.Error()
+	plan.UpdatedAt = now
+	plan.CompletedAt = &now
+	lr.persist(ctx, plan)
+	lr.logger.Errorf("planning: plan %s %s: %v", plan.ID, status, err)
+	if lr.observer != nil {
+		lr.observer.OnPlanFailed(plan, err)
+	}
+	return err
+}
+
+// failStep applies a step failure and the resulting plan failure as one
+// coherent transition: all mutations first, a single store update, then exactly
+// one OnStepFailed (step-specific) and one OnPlanFailed (plan-level) event.
+func (lr *LocalRunner) failStep(ctx context.Context, plan *Plan, step *Step, err error) error {
+	now := time.Now()
+	step.Status = StepFailed
+	step.Error = err.Error()
+	step.CompletedAt = &now
+	plan.Status = PlanFailed
+	plan.Error = err.Error()
+	plan.UpdatedAt = now
+	plan.CompletedAt = &now
+	lr.persist(ctx, plan)
+	lr.logger.Errorf("planning: plan %s step %s failed: %v", plan.ID, step.ID, err)
+	if lr.observer != nil {
+		lr.observer.OnStepFailed(plan, step, err)
+		lr.observer.OnPlanFailed(plan, err)
+	}
+	return fmt.Errorf("step %q failed: %w", step.ID, err)
+}
+
+// Run executes the plan: validation, then run ready steps until all done.
 func (lr *LocalRunner) Run(ctx context.Context, plan *Plan, opts ...RunOption) (*PlanResult, error) {
 	cfg := &runConfig{}
 	for _, o := range opts {
 		o(cfg)
 	}
 
-	// Apply run-level overrides via shallow copy so concurrent
-	// calls with different clients/executors don't interfere with each other.
-	rl := lr
-	needsCopy := (cfg.llmClient != nil && lr.llmClient == nil) || (cfg.toolExecutor != nil)
-	if needsCopy {
-		cp := *lr
-		if cfg.llmClient != nil && lr.llmClient == nil {
-			cp.llmClient = cfg.llmClient
-			cp.llmModel = cfg.llmModel
-		}
-		if cfg.toolExecutor != nil {
-			cp.functions = cfg.toolExecutor
-		}
-		rl = &cp
+	// Resolve run-level overrides into a shallow copy so concurrent runs with
+	// different clients/executors/stores/observers don't interfere, and so
+	// RunStep (and parallel sub-steps) see the same store/observer as Run.
+	cp := *lr
+	if cfg.llmClient != nil && lr.llmClient == nil {
+		cp.llmClient = cfg.llmClient
+		cp.llmModel = cfg.llmModel
 	}
+	if cfg.toolExecutor != nil {
+		cp.functions = cfg.toolExecutor
+	}
+	if cfg.store != nil {
+		cp.store = cfg.store
+	}
+	if cfg.observer != nil {
+		cp.observer = cfg.observer
+	}
+	rl := &cp
 
-	store := cfg.store
-	if store == nil {
-		store = rl.store
-	}
-	observer := cfg.observer
-	if observer == nil {
-		observer = rl.observer
-	}
 	if cfg.timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, cfg.timeout)
 		defer cancel()
 	}
 
+	// Register a cancel func so Cancel(planID) interrupts in-flight steps.
+	runCtx, cancelRun := context.WithCancel(ctx)
+	defer cancelRun()
+	if plan.ID != "" {
+		lr.cancels.add(plan.ID, cancelRun)
+		defer lr.cancels.remove(plan.ID)
+	}
+	ctx = runCtx
+
 	plan.Status = PlanRunning
 	plan.UpdatedAt = time.Now()
-	if store != nil {
-		_ = store.Update(ctx, plan)
-	}
-	if observer != nil {
-		observer.OnPlanCreated(plan)
+	rl.persist(ctx, plan)
+	rl.logger.Infof("planning: plan %s started (%d steps)", plan.ID, len(plan.Steps))
+	if rl.observer != nil {
+		rl.observer.OnPlanCreated(plan)
 	}
 
-	_, err := TopologicalSort(plan.Steps)
-	if err != nil {
-		plan.Status = PlanFailed
-		plan.Error = err.Error()
-		if store != nil {
-			_ = store.Update(ctx, plan)
-		}
-		if observer != nil {
-			observer.OnPlanFailed(plan, err)
-		}
-		return nil, err
+	if err := ValidatePlan(plan); err != nil {
+		return nil, rl.failPlan(ctx, plan, PlanFailed, err)
 	}
 
 	start := time.Now()
+
+	// An empty plan trivially succeeds.
+	if len(plan.Steps) == 0 {
+		return rl.completePlan(ctx, plan, "", 0, start), nil
+	}
+
 	var totalTokens int
 	var finalOutput string
 
 	for {
 		select {
 		case <-ctx.Done():
-			plan.Status = PlanCancelled
-			plan.Error = ctx.Err().Error()
-			plan.UpdatedAt = time.Now()
-			if store != nil {
-				_ = store.Update(ctx, plan)
-			}
-			if observer != nil {
-				observer.OnPlanFailed(plan, ctx.Err())
-			}
-			return nil, ctx.Err()
+			return nil, rl.failPlan(ctx, plan, PlanCancelled, ctx.Err())
 		default:
 		}
 
@@ -183,15 +299,8 @@ func (lr *LocalRunner) Run(ctx context.Context, plan *Plan, opts ...RunOption) (
 			if allDone {
 				break
 			}
-			plan.Status = PlanFailed
-			plan.Error = "no ready steps and plan not complete"
-			if store != nil {
-				_ = store.Update(ctx, plan)
-			}
-			if observer != nil {
-				observer.OnPlanFailed(plan, ErrStepFailed)
-			}
-			return nil, ErrStepFailed
+			return nil, rl.failPlan(ctx, plan, PlanFailed,
+				fmt.Errorf("%w: no ready steps and plan not complete", ErrStepFailed))
 		}
 
 		for _, step := range ready {
@@ -202,27 +311,12 @@ func (lr *LocalRunner) Run(ctx context.Context, plan *Plan, opts ...RunOption) (
 			}
 			result, err := rl.RunStep(ctx, plan, step)
 			if err != nil {
-				step.Status = StepFailed
-				step.Error = err.Error()
-				now := time.Now()
-				step.CompletedAt = &now
-				if store != nil {
-					_ = store.Update(ctx, plan)
+				// A step aborted because the plan context ended (Cancel or
+				// plan-level timeout) is a cancelled plan, not a failed one.
+				if ctx.Err() != nil {
+					return nil, rl.failPlan(ctx, plan, PlanCancelled, ctx.Err())
 				}
-				if observer != nil {
-					observer.OnStepFailed(plan, step, err)
-				}
-				plan.Status = PlanFailed
-				plan.Error = err.Error()
-				now2 := time.Now()
-				plan.CompletedAt = &now2
-				if store != nil {
-					_ = store.Update(ctx, plan)
-				}
-				if observer != nil {
-					observer.OnPlanFailed(plan, err)
-				}
-				return nil, err
+				return nil, rl.failStep(ctx, plan, step, err)
 			}
 			step.Status = StepCompleted
 			step.Result = result
@@ -234,35 +328,39 @@ func (lr *LocalRunner) Run(ctx context.Context, plan *Plan, opts ...RunOption) (
 					finalOutput = result.Output
 				}
 			}
-			if store != nil {
-				_ = store.Update(ctx, plan)
-			}
-			if observer != nil {
-				observer.OnStepCompleted(plan, step, result)
+			rl.persist(ctx, plan)
+			rl.logger.Debugf("planning: plan %s step %s completed", plan.ID, step.ID)
+			if rl.observer != nil {
+				rl.observer.OnStepCompleted(plan, step, result)
 			}
 		}
 	}
 
+	return rl.completePlan(ctx, plan, finalOutput, totalTokens, start), nil
+}
+
+// completePlan applies the completed transition, persists it once and emits
+// OnPlanCompleted.
+func (lr *LocalRunner) completePlan(ctx context.Context, plan *Plan, output string, totalTokens int, start time.Time) *PlanResult {
 	plan.Status = PlanCompleted
-	plan.Output = finalOutput
+	plan.Output = output
 	now := time.Now()
 	plan.CompletedAt = &now
 	plan.UpdatedAt = now
-	if store != nil {
-		_ = store.Update(ctx, plan)
-	}
+	lr.persist(ctx, plan)
+	lr.logger.Infof("planning: plan %s completed in %s", plan.ID, time.Since(start).Round(time.Millisecond))
 
 	result := &PlanResult{
 		PlanID:      plan.ID,
-		Output:      finalOutput,
+		Output:      output,
 		Steps:       plan.Steps,
 		TotalTokens: totalTokens,
 		Duration:    time.Since(start),
 	}
-	if observer != nil {
-		observer.OnPlanCompleted(plan, result)
+	if lr.observer != nil {
+		lr.observer.OnPlanCompleted(plan, result)
 	}
-	return result, nil
+	return result
 }
 
 // RunStep executes a single step based on its type.
@@ -294,6 +392,7 @@ func (lr *LocalRunner) RunStep(ctx context.Context, plan *Plan, step *Step) (*St
 		}()
 	}
 
+	lr.logger.Debugf("planning: plan %s step %s started (%s)", plan.ID, step.ID, step.Type)
 	if lr.observer != nil {
 		lr.observer.OnStepStarted(plan, step)
 	}
@@ -316,10 +415,12 @@ func (lr *LocalRunner) RunStep(ctx context.Context, plan *Plan, step *Step) (*St
 	var result *StepResult
 	var err error
 	for attempt := 0; attempt < attempts; attempt++ {
-		result, err = lr.dispatchStep(stepCtx, plan, step)
+		result, err = lr.dispatchWithDeadline(stepCtx, plan, step)
 		if err == nil || stepCtx.Err() != nil || attempt == attempts-1 {
 			break
 		}
+		lr.logger.Warnf("planning: plan %s step %s attempt %d/%d failed, retrying: %v",
+			plan.ID, step.ID, attempt+1, attempts, err)
 		// Back off before retrying, but abort promptly if the context ends.
 		timer := time.NewTimer(stepRetryBackoff)
 		select {
@@ -340,6 +441,32 @@ func (lr *LocalRunner) RunStep(ctx context.Context, plan *Plan, step *Step) (*St
 
 // stepRetryBackoff is the delay between per-step retry attempts.
 const stepRetryBackoff = 250 * time.Millisecond
+
+// dispatchWithDeadline runs dispatchStep in a goroutine and returns as soon as
+// the step context ends, even when the underlying engine or tool ignores the
+// context. The abandoned attempt keeps running in the background until it
+// returns on its own (goroutines cannot be forcibly stopped); the plan moves on
+// regardless. See StepConfig.Timeout for the trade-off.
+func (lr *LocalRunner) dispatchWithDeadline(ctx context.Context, plan *Plan, step *Step) (*StepResult, error) {
+	type outcome struct {
+		res *StepResult
+		err error
+	}
+	ch := make(chan outcome, 1)
+	go func() {
+		res, err := lr.dispatchStep(ctx, plan, step)
+		ch <- outcome{res: res, err: err}
+	}()
+	select {
+	case o := <-ch:
+		return o.res, o.err
+	case <-ctx.Done():
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return nil, fmt.Errorf("step %q: %w", step.ID, ErrStepTimeout)
+		}
+		return nil, ctx.Err()
+	}
+}
 
 // dispatchStep routes a step to the handler for its type.
 func (lr *LocalRunner) dispatchStep(ctx context.Context, plan *Plan, step *Step) (*StepResult, error) {
@@ -453,12 +580,15 @@ func (lr *LocalRunner) runConditionalStep(_ context.Context, plan *Plan, step *S
 // runCollectStep aggregates the outputs of this step's completed dependencies
 // (a fan-in / join — the counterpart to parallel). With a Config.Prompt and an
 // LLM available it synthesizes them; otherwise it returns the labeled outputs.
+// Dependencies that contributed no output (skipped, or nil/empty result) are
+// reported under the "missing_inputs" metadata key and logged.
 func (lr *LocalRunner) runCollectStep(ctx context.Context, plan *Plan, step *Step) (*StepResult, error) {
 	var b strings.Builder
 	var tokens int
-	var from []string
+	var from, missing []string
 	for _, d := range dependencyResults(plan, step) {
 		if d.Status == StepSkipped || d.Result == nil || d.Result.Output == "" {
+			missing = append(missing, d.ID)
 			continue
 		}
 		if b.Len() > 0 {
@@ -473,6 +603,14 @@ func (lr *LocalRunner) runCollectStep(ctx context.Context, plan *Plan, step *Ste
 		from = append(from, d.ID)
 	}
 	collected := b.String()
+	if len(missing) > 0 {
+		lr.logger.Warnf("planning: plan %s collect step %s: dependencies contributed no output: %v",
+			plan.ID, step.ID, missing)
+	}
+	meta := map[string]any{"collected_from": from}
+	if len(missing) > 0 {
+		meta["missing_inputs"] = missing
+	}
 
 	if step.Config.Prompt != "" && (lr.llmClient != nil || lr.engine != nil) {
 		res, err := lr.runPrompt(ctx, plan, step.Config.Prompt+"\n\n"+collected)
@@ -483,32 +621,47 @@ func (lr *LocalRunner) runCollectStep(ctx context.Context, plan *Plan, step *Ste
 		if res.Metadata == nil {
 			res.Metadata = map[string]any{}
 		}
-		res.Metadata["collected_from"] = from
+		for k, v := range meta {
+			res.Metadata[k] = v
+		}
 		return res, nil
 	}
-	return &StepResult{Output: collected, TokensUsed: tokens, Metadata: map[string]any{"collected_from": from}}, nil
+	return &StepResult{Output: collected, TokensUsed: tokens, Metadata: meta}, nil
 }
 
 // runHumanReviewStep submits the content under review (its dependencies' outputs,
 // else the plan input) to the wired reviewer. With no reviewer it auto-approves
-// and passes the content through; a rejection fails the step.
+// and passes the content through; a rejection fails the step. Dependencies with
+// no output are reported under the "missing_inputs" metadata key and logged.
 func (lr *LocalRunner) runHumanReviewStep(ctx context.Context, plan *Plan, step *Step) (*StepResult, error) {
 	var b strings.Builder
+	var missing []string
 	for _, d := range dependencyResults(plan, step) {
-		if d.Result != nil && d.Result.Output != "" {
-			if b.Len() > 0 {
-				b.WriteString("\n\n")
-			}
-			b.WriteString(d.Result.Output)
+		if d.Result == nil || d.Result.Output == "" {
+			missing = append(missing, d.ID)
+			continue
 		}
+		if b.Len() > 0 {
+			b.WriteString("\n\n")
+		}
+		b.WriteString(d.Result.Output)
 	}
 	content := b.String()
 	if content == "" {
 		content = plan.Input
 	}
+	if len(missing) > 0 {
+		lr.logger.Warnf("planning: plan %s human_review step %s: dependencies contributed no output: %v",
+			plan.ID, step.ID, missing)
+	}
+	meta := map[string]any{}
+	if len(missing) > 0 {
+		meta["missing_inputs"] = missing
+	}
 
 	if lr.reviewer == nil {
-		return &StepResult{Output: content, Metadata: map[string]any{"review": "auto-approved (no reviewer configured)"}}, nil
+		meta["review"] = "auto-approved (no reviewer configured)"
+		return &StepResult{Output: content, Metadata: meta}, nil
 	}
 	approved, note, err := lr.reviewer(ctx, plan, step, content)
 	if err != nil {
@@ -517,7 +670,9 @@ func (lr *LocalRunner) runHumanReviewStep(ctx context.Context, plan *Plan, step 
 	if !approved {
 		return nil, fmt.Errorf("human review rejected step %q: %s", step.ID, note)
 	}
-	return &StepResult{Output: content, Metadata: map[string]any{"review": "approved", "note": note}}, nil
+	meta["review"] = "approved"
+	meta["note"] = note
+	return &StepResult{Output: content, Metadata: meta}, nil
 }
 
 // findStep returns the step with the given ID, or nil.
@@ -575,8 +730,11 @@ func conditionOperand(field string, plan *Plan, step *Step) string {
 }
 
 // compareValues applies a small comparison DSL used by conditional steps.
+// Unknown operators are rejected up front by ValidatePlan; the empty operator
+// and "truthy" (and, defensively, anything unknown) fall back to a truthiness
+// check on the operand.
 func compareValues(actual, op, value string) bool {
-	switch strings.ToLower(strings.TrimSpace(op)) {
+	switch normalizeOperator(op) {
 	case "eq", "==", "equals":
 		return actual == value
 	case "ne", "!=", "not_equals":
@@ -621,10 +779,21 @@ func numericCompare(a, b string) int {
 	}
 }
 
+// runParallelStep runs the sub-steps concurrently and waits for ALL of them to
+// finish (no early return — no goroutine is left writing into shared state
+// after this function returns). Conditional sub-steps are rejected because they
+// mutate sibling step statuses concurrently. On failure every failed sub-step
+// is marked failed and reported to the observer individually, and the returned
+// error names each failed sub-step.
 func (lr *LocalRunner) runParallelStep(ctx context.Context, plan *Plan, step *Step) (*StepResult, error) {
 	subs := step.Config.SubSteps
 	if len(subs) == 0 {
 		return &StepResult{}, nil
+	}
+	for _, s := range subs {
+		if s != nil && s.Type == StepConditional {
+			return nil, fmt.Errorf("%w: step %q: conditional inside parallel is not supported", ErrInvalidStep, s.ID)
+		}
 	}
 	var wg sync.WaitGroup
 	results := make([]*StepResult, len(subs))
@@ -639,16 +808,38 @@ func (lr *LocalRunner) runParallelStep(ctx context.Context, plan *Plan, step *St
 		}(i, sub)
 	}
 	wg.Wait()
+
 	var combined string
 	var totalTokens int
+	var failures []error
+	now := time.Now()
 	for i, e := range errs {
+		sub := subs[i]
 		if e != nil {
-			return nil, e
+			sub.Status = StepFailed
+			sub.Error = e.Error()
+			sub.CompletedAt = &now
+			lr.logger.Errorf("planning: plan %s parallel step %s sub-step %s failed: %v",
+				plan.ID, step.ID, sub.ID, e)
+			if lr.observer != nil {
+				lr.observer.OnStepFailed(plan, sub, e)
+			}
+			failures = append(failures, fmt.Errorf("sub-step %q: %w", sub.ID, e))
+			continue
+		}
+		sub.Status = StepCompleted
+		sub.Result = results[i]
+		sub.CompletedAt = &now
+		if lr.observer != nil {
+			lr.observer.OnStepCompleted(plan, sub, results[i])
 		}
 		if results[i] != nil {
 			combined += results[i].Output
 			totalTokens += results[i].TokensUsed
 		}
+	}
+	if len(failures) > 0 {
+		return nil, fmt.Errorf("parallel step %q: %w", step.ID, errors.Join(failures...))
 	}
 	return &StepResult{Output: combined, TokensUsed: totalTokens}, nil
 }
@@ -672,14 +863,25 @@ func (lr *LocalRunner) directLLMCall(ctx context.Context, prompt string) (*StepR
 	}, nil
 }
 
-// Cancel marks the plan as cancelled in the store.
+// Cancel interrupts the plan if it is currently running (its context is
+// cancelled, aborting in-flight steps) and marks it cancelled in the store.
 func (lr *LocalRunner) Cancel(ctx context.Context, planID string) error {
+	signalled := lr.cancels.cancel(planID)
+	if signalled {
+		lr.logger.Infof("planning: plan %s cancel signalled", planID)
+	}
 	store := lr.store
 	if store == nil {
+		if signalled {
+			return nil // the running plan will persist its cancelled state
+		}
 		return ErrNoPlanStore
 	}
 	plan, err := store.Get(ctx, planID)
 	if err != nil {
+		if signalled {
+			return nil
+		}
 		return err
 	}
 	plan.Status = PlanCancelled
@@ -697,8 +899,9 @@ func (lr *LocalRunner) Resume(ctx context.Context, planID string) (*PlanResult, 
 	if err != nil {
 		return nil, err
 	}
+	lr.logger.Infof("planning: plan %s resuming", planID)
 	plan.Status = PlanRunning
 	plan.UpdatedAt = time.Now()
-	_ = store.Update(ctx, plan)
+	lr.persist(ctx, plan)
 	return lr.Run(ctx, plan, WithStore(store), WithObserver(lr.observer))
 }

@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ghiac/agentize/log"
 	"github.com/ghiac/agentize/model"
 )
 
@@ -39,6 +40,22 @@ func WithOrchestratorLLMClient(client model.LLMClient, modelName string) Orchest
 	}
 }
 
+// WithReplanOnFailure makes Execute call the planner's Replan after a failed
+// run and re-run the revised plan, up to maxAttempts times. With LLMPlanner the
+// plan is regenerated with failure feedback; with ChainPlanner the failed step
+// is reset and retried.
+func WithReplanOnFailure(maxAttempts int) OrchestratorOption {
+	return func(o *Orchestrator) { o.replanAttempts = maxAttempts }
+}
+
+// WithTemporalRunner makes the Orchestrator execute plans through a Temporal
+// workflow via the given adapter (instead of the runner passed to
+// NewOrchestrator, which may then be nil). The runner is constructed after all
+// options are applied so it shares the orchestrator's plan store.
+func WithTemporalRunner(adapter TemporalAdapter) OrchestratorOption {
+	return func(o *Orchestrator) { o.temporalAdapter = adapter }
+}
+
 // WithOrchestratorToolExecutor sets a ToolExecutor on the Orchestrator.
 // This executor is passed to the Runner via WithRunToolExecutor on every Execute call,
 // allowing plan tool_call steps to execute Core tools.
@@ -48,15 +65,17 @@ func WithOrchestratorToolExecutor(exec ToolExecutor) OrchestratorOption {
 
 // Orchestrator wires a Planner and Runner and exposes a single Execute entrypoint.
 type Orchestrator struct {
-	planner      Planner
-	runner       Runner
-	store        PlanStore
-	observer     Observer
-	seedConfig   SeedConfig
-	planSeqMu    sync.Mutex
-	llmClient    model.LLMClient
-	llmModel     string
-	toolExecutor ToolExecutor
+	planner         Planner
+	runner          Runner
+	store           PlanStore
+	observer        Observer
+	seedConfig      SeedConfig
+	planSeqMu       sync.Mutex
+	llmClient       model.LLMClient
+	llmModel        string
+	toolExecutor    ToolExecutor
+	replanAttempts  int
+	temporalAdapter TemporalAdapter
 }
 
 // NewOrchestrator returns a new Orchestrator. If no store is set via options, uses NewMemoryStore().
@@ -67,6 +86,9 @@ func NewOrchestrator(planner Planner, runner Runner, opts ...OrchestratorOption)
 	}
 	if o.store == nil {
 		o.store = NewMemoryStore()
+	}
+	if o.temporalAdapter != nil {
+		o.runner = NewTemporalRunner(o.temporalAdapter, WithTemporalStore(o.store))
 	}
 	return o
 }
@@ -118,7 +140,46 @@ func (o *Orchestrator) Execute(ctx context.Context, input PlanInput) (*PlanResul
 	if te != nil {
 		runOpts = append(runOpts, WithRunToolExecutor(te))
 	}
-	return o.runner.Run(ctx, plan, runOpts...)
+
+	result, err := o.runner.Run(ctx, plan, runOpts...)
+
+	// Replan-on-failure (opt-in via WithReplanOnFailure): ask the planner to
+	// revise the plan around the failed step, persist the revision, and re-run.
+	for attempt := 0; err != nil && attempt < o.replanAttempts; attempt++ {
+		if ctx.Err() != nil {
+			break
+		}
+		failed := lastFailedStep(plan)
+		if failed == nil {
+			break
+		}
+		newPlan, rerr := o.planner.Replan(ctx, plan, failed)
+		if rerr != nil || newPlan == nil {
+			log.Log.Warnf("planning: replan attempt %d for plan %s failed: %v", attempt+1, plan.ID, rerr)
+			break
+		}
+		newPlan.ID = plan.ID
+		newPlan.Status = PlanPending
+		if uerr := o.store.Update(ctx, newPlan); uerr != nil {
+			log.Log.Warnf("planning: persist replanned plan %s failed: %v", newPlan.ID, uerr)
+		}
+		log.Log.Infof("planning: replanning plan %s after failed step %s (attempt %d/%d, version %d)",
+			plan.ID, failed.ID, attempt+1, o.replanAttempts, newPlan.Version)
+		plan = newPlan
+		result, err = o.runner.Run(ctx, plan, runOpts...)
+	}
+	return result, err
+}
+
+// lastFailedStep returns the last step in the plan with a failed status, or nil.
+func lastFailedStep(plan *Plan) *Step {
+	var failed *Step
+	for _, s := range plan.Steps {
+		if s != nil && s.Status == StepFailed {
+			failed = s
+		}
+	}
+	return failed
 }
 
 // SetLLMClient sets the LLM client on the Orchestrator at runtime. Useful when the

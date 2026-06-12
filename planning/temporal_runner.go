@@ -2,6 +2,7 @@ package planning
 
 import (
 	"context"
+	"fmt"
 	"time"
 )
 
@@ -85,9 +86,11 @@ func (tr *TemporalRunner) Run(ctx context.Context, plan *Plan, opts ...RunOption
 	}
 }
 
-// RunStep is not supported for TemporalRunner; steps run inside the workflow.
+// RunStep is not supported for TemporalRunner; steps execute inside the
+// Temporal workflow, not in this process. Use Run, or signal the workflow via
+// the adapter.
 func (tr *TemporalRunner) RunStep(ctx context.Context, plan *Plan, step *Step) (*StepResult, error) {
-	return nil, ErrInvalidStep
+	return nil, fmt.Errorf("%w: TemporalRunner cannot run individual steps; steps execute inside the Temporal workflow", ErrInvalidStep)
 }
 
 // Cancel requests cancellation of the workflow.

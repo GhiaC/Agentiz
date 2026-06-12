@@ -36,7 +36,7 @@ func (c *ChainPlanner) CreatePlan(ctx context.Context, input PlanInput) (*Plan, 
 			Type:        StepToolCall,
 			Name:        "Tool",
 			Description: "Optional tool call",
-			Config:      StepConfig{},
+			Config:      StepConfig{ToolName: input.Context.AvailableTools[0].Name},
 			DependsOn:   []string{step1.ID},
 			Status:      StepPending,
 		}
@@ -56,7 +56,21 @@ func (c *ChainPlanner) CreatePlan(ctx context.Context, input PlanInput) (*Plan, 
 	return plan, nil
 }
 
-// Replan returns the same plan unchanged (stub for migration path).
+// Replan implements retry semantics: it resets the failed step and the plan to
+// pending so the runner can resume from the point of failure. The plan version
+// is bumped so observers can tell the attempts apart.
 func (c *ChainPlanner) Replan(ctx context.Context, plan *Plan, lastStep *Step) (*Plan, error) {
+	if lastStep != nil && lastStep.Status == StepFailed {
+		lastStep.Status = StepPending
+		lastStep.Error = ""
+		lastStep.Result = nil
+		lastStep.StartedAt = nil
+		lastStep.CompletedAt = nil
+	}
+	plan.Status = PlanPending
+	plan.Error = ""
+	plan.CompletedAt = nil
+	plan.Version++
+	plan.UpdatedAt = time.Now()
 	return plan, nil
 }

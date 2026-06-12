@@ -81,7 +81,9 @@ A `Step` ([planning/types.go:77](../planning/types.go)) has an `id`, `type`, `na
 - **`collect`** is the join counterpart to `parallel`: it concatenates the (non-skipped)
   outputs of its `depends_on` steps; with a `prompt` and an LLM it synthesizes them
   instead. A skipped dependency is a *resolved* dependency (it just contributes nothing),
-  so a collect after a conditional runs with whichever branch survived.
+  so a collect after a conditional runs with whichever branch survived. Dependencies that
+  contributed no output are listed under the `missing_inputs` metadata key (and logged),
+  so incomplete aggregation is visible.
 - **`human_review`** submits its dependencies' output (or the plan input) to a
   `ReviewFunc` wired with `WithLocalReviewer`; rejection fails the step. With no reviewer
   it auto-approves and passes the content through, so review-gated plans still run.
@@ -89,10 +91,14 @@ A `Step` ([planning/types.go:77](../planning/types.go)) has an `id`, `type`, `na
 ## 4. Per-step reliability: timeout & retries (opt-in)
 
 `StepConfig` carries `Timeout` and `MaxRetries` ([planning/types.go:53](../planning/types.go)).
-`RunStep` ([planning/local_runner.go:246](../planning/local_runner.go)) honors both:
+`RunStep` ([planning/local_runner.go](../planning/local_runner.go)) honors both:
 
-- **`Timeout > 0`** wraps the step in `context.WithTimeout` (the plan-level `WithTimeout`
-  still applies via the parent context).
+- **`Timeout > 0`** is a **hard deadline**: the step runs in a goroutine and the runner
+  moves on when the deadline elapses even if the engine/tool ignores the context
+  (`dispatchWithDeadline`). Trade-off: the abandoned attempt keeps running in the
+  background until it returns on its own — goroutines cannot be forcibly stopped. The
+  plan-level `WithTimeout` still applies via the parent context. The timeout spans **all
+  retry attempts** of the step, not each attempt.
 - **`MaxRetries > 0`** retries a failed step up to that many times, with a fixed
   `stepRetryBackoff` (250ms) between attempts and an early exit if the context ends.
 
@@ -112,23 +118,47 @@ A step that fails sets `Step.Error` and fails the whole plan (no partial-complet
 today). `Plan.Error`/`Plan.Output` capture the final outcome; `StepResult` records
 `Output`, `Duration`, and `TokensUsed` per step.
 
-**Cancellation** (`Cancel`, [planning/local_runner.go](../planning/local_runner.go)) is
-currently **mark-only**: it sets `PlanCancelled` in the store but does not interrupt an
-in-flight LLM/tool call. Prefer a per-step `Timeout` to bound runaway steps.
+**Cancellation** (`Cancel`, [planning/local_runner.go](../planning/local_runner.go))
+**interrupts a running plan**: the runner tracks a `context.CancelFunc` per running plan
+and `Cancel(planID)` signals it, aborting in-flight steps (steps that ignore the context
+are abandoned via the hard deadline machinery), then marks `PlanCancelled` in the store.
+
+**Validation & failure path.** `ValidatePlan` ([planning/dag.go](../planning/dag.go))
+runs in both planners and at the start of `Run`: DAG shape, `tool_call` steps must have a
+`tool_name`, conditional operators must be known, and `conditional` is rejected inside
+`parallel` sub-steps. On a step failure all state mutations happen first, the store is
+updated **once**, and the observer receives exactly one `OnStepFailed` (step-specific)
+followed by one `OnPlanFailed` (plan-level). When a `parallel` sub-step fails, all
+branches still run to completion, each failed sub-step gets its own `OnStepFailed`, and
+the returned error names the failed sub-steps. Store `Update` failures are logged and
+reported through the optional `WithLocalPersistErrorHandler` callback so host apps can
+halt or alert when in-memory and persisted state diverge.
 
 ## 6. Runners & planners
 
 | Runner | Use | Status |
 |--------|-----|--------|
-| `LocalRunner` ([local_runner.go:69](../planning/local_runner.go)) | In-process; uses the Engine/LLM client + `ToolExecutor` | Primary |
-| `TemporalRunner` ([temporal_runner.go](../planning/temporal_runner.go)) | Delegate to Temporal workflows | Needs a host-supplied `TemporalAdapter`; not wired by default |
+| `LocalRunner` ([local_runner.go](../planning/local_runner.go)) | In-process; uses the Engine/LLM client + `ToolExecutor` | Primary |
+| `TemporalRunner` ([temporal_runner.go](../planning/temporal_runner.go)) | Delegate to Temporal workflows | Opt-in via `WithTemporalRunner(adapter)` |
 
 | Planner | Use |
 |---------|-----|
-| `LLMPlanner` ([llm_planner.go:48](../planning/llm_planner.go)) | Ask an LLM to emit the plan JSON from the goal + available tools |
+| `LLMPlanner` ([llm_planner.go](../planning/llm_planner.go)) | Ask an LLM to emit the plan JSON from the goal + available tools |
 | `ChainPlanner` ([chain_planner.go](../planning/chain_planner.go)) | Deterministic LLM-then-tool chain (no planning LLM call) |
 
-`Planner.Replan` exists on the interface but is **not yet invoked** by the Orchestrator.
+**Replan** is opt-in via `planning.WithReplanOnFailure(maxAttempts)`: after a failed run
+the Orchestrator calls `Planner.Replan(ctx, plan, failedStep)`, persists the revised plan
+(same ID, bumped `Version`) and re-runs it, up to `maxAttempts` times. `LLMPlanner`
+regenerates the plan with failure feedback; `ChainPlanner` resets the failed step to
+pending (a retry).
+
+**Temporal** is opt-in via `planning.WithTemporalRunner(adapter)` on `NewOrchestrator`
+(the `runner` argument may then be `nil`). The host supplies a `TemporalAdapter` —
+`StartWorkflow`/`SignalWorkflow`/`QueryWorkflow` (query name `"PlanState"`, returning the
+current `*Plan`)/`CancelWorkflow` — backed by the Temporal SDK; the core package stays
+SDK-free. The runner polls `PlanState` every 500ms, mirrors it into the plan store, and
+returns when the workflow reports a terminal status. `TemporalRunner.RunStep` returns an
+error: steps execute inside the workflow, not in-process.
 
 ## 7. Persistence — important
 
@@ -138,9 +168,19 @@ so `/agentize/debug/plans` is empty after a reboot until new plans run.
 
 `MemoryStore` accepts an optional `Persister` via `WithPersister`
 ([planning/memory_store.go:15](../planning/memory_store.go)) to load/save plans against a
-durable backend, but Agentize does not ship a DB-backed `Persister` — wire one (against
-your `SessionStore`) and pass it with `planning.WithOrchestratorStore(...)` if you need
-durable plan history. `EnsurePlanningSeed`
+durable backend. Agentize ships a reference `FilePersister`
+([planning/file_persister.go](../planning/file_persister.go)) that stores plans as JSON
+lines with atomic replace-on-save:
+
+```go
+p := planning.NewFilePersister("data/plans.jsonl")
+store := planning.NewMemoryStore(planning.WithPersister(p))
+_ = store.LoadFromPersister(ctx)                  // at startup
+// pass with planning.WithOrchestratorStore(store); call store.Shutdown(ctx) on exit
+```
+
+For DB-backed history, implement `Persister` against your `SessionStore` the same way.
+`EnsurePlanningSeed`
 ([agentize.go:429](../agentize.go)) writes a few template plans on first run so the
 dashboard isn't empty in a fresh deployment.
 
@@ -196,10 +236,13 @@ holds; see §7).
 
 ## 11. Current limitations (roadmap)
 
-- In-memory plan store by default — no durable history without a host `Persister` (§7).
-- `Cancel` is mark-only and does not interrupt running steps (§5).
-- `conditional` inside a `parallel` sub-step is unsupported (it mutates shared plan state).
-- `Planner.Replan` and `TemporalRunner` exist but are not reachable from the default wiring.
+- In-memory plan store by default — durable history requires wiring a `Persister`
+  (e.g. the shipped `FilePersister`, §7).
+- `conditional` inside a `parallel` sub-step is unsupported — now **rejected by
+  `ValidatePlan`** at plan-parse and run time (it would mutate shared plan state
+  concurrently); lifting the limitation needs per-branch plan views.
+- A hard step `Timeout` abandons (not stops) an attempt that ignores the context — the
+  goroutine drains in the background (§4).
 - No per-step-type or duration metrics yet — only run/step counters (§9).
 
 ---

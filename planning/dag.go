@@ -2,10 +2,70 @@ package planning
 
 import (
 	"fmt"
+	"strings"
 )
+
+// normalizeOperator canonicalizes a condition operator for lookup/comparison.
+func normalizeOperator(op string) string {
+	return strings.ToLower(strings.TrimSpace(op))
+}
 
 // ErrDuplicateStepID is returned when two steps share the same ID.
 var ErrDuplicateStepID = fmt.Errorf("planning: duplicate step ID")
+
+// knownConditionOperators is the comparison DSL accepted by conditional steps
+// (see compareValues). The empty operator and "truthy" mean a truthiness check
+// on the operand.
+var knownConditionOperators = map[string]bool{
+	"": true, "truthy": true,
+	"eq": true, "==": true, "equals": true,
+	"ne": true, "!=": true, "not_equals": true,
+	"contains": true, "not_contains": true,
+	"empty": true, "not_empty": true,
+	"gt": true, ">": true, "lt": true, "<": true,
+	"gte": true, ">=": true, "lte": true, "<=": true,
+}
+
+// ValidatePlan validates a plan before execution: DAG shape (via ValidateDAG)
+// plus per-step-type required fields — tool_call needs a tool_name, conditional
+// steps must use a known operator, and conditional steps are not allowed inside
+// parallel sub-steps (they mutate shared plan state). Both planners and
+// LocalRunner.Run call this so invalid plans fail before any step executes.
+func ValidatePlan(plan *Plan) error {
+	if plan == nil {
+		return fmt.Errorf("%w: nil plan", ErrInvalidStep)
+	}
+	if err := ValidateDAG(plan.Steps); err != nil {
+		return err
+	}
+	return validateStepConfigs(plan.Steps, false)
+}
+
+func validateStepConfigs(steps []*Step, inParallel bool) error {
+	for _, s := range steps {
+		if s == nil {
+			continue
+		}
+		switch s.Type {
+		case StepToolCall:
+			if s.Config.ToolName == "" {
+				return fmt.Errorf("%w: tool_call step %q has empty tool_name", ErrInvalidStep, s.ID)
+			}
+		case StepConditional:
+			if inParallel {
+				return fmt.Errorf("%w: step %q: conditional inside parallel is not supported", ErrInvalidStep, s.ID)
+			}
+			if s.Condition != nil && !knownConditionOperators[normalizeOperator(s.Condition.Operator)] {
+				return fmt.Errorf("%w: conditional step %q has unknown operator %q", ErrInvalidStep, s.ID, s.Condition.Operator)
+			}
+		case StepParallel:
+			if err := validateStepConfigs(s.Config.SubSteps, true); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
 
 // ValidateDAG checks that all step dependencies exist and that the graph has no cycles.
 // Returns ErrCyclicDependency if a cycle is detected, ErrDuplicateStepID for duplicate IDs,

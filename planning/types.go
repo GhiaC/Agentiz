@@ -60,7 +60,14 @@ type StepConfig struct {
 	AgentInput   string         `json:"agent_input,omitempty"`
 	SubSteps     []*Step        `json:"sub_steps,omitempty"`
 	MaxRetries   int            `json:"max_retries,omitempty"`
-	Timeout      time.Duration  `json:"timeout,omitempty"`
+	// Timeout bounds a single execution attempt of this step (opt-in: > 0).
+	// The runner enforces it as a hard deadline: when it elapses, the attempt
+	// is abandoned and the plan moves on even if the engine/tool ignores the
+	// context. Trade-off: the abandoned goroutine keeps running in the
+	// background until it returns on its own (it cannot be forcibly stopped).
+	// With MaxRetries > 0 the timeout applies across all attempts of the step,
+	// not per attempt.
+	Timeout time.Duration `json:"timeout,omitempty"`
 }
 
 // --- StepResult ---
