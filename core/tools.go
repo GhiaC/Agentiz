@@ -490,6 +490,9 @@ func (ch *CoreHandler) createSessionTool(_ context.Context, userID string, args 
 		log.Log.Warnf("[CoreHandler] ⚠️  Failed to set active session | UserID: %s | Agent: %s | Error: %v", userID, agentName, err)
 	}
 
+	// The active-session and sessions-list sections of the system prompt changed.
+	ch.invalidateSystemPrompt(userID)
+
 	return fmt.Sprintf("Created new session and set as active (agent: %s)", agentName), nil
 }
 
@@ -522,6 +525,9 @@ func (ch *CoreHandler) changeSessionTool(_ context.Context, userID string, args 
 	if err := ch.setActiveSessionID(userID, agent.Config.AgentType, sessionID); err != nil {
 		return "", fmt.Errorf("failed to set active session: %w", err)
 	}
+
+	// The active-session and sessions-list sections of the system prompt changed.
+	ch.invalidateSystemPrompt(userID)
 
 	title := session.Title
 	if title == "" {

@@ -33,6 +33,12 @@ type CoreHandlerConfig struct {
 
 	// WebSearchDisabled disables web_search and web_search_deepresearch tools.
 	WebSearchDisabled bool
+
+	// SystemPromptCacheTTL is how long an assembled per-user system-prompt array
+	// is reused before being rebuilt by generateSystemPrompt. The Core also
+	// rebuilds sooner when the user's Core session is re-summarized or when their
+	// sessions change. Zero falls back to the 10-minute default.
+	SystemPromptCacheTTL time.Duration
 }
 
 // DefaultCoreHandlerConfig returns default configuration.
@@ -41,6 +47,7 @@ func DefaultCoreHandlerConfig() CoreHandlerConfig {
 		CoreModel:              "openai/gpt-5-nano",
 		AutoSummarizeThreshold: 5,
 		WebSearchDisabled:      true,
+		SystemPromptCacheTTL:   10 * time.Minute,
 	}
 }
 
@@ -58,6 +65,14 @@ type CoreHandler struct {
 
 	coreSessions   map[string]*model.Session
 	coreSessionsMu sync.RWMutex
+
+	// systemPromptCache memoizes the assembled per-user system-prompt array for
+	// config.SystemPromptCacheTTL, so the hot routing path does not rebuild every
+	// section (agent tables, all session contexts, sessions list, user files) on
+	// every message. Invalidated on session create/change and on background
+	// summarization (see invalidateSystemPrompt / InvalidateSystemPromptCache).
+	systemPromptCache   map[string]cachedSystemPrompt
+	systemPromptCacheMu sync.RWMutex
 
 	userMutexes   map[string]*sync.Mutex
 	userMutexesMu sync.RWMutex
@@ -86,6 +101,13 @@ type CoreHandler struct {
 // signature matches engine.Engine.RecordUserFile / Agentize.RecordUserFile.
 type FileRecorder func(sessionID, name, mimeType string, source model.FileSource, data []byte) (*model.UserFile, error)
 
+// cachedSystemPrompt is a per-user snapshot of the assembled Core system-prompt
+// array together with the time it was built, so generateSystemPrompt can expire it.
+type cachedSystemPrompt struct {
+	prompts []string
+	builtAt time.Time
+}
+
 // SetFileRecorder wires a function used to persist files the user sends (such as
 // images) as user files. Optional; when unset, inbound files are not recorded.
 func (ch *CoreHandler) SetFileRecorder(recorder FileRecorder) {
@@ -99,13 +121,14 @@ func NewCoreHandler(
 	config CoreHandlerConfig,
 ) *CoreHandler {
 	ch := &CoreHandler{
-		sessionHandler: sessionHandler,
-		agents:         agents,
-		config:         config,
-		coreSessions:   make(map[string]*model.Session),
-		userMutexes:    make(map[string]*sync.Mutex),
-		userProgress:   engine.NewProgressGuard(),
-		coreTools:      model.NewFunctionRegistry(),
+		sessionHandler:    sessionHandler,
+		agents:            agents,
+		config:            config,
+		coreSessions:      make(map[string]*model.Session),
+		systemPromptCache: make(map[string]cachedSystemPrompt),
+		userMutexes:       make(map[string]*sync.Mutex),
+		userProgress:      engine.NewProgressGuard(),
+		coreTools:         model.NewFunctionRegistry(),
 	}
 
 	ch.registerCoreTools()
@@ -296,7 +319,7 @@ func (ch *CoreHandler) processOneMessageCore(
 	traceStart := time.Now()
 	defer func() { ch.persistRouteTrace(rec, time.Since(traceStart)) }()
 
-	systemPrompts, err := ch.buildSystemPrompts(userID)
+	systemPrompts, err := ch.generateSystemPrompt(userID, coreSession)
 	if err != nil {
 		rec.Fail(err.Error())
 		return "", fmt.Errorf("failed to build system prompts: %w", err)

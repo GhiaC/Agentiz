@@ -382,6 +382,17 @@ func RenderUserDetail(handler *debuger.DebugHandler, userID string, showDeletedS
 		content += billingHTML
 	}
 
+	// Core Agent (brain) panel: the long-term memory the Core router operates on
+	// for this user — its Core session's summary/tags/model and known-document count.
+	var coreSession *model.Session
+	for _, s := range userSessions {
+		if s.AgentType == model.AgentTypeCore {
+			coreSession = s
+			break
+		}
+	}
+	content += renderCoreBrainCard(coreSession, len(userDocs))
+
 	// Sessions card
 	content += ui.CardStartWithCount("Sessions", "diagram-3-fill", len(userSessions))
 
@@ -565,4 +576,57 @@ func RenderUserDetail(handler *debuger.DebugHandler, userID string, showDeletedS
 	content += ui.CardEnd()
 	content += ui.ContainerEnd()
 	return ui.Header("Agentize Debug - User: "+template.HTMLEscapeString(userID)) + ui.NavbarAndBody("/agentize/debug/users", content) + ui.Footer(), nil
+}
+
+// renderCoreBrainCard renders the "Core Agent (Brain)" card on the user detail
+// page: the long-term memory the Core router uses to decide where to send this
+// user's messages. coreSession is the user's AgentType==core session (may be nil);
+// docCount is how many real user files (documents) the Core can reference when
+// delegating to an agent.
+func renderCoreBrainCard(coreSession *model.Session, docCount int) string {
+	out := ui.CardStart("Core Agent (Brain)", "cpu-fill")
+	if coreSession == nil {
+		out += components.InfoAlert("No Core session yet — the Core builds memory after the user's first messages.")
+		out += ui.CardEnd()
+		return out
+	}
+
+	summary := `<span class="text-muted">No summary yet</span>`
+	if coreSession.Summary != "" {
+		summary = template.HTMLEscapeString(coreSession.Summary)
+	}
+	tags := `<span class="text-muted">-</span>`
+	if len(coreSession.Tags) > 0 {
+		tags = template.HTMLEscapeString(strings.Join(coreSession.Tags, ", "))
+	}
+	summarizedAt := "Never"
+	if !coreSession.SummarizedAt.IsZero() {
+		summarizedAt = debuger.FormatTime(coreSession.SummarizedAt)
+	}
+
+	out += fmt.Sprintf(`
+<div class="card-body">
+    <p class="text-muted mb-3">The long-term memory the Core router uses to route this user's messages. Updated in the background by summarization.</p>
+    <table class="table table-sm table-borderless mb-0">
+        <tbody>
+            <tr><td class="text-end fw-bold align-top" style="width: 170px; padding: 0.5rem 1rem;">Core Session:</td><td style="padding: 0.5rem 1rem;">%s</td></tr>
+            <tr><td class="text-end fw-bold" style="padding: 0.5rem 1rem;">Model:</td><td style="padding: 0.5rem 1rem;">%s</td></tr>
+            <tr><td class="text-end fw-bold align-top" style="padding: 0.5rem 1rem;">Memory (Summary):</td><td style="padding: 0.5rem 1rem;">%s</td></tr>
+            <tr><td class="text-end fw-bold align-top" style="padding: 0.5rem 1rem;">Topics (Tags):</td><td style="padding: 0.5rem 1rem;">%s</td></tr>
+            <tr><td class="text-end fw-bold" style="padding: 0.5rem 1rem;">Last Summarized:</td><td class="text-muted" style="padding: 0.5rem 1rem;">%s</td></tr>
+            <tr><td class="text-end fw-bold" style="padding: 0.5rem 1rem;">Messages:</td><td style="padding: 0.5rem 1rem;">%s</td></tr>
+            <tr><td class="text-end fw-bold" style="padding: 0.5rem 1rem;">Known Documents:</td><td style="padding: 0.5rem 1rem;">%s</td></tr>
+        </tbody>
+    </table>
+</div>`,
+		components.InlineCode(coreSession.SessionID),
+		components.InlineCode(debuger.GetModelDisplay(coreSession.Model)),
+		summary,
+		tags,
+		summarizedAt,
+		components.CountBadge(coreSession.MessageSeq, "info"),
+		components.CountBadge(docCount, "secondary"),
+	)
+	out += ui.CardEnd()
+	return out
 }

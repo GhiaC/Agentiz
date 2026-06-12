@@ -53,6 +53,13 @@ type SessionSchedulerConfig struct {
 
 	// SummarizationPrompts holds customizable prompts for summarization
 	SummarizationPrompts SummarizationPrompts
+
+	// OnSessionSummarized, when set, is called after a session is successfully
+	// summarized, with the session's user and ID. Hosts running the multi-agent
+	// Core should wire this to CoreHandler.InvalidateSystemPromptCache(userID) so
+	// the Core rebuilds that user's memory in its system prompt immediately rather
+	// than waiting for the prompt cache TTL to expire. Must be fast and non-blocking.
+	OnSessionSummarized func(userID, sessionID string)
 }
 
 // SummarizationPrompts holds customizable prompts for LLM-based summarization
@@ -871,6 +878,12 @@ func (ss *SessionScheduler) summarizeSession(ctx context.Context, session *model
 		log.Log.Infof("[SessionScheduler] ✅ Session %s summarized | Type: %s | Moved: %d msgs | Retained: %d | Archived: %d | Summary: %s | Tags: %v | Duration: %dms",
 			session.SessionID, summarizationType, movedCount, retainedCount, len(session.ArchivedMsgs),
 			truncateStringForLog(session.Summary, 50), session.Tags, summLog.DurationMs)
+	}
+
+	// Notify the host (e.g. so the Core drops this user's cached system prompt and
+	// rebuilds their memory on the next message). Best-effort; must not block.
+	if ss.config.OnSessionSummarized != nil {
+		ss.config.OnSessionSummarized(session.UserID, session.SessionID)
 	}
 
 	return nil

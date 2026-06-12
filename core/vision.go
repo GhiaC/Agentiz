@@ -93,6 +93,10 @@ func (ch *CoreHandler) ProcessMessageWithImage(
 		metrics.FileOp("upload", metrics.Status(recErr), time.Since(recStart))
 		if recErr != nil {
 			log.Log.Warnf("[CoreHandler] ⚠️  Failed to record uploaded image as user file: %v", recErr)
+		} else {
+			// The User Files prompt section changed; rebuild it so the Core can
+			// reference the just-received file when delegating this very message.
+			ch.invalidateSystemPrompt(userID)
 		}
 	}
 
@@ -136,7 +140,7 @@ func (ch *CoreHandler) ProcessMessageWithImage(
 	userMsgRecord := model.NewUserMessage(imageMsgID, imageSeqID, userID, coreSession.SessionID, historyContent, model.ContentTypeImage)
 	ch.saveMessage(userMsgRecord)
 
-	systemPrompts, err := ch.buildSystemPrompts(userID)
+	systemPrompts, err := ch.generateSystemPrompt(userID, coreSession)
 	if err != nil {
 		return "", fmt.Errorf("failed to build system prompts: %w", err)
 	}

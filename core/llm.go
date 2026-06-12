@@ -46,7 +46,65 @@ func (ch *CoreHandler) callLLM(ctx context.Context, modelName string, messages [
 	return resp, err
 }
 
-// buildSystemPrompts builds the array of system prompts for the Core.
+// generateSystemPrompt returns the per-user system-prompt array, served from a
+// short-lived cache (config.SystemPromptCacheTTL, default 10m) so the hot routing
+// path does not rebuild every section on every message. It rebuilds when the entry
+// expires, when the user's Core session has been (re)summarized since the entry was
+// built (its memory changed), or after invalidateSystemPrompt is called (session
+// create/change, background summarization). coreSession is the freshly loaded Core
+// session and may be nil.
+func (ch *CoreHandler) generateSystemPrompt(userID string, coreSession *model.Session) ([]string, error) {
+	ttl := ch.config.SystemPromptCacheTTL
+	if ttl <= 0 {
+		ttl = 10 * time.Minute
+	}
+
+	ch.systemPromptCacheMu.RLock()
+	entry, ok := ch.systemPromptCache[userID]
+	ch.systemPromptCacheMu.RUnlock()
+
+	if ok && time.Since(entry.builtAt) < ttl && !memorySummarizedSince(coreSession, entry.builtAt) {
+		return entry.prompts, nil
+	}
+
+	prompts, err := ch.buildSystemPrompts(userID)
+	if err != nil {
+		return nil, err
+	}
+
+	ch.systemPromptCacheMu.Lock()
+	ch.systemPromptCache[userID] = cachedSystemPrompt{prompts: prompts, builtAt: time.Now()}
+	ch.systemPromptCacheMu.Unlock()
+
+	return prompts, nil
+}
+
+// memorySummarizedSince reports whether the Core session was summarized after t.
+// When it was, sections 4–5 (the user's memory) are stale and the cached prompt
+// must be rebuilt even inside the TTL window.
+func memorySummarizedSince(coreSession *model.Session, t time.Time) bool {
+	return coreSession != nil && coreSession.SummarizedAt.After(t)
+}
+
+// invalidateSystemPrompt drops the cached system-prompt array for a user so the
+// next message rebuilds it. Safe to call when nothing is cached.
+func (ch *CoreHandler) invalidateSystemPrompt(userID string) {
+	ch.systemPromptCacheMu.Lock()
+	delete(ch.systemPromptCache, userID)
+	ch.systemPromptCacheMu.Unlock()
+}
+
+// InvalidateSystemPromptCache forces the Core to rebuild a user's cached
+// system-prompt array on their next message. Wire this to the session scheduler's
+// OnSessionSummarized hook (SessionSchedulerConfig) so a background summarization
+// is reflected in the Core's memory immediately rather than only when the TTL
+// expires.
+func (ch *CoreHandler) InvalidateSystemPromptCache(userID string) {
+	ch.invalidateSystemPrompt(userID)
+}
+
+// buildSystemPrompts builds the array of system prompts for the Core. Prefer
+// generateSystemPrompt on the hot path; this is the uncached builder it wraps.
 func (ch *CoreHandler) buildSystemPrompts(userID string) ([]string, error) {
 	prompts := []string{coreControllerPrompt}
 
@@ -77,6 +135,12 @@ func (ch *CoreHandler) buildSystemPrompts(userID string) ([]string, error) {
 		prompts = append(prompts, allContexts)
 	}
 
+	// User files: a compact catalog of the user's uploaded/generated files so the
+	// Core can hand a file's ID and name to a worker agent when delegating.
+	if filesPrompt := ch.buildUserFilesPrompt(userID); filesPrompt != "" {
+		prompts = append(prompts, filesPrompt)
+	}
+
 	// Active sessions prompt (which session is active per agent)
 	activePrompt := ch.agents.BuildActiveSessionsPrompt(
 		ch.getSessionFunc(),
@@ -100,6 +164,75 @@ func (ch *CoreHandler) buildSystemPrompts(userID string) ([]string, error) {
 	}
 
 	return prompts, nil
+}
+
+// userFileLister is the subset of the store used to read a user's files. The
+// concrete store (store.Store) implements it; the narrow SessionStore interface
+// does not expose it, so the Core type-asserts as it does elsewhere (see
+// getOrCreateCoreSession). When the store lacks the method, the section is skipped.
+type userFileLister interface {
+	GetUserFilesByUser(userID string) ([]*model.UserFile, error)
+}
+
+// maxUserFilesInPrompt bounds how many files the User Files section lists, keeping
+// the prompt small for users with very large histories.
+const maxUserFilesInPrompt = 50
+
+// buildUserFilesPrompt builds the "User Files" system-prompt section: a compact
+// table of the files the user has uploaded or been given, so the Core can pass a
+// file's ID and name to a worker agent when delegating a file-related task (the
+// agent reads the bytes on demand via its own file tool). Returns "" when the
+// store does not track user files or the user has none.
+func (ch *CoreHandler) buildUserFilesPrompt(userID string) string {
+	lister, ok := ch.sessionHandler.GetStore().(userFileLister)
+	if !ok {
+		return ""
+	}
+	files, err := lister.GetUserFilesByUser(userID)
+	if err != nil || len(files) == 0 {
+		return ""
+	}
+
+	shown := files
+	truncated := 0
+	if len(shown) > maxUserFilesInPrompt {
+		truncated = len(shown) - maxUserFilesInPrompt
+		shown = shown[:maxUserFilesInPrompt]
+	}
+
+	var sb strings.Builder
+	sb.WriteString("# User Files\n\n")
+	sb.WriteString("Files the user uploaded or was given. When a request involves one of these files, ")
+	sb.WriteString("delegate to an agent and include the file's ID and name in your message so the agent can read it with its file tool. ")
+	sb.WriteString("Do not paste file contents yourself.\n\n")
+	sb.WriteString("| File ID | Name | Type | Size | Source |\n")
+	sb.WriteString("|---------|------|------|------|--------|\n")
+	for _, f := range shown {
+		name := f.Name
+		if f.Summary != "" {
+			name = fmt.Sprintf("%s (%s)", f.Name, f.Summary)
+		}
+		sb.WriteString(fmt.Sprintf("| `%s` | %s | %s | %s | %s |\n",
+			f.FileID, name, f.MIMEType, humanizeBytes(f.Size), f.Source))
+	}
+	if truncated > 0 {
+		sb.WriteString(fmt.Sprintf("\n(+%d more not shown)\n", truncated))
+	}
+	return sb.String()
+}
+
+// humanizeBytes formats a byte count as a short human-readable string (B, KB, MB…).
+func humanizeBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for x := n / unit; x >= unit; x /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), "KMGTPE"[exp])
 }
 
 func (ch *CoreHandler) buildMessages(systemPrompts []string, conversationMsgs []openai.ChatCompletionMessage) []openai.ChatCompletionMessage {
