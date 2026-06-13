@@ -142,10 +142,7 @@ func RenderPlanDetail(planStore planning.PlanStore, planID string) (string, erro
 	if len(plan.SystemPrompts) > 0 {
 		content += ui.CardStartWithCount("System Prompts", "chat-left-text", len(plan.SystemPrompts))
 		for i, sp := range plan.SystemPrompts {
-			preview := sp
-			if len(preview) > 500 {
-				preview = preview[:500] + "…"
-			}
+			preview := truncateRunes(sp, 500)
 			content += fmt.Sprintf(`<div class="mb-3"><h6 class="text-muted">Prompt %d</h6><pre class="bg-light p-2 rounded" style="white-space:pre-wrap;max-height:300px;overflow-y:auto;font-size:0.82rem;">%s</pre></div>`,
 				i+1, template.HTMLEscapeString(preview))
 		}

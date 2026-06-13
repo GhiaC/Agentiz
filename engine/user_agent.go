@@ -884,7 +884,7 @@ func (e *Engine) getOpenedNodePrompts(session *model.Session) []string {
 // TEMPORARY: For testing and v1, returns ALL registered tools without needing to open nodes
 func (e *Engine) GetTools(session *model.Session) []openai.Tool {
 	// TEMPORARY: Load all tools from all nodes for testing/v1
-	// TODO: Revert to session-based tool loading after testing
+	// TODO(TD-2): revert to session-based tool loading after v1 testing (tracked in CHANGELOG.md → Tracked technical debt).
 	registry := model.NewToolRegistry(model.MergeStrategyOverride)
 
 	allTools, err := e.Repo.LoadAllTools()
@@ -1583,8 +1583,8 @@ func (e *Engine) executeTool(
 	return processedResult, inject
 }
 
-// executeOneToolCall is kept for backward compatibility but deprecated.
-// Use executeTool instead.
+// Deprecated: use executeTool instead. Kept for backward compatibility; planned
+// for removal (see CHANGELOG.md → Deprecated).
 func (e *Engine) executeOneToolCall(
 	ctx context.Context,
 	session *model.Session,

@@ -15,6 +15,7 @@ func GetStyles() string {
             --bg: #f3f5fa; --surface: #ffffff; --surface-2: #f8f9fc; --border: #e4e8f1;
             --text: #1a2233; --text-2: #5b6478; --text-3: #8a93a8;
             --accent: #4f6df5; --accent-rgb: 79,109,245; --accent-soft: rgba(79,109,245,0.10);
+            --row-core-bg: rgba(79,109,245,0.06);
             --ok: #15803d; --ok-rgb: 21,128,61; --ok-soft: #e7f6ee;
             --info: #0e7490; --info-rgb: 14,116,144; --info-soft: #e0f2fe;
             --warn: #b45309; --warn-rgb: 180,83,9; --warn-soft: #fdf3e3;
@@ -28,6 +29,7 @@ func GetStyles() string {
             --bg: #0e1117; --surface: #161b26; --surface-2: #1b2130; --border: #262e40;
             --text: #e6e9f0; --text-2: #9aa3b5; --text-3: #6b7385;
             --accent: #7c93ff; --accent-rgb: 124,147,255; --accent-soft: rgba(124,147,255,0.14);
+            --row-core-bg: rgba(124,147,255,0.08);
             --ok: #4ade80; --ok-rgb: 74,222,128; --ok-soft: rgba(74,222,128,0.12);
             --info: #38bdf8; --info-rgb: 56,189,248; --info-soft: rgba(56,189,248,0.12);
             --warn: #fbbf24; --warn-rgb: 251,191,36; --warn-soft: rgba(251,191,36,0.12);
@@ -210,6 +212,30 @@ func GetStyles() string {
         .table-light, .table-light > th, .table-light > td {
             --bs-table-bg: var(--surface-2); background: var(--surface-2); color: var(--text);
         }
+
+        /* ============ Agent-type row accents ============ */
+        /* Session rows are colour-coded by agent type with a slim rail on the
+           row's leading edge that matches the agent's badge — and Core (the
+           primary agent) keeps a faint accent wash so its rows still stand out.
+           Replaces Bootstrap's off-palette .table-danger wash that tinted Core
+           rows a muddy red. The rail is a pseudo-element, so it layers cleanly
+           over the row-hover highlight and adds no layout shift. */
+        tr.row-agent-core > td:first-child,
+        tr.row-agent-high > td:first-child,
+        tr.row-agent-low  > td:first-child,
+        tr.row-agent-user > td:first-child { position: relative; }
+        tr.row-agent-core > td:first-child::before,
+        tr.row-agent-high > td:first-child::before,
+        tr.row-agent-low  > td:first-child::before,
+        tr.row-agent-user > td:first-child::before {
+            content: ""; position: absolute; left: 0; top: 0; bottom: 0;
+            width: 3px; border-radius: 0 2px 2px 0;
+        }
+        tr.row-agent-core > td:first-child::before { background: var(--accent); }
+        tr.row-agent-high > td:first-child::before { background: var(--ok); }
+        tr.row-agent-low  > td:first-child::before { background: var(--info); }
+        tr.row-agent-user > td:first-child::before { background: var(--warn); }
+        tr.row-agent-core { --bs-table-bg: var(--row-core-bg); }
 
         /* ============ Badges (soft pills) ============ */
         .badge {

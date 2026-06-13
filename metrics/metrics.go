@@ -3,9 +3,11 @@
 // It is meticulous by design: every metered activity — message processing (Core
 // and per-agent), LLM calls (by purpose), tool calls, agent routing/escalation,
 // backup-LLM fallbacks, the session-summarization scheduler, planning, knowledge
-// file opens and moderation — is recorded here. All collectors live on the
-// default Prometheus registry, so the exposed handler also includes Go
-// runtime/process metrics.
+// file opens and moderation — is recorded here. All collectors live on a
+// dedicated registry (see registry below) together with the Go runtime/process
+// collectors, so the exposed handler reports a known, bounded set of series
+// rather than the global default registry. Set
+// AGENTIZE_METRICS_DEFAULT_REGISTRY=1 to expose the global default registry.
 //
 // The host application exposes these via Agentize.RegisterRoutes (which mounts
 // /agentize/metrics) or by mounting metrics.Handler() on its own router.
@@ -13,15 +15,39 @@ package metrics
 
 import (
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 const namespace = "agentize"
+
+// registry is a dedicated Prometheus registry holding only Agentize's own
+// collectors plus the Go runtime and process collectors. Using our own registry
+// (instead of the global default) means the /agentize/metrics endpoint exposes a
+// known, bounded set of series and never leaks collectors that other imported
+// libraries may have registered on the global default registry. Set
+// AGENTIZE_METRICS_DEFAULT_REGISTRY=1 to expose the full global default registry
+// instead (opt-in).
+var registry = prometheus.NewRegistry()
+
+// factory registers every agentize_* collector (here and in summarization.go)
+// onto the dedicated registry above instead of the global default.
+var factory = promauto.With(registry)
+
+func init() {
+	// Keep Go runtime + process metrics (go_goroutines,
+	// process_resident_memory_bytes, …) available on the dedicated registry so
+	// the Grafana runtime panels keep working without exposing the whole global
+	// default registry.
+	registry.MustRegister(collectors.NewGoCollector())
+	registry.MustRegister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
+}
 
 // Status returns "ok" or "error" depending on err — a convenience for callers.
 func Status(err error) string {
@@ -32,11 +58,12 @@ func Status(err error) string {
 }
 
 var (
-	msgLatencyBuckets  = []float64{0.1, 0.25, 0.5, 1, 2, 4, 8, 15, 30, 60, 120, 300}
-	llmLatencyBuckets  = []float64{0.1, 0.25, 0.5, 1, 2, 4, 8, 15, 30, 60, 120}
-	schedBuckets       = []float64{0.5, 1, 2, 5, 10, 30, 60, 120, 300, 600}
-	scanBuckets        = prometheus.ExponentialBuckets(1, 2, 12) // 1 → ~2048 sessions
-	fileLatencyBuckets = []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5}
+	msgLatencyBuckets   = []float64{0.1, 0.25, 0.5, 1, 2, 4, 8, 15, 30, 60, 120, 300}
+	llmLatencyBuckets   = []float64{0.1, 0.25, 0.5, 1, 2, 4, 8, 15, 30, 60, 120}
+	schedBuckets        = []float64{0.5, 1, 2, 5, 10, 30, 60, 120, 300, 600}
+	scanBuckets         = prometheus.ExponentialBuckets(1, 2, 12) // 1 → ~2048 sessions
+	fileLatencyBuckets  = []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5}
+	storeLatencyBuckets = []float64{0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5}
 )
 
 // ---------------------------------------------------------------------------
@@ -44,22 +71,22 @@ var (
 // ---------------------------------------------------------------------------
 
 var (
-	messages = promauto.NewCounterVec(prometheus.CounterOpts{
+	messages = factory.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace, Subsystem: "message", Name: "processed_total",
 		Help: "Messages processed by layer (core|agent) and status (ok|error).",
 	}, []string{"layer", "status"})
 
-	messageDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
+	messageDuration = factory.NewHistogramVec(prometheus.HistogramOpts{
 		Namespace: namespace, Subsystem: "message", Name: "duration_seconds",
 		Help: "End-to-end message processing time by layer.", Buckets: msgLatencyBuckets,
 	}, []string{"layer"})
 
-	messagesInProgress = promauto.NewGaugeVec(prometheus.GaugeOpts{
+	messagesInProgress = factory.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: namespace, Subsystem: "message", Name: "in_progress",
 		Help: "Messages currently being processed by layer.",
 	}, []string{"layer"})
 
-	messagesQueued = promauto.NewCounterVec(prometheus.CounterOpts{
+	messagesQueued = factory.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace, Subsystem: "message", Name: "queued_total",
 		Help: "Messages queued because the user/session was busy, by layer.",
 	}, []string{"layer"})
@@ -83,17 +110,17 @@ func MessageQueued(layer string) { messagesQueued.WithLabelValues(layer).Inc() }
 // ---------------------------------------------------------------------------
 
 var (
-	llmCalls = promauto.NewCounterVec(prometheus.CounterOpts{
+	llmCalls = factory.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace, Subsystem: "llm", Name: "calls_total",
 		Help: "LLM calls by purpose (core|agent|vision|summary|moderation|backup), model and status.",
 	}, []string{"purpose", "model", "status"})
 
-	llmDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
+	llmDuration = factory.NewHistogramVec(prometheus.HistogramOpts{
 		Namespace: namespace, Subsystem: "llm", Name: "call_duration_seconds",
 		Help: "LLM call latency by purpose and model.", Buckets: llmLatencyBuckets,
 	}, []string{"purpose", "model"})
 
-	llmTokens = promauto.NewCounterVec(prometheus.CounterOpts{
+	llmTokens = factory.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace, Subsystem: "llm", Name: "tokens_total",
 		Help: "LLM token usage by purpose, model and type (input|output|cached).",
 	}, []string{"purpose", "model", "type"})
@@ -126,22 +153,22 @@ func LLMCall(purpose, model, status string, dur time.Duration, prompt, completio
 // ---------------------------------------------------------------------------
 
 var (
-	toolCalls = promauto.NewCounterVec(prometheus.CounterOpts{
+	toolCalls = factory.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace, Subsystem: "tool", Name: "calls_total",
 		Help: "Tool calls by layer (core|agent), tool name and status.",
 	}, []string{"layer", "tool", "status"})
 
-	toolDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
+	toolDuration = factory.NewHistogramVec(prometheus.HistogramOpts{
 		Namespace: namespace, Subsystem: "tool", Name: "call_duration_seconds",
 		Help: "Tool call latency by layer and tool.", Buckets: llmLatencyBuckets,
 	}, []string{"layer", "tool"})
 
-	agentRouting = promauto.NewCounterVec(prometheus.CounterOpts{
+	agentRouting = factory.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace, Subsystem: "agent", Name: "routing_total",
 		Help: "Agent routing (delegation) calls by target agent and status.",
 	}, []string{"agent", "status"})
 
-	agentEscalations = promauto.NewCounterVec(prometheus.CounterOpts{
+	agentEscalations = factory.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace, Subsystem: "agent", Name: "escalations_total",
 		Help: "Agent escalations to a higher cost tier, by originating agent.",
 	}, []string{"agent"})
@@ -179,13 +206,13 @@ func AgentEscalation(agent string) {
 // ---------------------------------------------------------------------------
 
 var (
-	systemPromptCacheLookups = promauto.NewCounterVec(prometheus.CounterOpts{
+	systemPromptCacheLookups = factory.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace, Subsystem: "system_prompt", Name: "cache_total",
 		Help: "Core system-prompt cache lookups by result: hit (served from cache), " +
 			"miss (no entry), stale (entry expired or invalidated by summarization).",
 	}, []string{"result"})
 
-	systemPromptSections = promauto.NewCounterVec(prometheus.CounterOpts{
+	systemPromptSections = factory.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace, Subsystem: "system_prompt", Name: "sections_dropped_total",
 		Help: "Optional system-prompt sections dropped because the assembled prompt hit MaxSystemPromptSize, by section.",
 	}, []string{"section"})
@@ -206,13 +233,13 @@ func SystemPromptSectionDropped(section string) {
 // ---------------------------------------------------------------------------
 
 var (
-	routeTraces = promauto.NewCounterVec(prometheus.CounterOpts{
+	routeTraces = factory.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace, Subsystem: "route_trace", Name: "recorded_total",
 		Help: "Core routing-decision DAGs recorded, by status (ok|error). " +
 			"\"error\" covers both a failed message and a failed trace persist.",
 	}, []string{"status"})
 
-	routeTraceNodes = promauto.NewHistogram(prometheus.HistogramOpts{
+	routeTraceNodes = factory.NewHistogram(prometheus.HistogramOpts{
 		Namespace: namespace, Subsystem: "route_trace", Name: "nodes",
 		Help:    "Number of nodes (decisions + tool calls + forwards + response) per routing DAG.",
 		Buckets: []float64{1, 2, 3, 4, 5, 7, 10, 15, 20, 30, 50},
@@ -234,7 +261,7 @@ func RouteTrace(status string, nodes int) {
 // Backup LLM chain
 // ---------------------------------------------------------------------------
 
-var backupLLM = promauto.NewCounterVec(prometheus.CounterOpts{
+var backupLLM = factory.NewCounterVec(prometheus.CounterOpts{
 	Namespace: namespace, Subsystem: "backup", Name: "llm_total",
 	Help: "Backup-LLM provider attempts by provider, model and status (ok|error).",
 }, []string{"provider", "model", "status"})
@@ -255,32 +282,32 @@ func BackupLLM(provider, model, status string) {
 // ---------------------------------------------------------------------------
 
 var (
-	schedRuns = promauto.NewCounterVec(prometheus.CounterOpts{
+	schedRuns = factory.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace, Subsystem: "scheduler", Name: "runs_total",
 		Help: "Scheduler check cycles by status (ok|error).",
 	}, []string{"status"})
 
-	schedRunDuration = promauto.NewHistogram(prometheus.HistogramOpts{
+	schedRunDuration = factory.NewHistogram(prometheus.HistogramOpts{
 		Namespace: namespace, Subsystem: "scheduler", Name: "run_duration_seconds",
 		Help: "Duration of one scheduler check cycle.", Buckets: schedBuckets,
 	})
 
-	schedScanned = promauto.NewHistogram(prometheus.HistogramOpts{
+	schedScanned = factory.NewHistogram(prometheus.HistogramOpts{
 		Namespace: namespace, Subsystem: "scheduler", Name: "sessions_scanned",
 		Help: "Sessions scanned per scheduler cycle.", Buckets: scanBuckets,
 	})
 
-	schedSummaries = promauto.NewCounterVec(prometheus.CounterOpts{
+	schedSummaries = factory.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace, Subsystem: "scheduler", Name: "summaries_total",
 		Help: "Per-session summarizations by status (ok|error).",
 	}, []string{"status"})
 
-	schedSummaryDuration = promauto.NewHistogram(prometheus.HistogramOpts{
+	schedSummaryDuration = factory.NewHistogram(prometheus.HistogramOpts{
 		Namespace: namespace, Subsystem: "scheduler", Name: "summary_duration_seconds",
 		Help: "Duration of one session summarization.", Buckets: schedBuckets,
 	})
 
-	schedRunning = promauto.NewGauge(prometheus.GaugeOpts{
+	schedRunning = factory.NewGauge(prometheus.GaugeOpts{
 		Namespace: namespace, Subsystem: "scheduler", Name: "running",
 		Help: "1 while a scheduler cycle is executing, else 0.",
 	})
@@ -313,27 +340,27 @@ func SchedulerSummary(status string, dur time.Duration) {
 // ---------------------------------------------------------------------------
 
 var (
-	knowledgeOpens = promauto.NewCounterVec(prometheus.CounterOpts{
+	knowledgeOpens = factory.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace, Subsystem: "knowledge", Name: "file_opens_total",
 		Help: "Knowledge node/file opens by status (ok|error).",
 	}, []string{"status"})
 
-	moderationChecks = promauto.NewCounterVec(prometheus.CounterOpts{
+	moderationChecks = factory.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace, Subsystem: "moderation", Name: "checks_total",
 		Help: "Moderation checks by result (ok|nonsense|banned|error).",
 	}, []string{"result"})
 
-	bans = promauto.NewCounterVec(prometheus.CounterOpts{
+	bans = factory.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace, Subsystem: "moderation", Name: "bans_total",
 		Help: "User bans applied by reason (nonsense|offensive|manual).",
 	}, []string{"reason"})
 
-	planRuns = promauto.NewCounterVec(prometheus.CounterOpts{
+	planRuns = factory.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace, Subsystem: "planning", Name: "runs_total",
 		Help: "Plan executions by status (ok|error).",
 	}, []string{"status"})
 
-	planSteps = promauto.NewCounterVec(prometheus.CounterOpts{
+	planSteps = factory.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace, Subsystem: "planning", Name: "steps_total",
 		Help: "Plan steps executed by status (ok|error).",
 	}, []string{"status"})
@@ -364,17 +391,17 @@ func PlanStep(status string) { planSteps.WithLabelValues(status).Inc() }
 // ---------------------------------------------------------------------------
 
 var (
-	fileOps = promauto.NewCounterVec(prometheus.CounterOpts{
+	fileOps = factory.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace, Subsystem: "file", Name: "operations_total",
 		Help: "User-file operations by operation (list|read|grep|save|edit|edit_image|upload) and status (ok|error).",
 	}, []string{"operation", "status"})
 
-	fileOpDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
+	fileOpDuration = factory.NewHistogramVec(prometheus.HistogramOpts{
 		Namespace: namespace, Subsystem: "file", Name: "operation_duration_seconds",
 		Help: "User-file operation latency by operation.", Buckets: fileLatencyBuckets,
 	}, []string{"operation"})
 
-	fileBytes = promauto.NewCounterVec(prometheus.CounterOpts{
+	fileBytes = factory.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace, Subsystem: "file", Name: "bytes_total",
 		Help: "User-file bytes moved by direction (stored|read).",
 	}, []string{"direction"})
@@ -403,17 +430,17 @@ func FileBytes(direction string, n int64) {
 // ---------------------------------------------------------------------------
 
 var (
-	imageEdits = promauto.NewCounterVec(prometheus.CounterOpts{
+	imageEdits = factory.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace, Subsystem: "image", Name: "edits_total",
 		Help: "Image edit attempts by model and status (ok|error).",
 	}, []string{"model", "status"})
 
-	imageEditDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
+	imageEditDuration = factory.NewHistogramVec(prometheus.HistogramOpts{
 		Namespace: namespace, Subsystem: "image", Name: "edit_duration_seconds",
 		Help: "Image edit latency by model.", Buckets: llmLatencyBuckets,
 	}, []string{"model"})
 
-	imageEditBytes = promauto.NewCounterVec(prometheus.CounterOpts{
+	imageEditBytes = factory.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace, Subsystem: "image", Name: "edit_bytes_total",
 		Help: "Image edit bytes by direction (input|output).",
 	}, []string{"direction"})
@@ -441,10 +468,18 @@ func ImageEdit(model, status string, dur time.Duration, inBytes, outBytes int64)
 // Store (persistence layer)
 // ---------------------------------------------------------------------------
 
-var storeDeletions = promauto.NewCounterVec(prometheus.CounterOpts{
-	Namespace: namespace, Subsystem: "store", Name: "deletions_total",
-	Help: "Destructive store operations by entity (session|user_data|user_file). Pairs with the store audit log.",
-}, []string{"entity"})
+var (
+	storeDeletions = factory.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace, Subsystem: "store", Name: "deletions_total",
+		Help: "Destructive store operations by entity (session|user_data|user_file). Pairs with the store audit log.",
+	}, []string{"entity"})
+
+	storeQueryDuration = factory.NewHistogramVec(prometheus.HistogramOpts{
+		Namespace: namespace, Subsystem: "store", Name: "query_duration_seconds",
+		Help:    "Store operation latency by operation (store method name) and backend (sqlite|mongodb).",
+		Buckets: storeLatencyBuckets,
+	}, []string{"operation", "backend"})
+)
 
 // RecordStoreDeletion counts one destructive store operation (audit trail).
 func RecordStoreDeletion(entity string) {
@@ -454,15 +489,63 @@ func RecordStoreDeletion(entity string) {
 	storeDeletions.WithLabelValues(entity).Inc()
 }
 
+// StoreQuery records the latency of one store operation. operation is the store
+// method name (e.g. "Get", "PutMessage"); backend is "sqlite" or "mongodb".
+func StoreQuery(operation, backend string, dur time.Duration) {
+	if operation == "" {
+		operation = "unknown"
+	}
+	if backend == "" {
+		backend = "unknown"
+	}
+	storeQueryDuration.WithLabelValues(operation, backend).Observe(dur.Seconds())
+}
+
+// ---------------------------------------------------------------------------
+// Audit (destructive admin actions)
+// ---------------------------------------------------------------------------
+
+var auditActions = factory.NewCounterVec(prometheus.CounterOpts{
+	Namespace: namespace, Subsystem: "audit", Name: "actions_total",
+	Help: "Audited admin actions by action (e.g. delete_user_data) and status (ok|error|rejected).",
+}, []string{"action", "status"})
+
+// AuditAction records one audited admin action. It pairs with an [AUDIT] log
+// line at the call site, giving both a queryable counter and a forensic record.
+func AuditAction(action, status string) {
+	if action == "" {
+		action = "unknown"
+	}
+	if status == "" {
+		status = "unknown"
+	}
+	auditActions.WithLabelValues(action, status).Inc()
+}
+
 // ---------------------------------------------------------------------------
 // HTTP exposition
 // ---------------------------------------------------------------------------
 
-// Handler returns the standard Prometheus HTTP handler (default registry).
-func Handler() http.Handler { return promhttp.Handler() }
+// Registry returns the dedicated Agentize Prometheus registry (agentize_* plus
+// the Go runtime/process collectors). Hosts building their own handler can
+// gather from this instead of the global default registry.
+func Registry() *prometheus.Registry { return registry }
 
-// GinHandler adapts the Prometheus handler to a gin.HandlerFunc.
+// metricsHandler serves the dedicated Agentize registry by default. Set
+// AGENTIZE_METRICS_DEFAULT_REGISTRY=1 to expose the full global default registry
+// instead (every collector any imported package registered there).
+func metricsHandler() http.Handler {
+	if os.Getenv("AGENTIZE_METRICS_DEFAULT_REGISTRY") == "1" {
+		return promhttp.Handler()
+	}
+	return promhttp.HandlerFor(registry, promhttp.HandlerOpts{Registry: registry})
+}
+
+// Handler returns the Prometheus HTTP handler for the Agentize metrics.
+func Handler() http.Handler { return metricsHandler() }
+
+// GinHandler adapts the Agentize metrics handler to a gin.HandlerFunc.
 func GinHandler() gin.HandlerFunc {
-	h := promhttp.Handler()
+	h := metricsHandler()
 	return func(c *gin.Context) { h.ServeHTTP(c.Writer, c.Request) }
 }

@@ -74,32 +74,54 @@ func TokenBadge(total, prompt, completion int) string {
 		total, prompt, completion)
 }
 
+// agentTypeStyle describes how one agent type is presented across the debug UI:
+// its display label, the soft-pill badge variant, and the session-table row
+// accent class. Keeping these together gives badges and table rows a single
+// source of truth for agent-type colour-coding, so a row's accent rail always
+// matches its badge. The row classes themselves are styled in debuger/ui/styles.go.
+type agentTypeStyle struct {
+	label    string // human-facing label
+	badge    string // Bootstrap badge variant (re-skinned as a soft pill in styles.go)
+	rowClass string // session-table row accent class (.row-agent-*)
+}
+
+var agentTypeStyles = map[model.AgentType]agentTypeStyle{
+	model.AgentTypeCore: {label: "Core", badge: "primary", rowClass: "row-agent-core"},
+	model.AgentTypeHigh: {label: "High", badge: "success", rowClass: "row-agent-high"},
+	model.AgentTypeLow:  {label: "Low", badge: "info", rowClass: "row-agent-low"},
+	model.AgentTypeUser: {label: "User", badge: "warning", rowClass: "row-agent-user"},
+}
+
 // AgentTypeBadge generates a badge for agent types (string). Use AgentTypeBadgeFromModel for model.AgentType.
 func AgentTypeBadge(agentType string) string {
 	return AgentTypeBadgeFromString(agentType)
 }
 
-// AgentTypeBadgeFromModel returns a badge for agent type from model.AgentType.
+// AgentTypeBadgeFromModel returns a soft-pill badge for an agent type.
 func AgentTypeBadgeFromModel(agentType model.AgentType) string {
-	switch agentType {
-	case model.AgentTypeCore:
-		return Badge("Core", "primary")
-	case model.AgentTypeLow:
-		return Badge("Low", "info")
-	case model.AgentTypeHigh:
-		return Badge("High", "success")
-	case model.AgentTypeUser:
-		return Badge("User", "warning")
-	case "":
-		return Badge("-", "secondary")
-	default:
-		return Badge(string(agentType), "secondary")
+	if s, ok := agentTypeStyles[agentType]; ok {
+		return Badge(s.label, s.badge)
 	}
+	if agentType == "" {
+		return Badge("-", "secondary")
+	}
+	return Badge(string(agentType), "secondary")
 }
 
 // AgentTypeBadgeFromString returns a badge for agent type from string.
 func AgentTypeBadgeFromString(agentType string) string {
 	return AgentTypeBadgeFromModel(model.AgentType(agentType))
+}
+
+// AgentTypeRowClass returns the session-table row class that colour-codes a row
+// by its agent type: a slim accent rail matching the agent's badge (plus a faint
+// wash for Core, the primary agent). Empty or unknown types get no accent.
+// The classes are defined in debuger/ui/styles.go.
+func AgentTypeRowClass(agentType model.AgentType) string {
+	if s, ok := agentTypeStyles[agentType]; ok {
+		return s.rowClass
+	}
+	return ""
 }
 
 // BoolBadge generates a badge for boolean values

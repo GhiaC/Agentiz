@@ -656,25 +656,6 @@ func (ss *SessionScheduler) summarizeSession(ctx context.Context, session *model
 	}
 	session = freshSession
 
-	// TODO Remove this
-	// Repair: if session has SummarizedAt but Summary is empty, try to restore from latest summarization log
-	//if !session.SummarizedAt.IsZero() && session.Summary == "" {
-	//	if debugStore, ok := sessionStore.(debuger.DebugStore); ok {
-	//		logs, err := debugStore.GetSummarizationLogsBySession(session.SessionID)
-	//		if err == nil {
-	//			for _, l := range logs {
-	//				if l.GeneratedSummary != "" {
-	//					session.Summary = l.GeneratedSummary
-	//					if err := sessionStore.Put(session); err == nil && !ss.config.DisableLogs {
-	//						log.Log.Infof("[SessionScheduler] 🔧 Repaired session %s: restored Summary from summarization log", session.SessionID)
-	//					}
-	//					return nil
-	//				}
-	//			}
-	//		}
-	//	}
-	//}
-
 	msgCount := len(session.Msgs)
 	// When Msgs is empty but summarization is needed (e.g. SummarizedAt set but Summary empty), use ArchivedMsgs
 	useArchivedForSummary := false
@@ -873,6 +854,12 @@ func (ss *SessionScheduler) summarizeSession(ctx context.Context, session *model
 
 	metrics.SummarizationResult(summarizationType, "ok", msgCount, movedCount, retainedCount,
 		len(previousSummary), len(session.Summary), summLog.PromptTokens, summLog.CompletionTokens)
+
+	// Record how stale the previous summary was when we refreshed it. Skipped on
+	// the first-ever summarization, where there is no previous summary to age.
+	if !previousSummarizedAt.IsZero() {
+		metrics.SummaryAge(time.Since(previousSummarizedAt))
+	}
 
 	if !ss.config.DisableLogs {
 		log.Log.Infof("[SessionScheduler] ✅ Session %s summarized | Type: %s | Moved: %d msgs | Retained: %d | Archived: %d | Summary: %s | Tags: %v | Duration: %dms",

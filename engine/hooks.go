@@ -88,7 +88,9 @@ type UsageEvent struct {
 	SessionID string
 	EventType EventType
 	Name      string // for LLM: use EventNameLLMCall; for tool_call: tool name; for agent_routing: agent type (e.g. high, low)
-	Tokens    int    // token count (for LLM calls) - deprecated, use Input/Output/Cached
+	// Deprecated: use InputTokens/OutputTokens/CachedInputTokens instead. Retained
+	// for backward compatibility; planned for removal (see CHANGELOG.md → Deprecated).
+	Tokens int
 	// Detailed token counts for LLM calls (Credit+Usage billing)
 	InputTokens       int
 	OutputTokens      int

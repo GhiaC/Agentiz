@@ -23,8 +23,15 @@ router.GET("/metrics", metrics.GinHandler())   // gin
 mux.Handle("/metrics", metrics.Handler())
 ```
 
-Because it uses the default registry, the endpoint also exposes Go runtime and
-process metrics (`go_goroutines`, `process_resident_memory_bytes`, …).
+The endpoint serves a **dedicated registry** holding only the `agentize_*`
+collectors plus the Go runtime and process collectors (`go_goroutines`,
+`process_resident_memory_bytes`, …) — never the global default registry that
+other imported libraries might pollute. To expose the full global default
+registry instead, set `AGENTIZE_METRICS_DEFAULT_REGISTRY=1`. Hosts building their
+own handler can gather from `metrics.Registry()`.
+
+> The endpoint requires admin auth when `AGENTIZE_ADMIN_USERNAME` /
+> `AGENTIZE_ADMIN_PASSWORD` are configured (see `auth.go`).
 
 ## Scrape config
 
@@ -36,6 +43,14 @@ process metrics (`go_goroutines`, `process_resident_memory_bytes`, …).
 ```
 
 A ready-made Grafana dashboard is in [`grafana/agentize-dashboard.json`](./grafana/agentize-dashboard.json).
+
+## Related operational env vars
+
+| Variable | Effect |
+|----------|--------|
+| `AGENTIZE_LOG_LEVEL` | `debug` \| `info` \| `warn` \| `error` (default `info`), read at init |
+| `AGENTIZE_LOG_FORMAT` | `text` (default — emoji console) \| `json` (structured, for production) |
+| `AGENTIZE_METRICS_DEFAULT_REGISTRY` | set to `1` to expose the full global default registry instead of the dedicated one |
 
 ## Metric catalogue (prefix `agentize_`)
 
@@ -108,6 +123,26 @@ See [ROUTING_DAG.md](./ROUTING_DAG.md) for the trace this comes from and the
 
 See [PLANNING.md](./PLANNING.md) for the planning subsystem these come from.
 
+### Store (persistence layer)
+| Metric | Type | Labels |
+|--------|------|--------|
+| `store_query_duration_seconds` | histogram | `operation` (store method name, e.g. `Get`, `PutMessage`), `backend` (sqlite/mongodb) |
+| `store_deletions_total` | counter | `entity` (session/user_data/user_file) — destructive store operations; pairs with the store audit log |
+
+`store_query_duration_seconds` comes from a transparent wrapper around the
+`store.Store` returned to the agent (`store.NewMetered`), so it covers any
+backend. In-memory helpers (visited-node tracking) and trivial accessors are not
+timed.
+
+### Audit (destructive admin actions)
+| Metric | Type | Labels |
+|--------|------|--------|
+| `audit_actions_total` | counter | `action` (e.g. `delete_user_data`), `status` (ok/error/rejected) |
+
+Emitted alongside an `[AUDIT]` log line (user + client IP + outcome). `rejected`
+means the destructive POST was refused for failing the `?confirm=<userID>` typed
+confirmation. See `routes.go` (`handleDebugUserDeleteData`).
+
 ### User files (file manager)
 | Metric | Type | Labels |
 |--------|------|--------|
@@ -140,6 +175,7 @@ Emitted by the built-in OpenRouter image editor (`imageedit/`) on every
 | `summarization_summary_growth_chars` | histogram | — (delta vs previous; <0 = compaction) |
 | `summarization_tokens_total` | counter | `type` (prompt/completion) |
 | `summarization_offensive_total` | counter | — |
+| `summary_age_seconds` | histogram | — (age of the previous summary when a session is re-summarized; high = summaries go stale before refresh. First-ever summarization is not counted.) |
 
 Dashboard: [`grafana/agentize-summarization-dashboard.json`](./grafana/agentize-summarization-dashboard.json).
 
@@ -195,6 +231,16 @@ histogram_quantile(0.95, sum by (le, model) (rate(agentize_image_edit_duration_s
 # Image edit failure ratio
 sum(rate(agentize_image_edits_total{status="error"}[1h]))
   / clamp_min(sum(rate(agentize_image_edits_total[1h])), 1)
+
+# Store query latency p95 by operation & backend
+histogram_quantile(0.95, sum by (le, operation, backend) (rate(agentize_store_query_duration_seconds_bucket[10m])))
+
+# Summary staleness at refresh (p50/p95, seconds)
+histogram_quantile(0.5, rate(agentize_summary_age_seconds_bucket[1h]))
+histogram_quantile(0.95, rate(agentize_summary_age_seconds_bucket[1h]))
+
+# Audited admin actions (/h), incl. rejected (failed ?confirm=) attempts
+sum by (action, status) (rate(agentize_audit_actions_total[1h])) * 3600
 ```
 
 ## Image editing flow
@@ -248,4 +294,8 @@ files).
 | Backup LLM chain | `engine/backup_chain.go` |
 | Summarization scheduler | `engine/schedules.go` |
 | Knowledge file opens | `engine/file_tools.go` |
-| HTTP route | `routes.go` (`/agentize/metrics`) |
+| Store query latency (per backend) | `store/metered.go` (wraps `store.Store`) |
+| Store deletions audit | `store/maintenance.go` |
+| Summary age (staleness at refresh) | `engine/schedules.go` |
+| Audit actions (delete-data) | `routes.go` (`handleDebugUserDeleteData`) |
+| HTTP route + raw-file rate limit | `routes.go` (`/agentize/metrics`), `ratelimit.go` |

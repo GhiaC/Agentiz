@@ -543,7 +543,7 @@ Example: "Debugged Kubernetes pod restart issue. Found memory limits too low. Ap
 	return strings.TrimSpace(resp.Choices[0].Message.Content), nil
 }
 
-// TODO Refactor This Function to move better place in llmutils
+// TODO(TD-1): move generateTags into llmutils (tracked in CHANGELOG.md → Tracked technical debt).
 // generateTags generates tags for the session
 func (s *Session) generateTags(ctx context.Context, client LLMClient, model string, conversationText string) ([]string, error) {
 	systemPrompt := `You are a conversation tagger.

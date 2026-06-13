@@ -24,6 +24,11 @@ import (
 // except /agentize/health and the login endpoints requires a signed-in admin.
 func (ag *Agentize) RegisterRoutes(router *gin.Engine) {
 	ag.initAdminAuth()
+	if ag.rawFileLimiter == nil {
+		// Throttle raw user-file downloads to 10/min per IP (burst 10), guarding
+		// against bulk exfiltration by fileID enumeration even when authenticated.
+		ag.rawFileLimiter = newIPRateLimiter(10, 10)
+	}
 
 	// Always-open endpoints
 	router.GET("/agentize/health", ag.handleHealth)
@@ -241,8 +246,21 @@ func (ag *Agentize) handleDebugUserDeleteData(c *gin.Context) {
 		return
 	}
 
+	// Typed-confirmation guard: the caller must echo the exact target userID in a
+	// ?confirm= param, so a blind or forged POST to the path cannot wipe data.
+	if c.Query("confirm") != userID {
+		log.Log.Warnf("[Agentize] [AUDIT] delete-user-data REJECTED (confirmation mismatch) | user=%s ip=%s", userID, c.ClientIP())
+		metrics.AuditAction("delete_user_data", "rejected")
+		c.JSON(400, gin.H{"error": "confirmation required: re-submit with ?confirm=<userID> matching the target user"})
+		return
+	}
+
+	// Audit the start of a destructive operation before doing any work.
+	log.Log.Warnf("[Agentize] [AUDIT] delete-user-data START | user=%s ip=%s", userID, c.ClientIP())
+
 	handler, err := ag.createDebugHandler()
 	if err != nil {
+		metrics.AuditAction("delete_user_data", "error")
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
@@ -254,17 +272,23 @@ func (ag *Agentize) handleDebugUserDeleteData(c *gin.Context) {
 	}
 
 	if err := handler.GetStore().DeleteUserData(userID); err != nil {
+		metrics.AuditAction("delete_user_data", "error")
+		log.Log.Errorf("[Agentize] [AUDIT] delete-user-data FAILED | user=%s ip=%s error=%v", userID, c.ClientIP(), err)
 		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to delete user data: %v", err)})
 		return
 	}
 
 	if ag.userDeleteDataHook != nil {
 		if err := ag.userDeleteDataHook(userID); err != nil {
+			metrics.AuditAction("delete_user_data", "error")
+			log.Log.Errorf("[Agentize] [AUDIT] delete-user-data hook FAILED | user=%s ip=%s error=%v", userID, c.ClientIP(), err)
 			c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to delete user billing/quota data: %v", err)})
 			return
 		}
 	}
 
+	metrics.AuditAction("delete_user_data", "ok")
+	log.Log.Warnf("[Agentize] [AUDIT] delete-user-data OK | user=%s ip=%s", userID, c.ClientIP())
 	c.Redirect(302, "/agentize/debug/users/"+url.PathEscape(userID)+"?deleted=1")
 }
 
@@ -405,6 +429,12 @@ func (ag *Agentize) handleDebugDocumentRaw(c *gin.Context) {
 	fileID := c.Param("fileID")
 	if fileID == "" {
 		c.JSON(400, gin.H{"error": "fileID parameter is required"})
+		return
+	}
+
+	if ag.rawFileLimiter != nil && !ag.rawFileLimiter.allow(c.ClientIP()) {
+		c.Header("Retry-After", "6")
+		c.JSON(429, gin.H{"error": "rate limit exceeded for raw file downloads; slow down"})
 		return
 	}
 

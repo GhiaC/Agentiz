@@ -214,6 +214,46 @@
       "fieldConfig": { "defaults": { "unit": "binBps", "custom": { "drawStyle": "line", "fillOpacity": 20, "stacking": { "mode": "normal" } } }, "overrides": [] },
       "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"] }, "tooltip": { "mode": "multi" } },
       "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum by (direction) (rate(agentize_image_edit_bytes_total[5m]))", "legendFormat": "{{direction}}" } ]
+    },
+
+    { "type": "row", "id": 70, "title": "Storage & Audit", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 60 } },
+    {
+      "type": "timeseries", "id": 71, "title": "Store query latency p95 by operation & backend",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" }, "gridPos": { "h": 8, "w": 8, "x": 0, "y": 61 },
+      "fieldConfig": { "defaults": { "unit": "s", "custom": { "drawStyle": "line", "fillOpacity": 10 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"] }, "tooltip": { "mode": "multi" } },
+      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "histogram_quantile(0.95, sum by (le, operation, backend) (rate(agentize_store_query_duration_seconds_bucket[10m])))", "legendFormat": "{{operation}} / {{backend}}" } ]
+    },
+    {
+      "type": "timeseries", "id": 72, "title": "Store ops by operation (/s)",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" }, "gridPos": { "h": 8, "w": 8, "x": 8, "y": 61 },
+      "fieldConfig": { "defaults": { "unit": "ops", "custom": { "drawStyle": "line", "fillOpacity": 20, "stacking": { "mode": "normal" } } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"] }, "tooltip": { "mode": "multi" } },
+      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum by (operation) (rate(agentize_store_query_duration_seconds_count[5m]))", "legendFormat": "{{operation}}" } ]
+    },
+    {
+      "type": "timeseries", "id": 73, "title": "Summary age at refresh (p50 / p95)",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" }, "gridPos": { "h": 8, "w": 8, "x": 16, "y": 61 },
+      "fieldConfig": { "defaults": { "unit": "s", "custom": { "drawStyle": "line", "fillOpacity": 10 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"] }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "histogram_quantile(0.5, rate(agentize_summary_age_seconds_bucket[1h]))", "legendFormat": "p50" },
+        { "refId": "B", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "histogram_quantile(0.95, rate(agentize_summary_age_seconds_bucket[1h]))", "legendFormat": "p95" }
+      ]
+    },
+    {
+      "type": "timeseries", "id": 74, "title": "Audit actions (/h) by action & status",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" }, "gridPos": { "h": 7, "w": 8, "x": 0, "y": 69 },
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "drawStyle": "bars", "fillOpacity": 70, "stacking": { "mode": "normal" } } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "sum"] }, "tooltip": { "mode": "multi" } },
+      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum by (action, status) (rate(agentize_audit_actions_total[1h])) * 3600", "legendFormat": "{{action}} / {{status}}" } ]
+    },
+    {
+      "type": "timeseries", "id": 75, "title": "Store deletions (/h) by entity",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" }, "gridPos": { "h": 7, "w": 8, "x": 8, "y": 69 },
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "drawStyle": "bars", "fillOpacity": 70, "stacking": { "mode": "normal" } } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "sum"] }, "tooltip": { "mode": "multi" } },
+      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum by (entity) (rate(agentize_store_deletions_total[1h])) * 3600", "legendFormat": "{{entity}}" } ]
     }
   ]
 }

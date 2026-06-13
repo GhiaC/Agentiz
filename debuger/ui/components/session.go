@@ -52,9 +52,7 @@ func SessionTableRow(session *model.Session, config SessionRowConfig, rowIndex i
 	if title == "" {
 		title = "Untitled"
 	}
-	if len(title) > 40 {
-		title = title[:37] + "..."
-	}
+	title = debuger.TruncateString(title, 40)
 
 	// Agent type badge
 	agentBadge := AgentTypeBadge(string(session.AgentType))
@@ -81,11 +79,10 @@ func SessionTableRow(session *model.Session, config SessionRowConfig, rowIndex i
 		statusBadges = Badge("Idle", "secondary")
 	}
 
-	// Row styling
-	rowClass := ""
-	if session.AgentType == model.AgentTypeCore {
-		rowClass = "table-danger"
-	}
+	// Row accent — a slim colour rail keyed to the agent type, themed to match
+	// the agent badge (Core also gets a faint wash). Replaces the old
+	// off-palette table-danger red on Core rows; see AgentTypeRowClass / styles.go.
+	rowClass := AgentTypeRowClass(session.AgentType)
 
 	// Build the collapsed row
 	rowID := fmt.Sprintf("session-row-%d", rowIndex)
@@ -139,11 +136,7 @@ func SessionTableRow(session *model.Session, config SessionRowConfig, rowIndex i
 	// Summary display
 	summaryDisplay := "-"
 	if session.Summary != "" {
-		if len(session.Summary) > 200 {
-			summaryDisplay = session.Summary[:197] + "..."
-		} else {
-			summaryDisplay = session.Summary
-		}
+		summaryDisplay = debuger.TruncateString(session.Summary, 200)
 	}
 
 	// Tags display

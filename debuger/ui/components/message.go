@@ -147,11 +147,8 @@ func getModelDisplayShort(model string) string {
 	if model == "" {
 		return "-"
 	}
-	// Truncate long model names
-	if len(model) > 20 {
-		return model[:17] + "..."
-	}
-	return model
+	// Truncate long model names (rune-safe)
+	return debuger.TruncateString(model, 20)
 }
 
 // formatTimeShort formats time for message display

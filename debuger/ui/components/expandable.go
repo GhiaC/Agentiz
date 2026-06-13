@@ -5,6 +5,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"html/template"
+
+	"github.com/ghiac/agentize/debuger"
 )
 
 // Expandable generates expandable/collapsible content
@@ -26,13 +28,14 @@ func Expandable(shortContent, fullContent string, maxLength int) template.HTML {
 </span>`, id, shortEscaped, fullEscaped))
 }
 
-// ExpandableWithPreview generates expandable content with automatic preview
+// ExpandableWithPreview generates expandable content with automatic preview.
+// Length is measured in runes so multibyte (e.g. Persian) text is never split mid-rune.
 func ExpandableWithPreview(content string, maxLength int) template.HTML {
-	if len(content) <= maxLength {
+	if len([]rune(content)) <= maxLength {
 		return template.HTML(template.HTMLEscapeString(content))
 	}
 
-	shortContent := content[:maxLength] + "..."
+	shortContent := debuger.TruncateString(content, maxLength)
 	return Expandable(shortContent, content, maxLength)
 }
 
@@ -67,20 +70,15 @@ func generateUniqueID() string {
 	return "expand-" + hex.EncodeToString(bytes)
 }
 
-// TruncatedText generates text with ellipsis if too long
+// TruncatedText generates text with ellipsis if too long.
+// Truncation is rune-safe so multibyte (e.g. Persian) text is never split mid-rune.
 func TruncatedText(text string, maxLength int) string {
-	if len(text) <= maxLength {
-		return template.HTMLEscapeString(text)
-	}
-	return template.HTMLEscapeString(text[:maxLength]) + "..."
+	return template.HTMLEscapeString(debuger.TruncateString(text, maxLength))
 }
 
-// TruncatedLink generates a truncated text inside a link
+// TruncatedLink generates a truncated text inside a link.
+// Truncation is rune-safe so multibyte (e.g. Persian) text is never split mid-rune.
 func TruncatedLink(text, url string, maxLength int) string {
-	displayText := text
-	if len(text) > maxLength {
-		displayText = text[:maxLength] + "..."
-	}
 	return fmt.Sprintf(`<a href="%s" class="text-decoration-none">%s</a>`,
-		url, template.HTMLEscapeString(displayText))
+		url, template.HTMLEscapeString(debuger.TruncateString(text, maxLength)))
 }

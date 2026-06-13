@@ -76,6 +76,10 @@ type Agentize struct {
 	// those are also empty, the pages are served without authentication.
 	adminUsername string
 	adminPassword string
+
+	// Per-IP rate limiter for raw user-file downloads (defense against bulk
+	// exfiltration by fileID enumeration, even for authenticated admins).
+	rawFileLimiter *ipRateLimiter
 }
 
 // Options allows configuring Agentize behavior
@@ -136,6 +140,11 @@ func NewWithOptions(path string, opts *Options) (*Agentize, error) {
 	if !ok {
 		return nil, fmt.Errorf("session store (%T) must implement the full store.Store interface", sessionStore)
 	}
+
+	// Wrap the store so every database operation is timed
+	// (agentize_store_query_duration_seconds{operation,backend}). The wrapper is
+	// a transparent pass-through; it does not change any behavior.
+	fullStore = store.NewMetered(fullStore)
 
 	// Determine function registry
 	functionRegistry := model.NewFunctionRegistry()

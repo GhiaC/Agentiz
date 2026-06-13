@@ -276,8 +276,9 @@ func RenderUserDetail(handler *debuger.DebugHandler, userID string, showDeletedS
 		banMessageDisplay = template.HTMLEscapeString(user.BanMessage)
 	}
 
-	// Delete user data button (form with confirmation)
-	deleteFormAction := "/agentize/debug/users/" + url.PathEscape(userID) + "/delete-data"
+	// Delete user data button (form with confirmation). The ?confirm=<userID>
+	// param satisfies the server-side typed-confirmation guard on the endpoint.
+	deleteFormAction := "/agentize/debug/users/" + url.PathEscape(userID) + "/delete-data?confirm=" + url.QueryEscape(userID)
 
 	content += fmt.Sprintf(`
 <div class="card mb-4">
