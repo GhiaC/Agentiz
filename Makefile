@@ -1,4 +1,4 @@
-.PHONY: build run test test-full test-verbose clean deps
+.PHONY: build run test test-full test-race test-verbose clean deps
 
 # Build the agentize server
 build:
@@ -26,6 +26,10 @@ test:
 # Run tests with verbose output
 test-verbose:
 	go test -v ./...
+
+# Run tests with the race detector (matches the CI gate)
+test-race:
+	go test -race ./...
 
 # Clean build artifacts
 clean:

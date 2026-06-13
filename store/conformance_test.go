@@ -144,6 +144,8 @@ func TestStoreConformance(t *testing.T) {
 			run("PutMessagesBatch", testPutMessagesBatch)
 			run("Quotas", testQuotas)
 			run("Maintainer", testMaintainer)
+			run("ConcurrentSessionWrites", testConcurrentSessionWrites)
+			run("ConcurrentDeleteAndPut", testConcurrentDeleteUserDataAndPut)
 		})
 	}
 }

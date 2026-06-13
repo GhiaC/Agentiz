@@ -85,10 +85,10 @@ else
 fi
 echo ""
 
-# Step 5: Run tests
-echo -e "${YELLOW}[5/7] Running tests...${NC}"
+# Step 5: Run tests (with the race detector — matches CI)
+echo -e "${YELLOW}[5/7] Running tests (race detector)...${NC}"
 echo ""
-if go test -v ./...; then
+if go test -race -v ./...; then
     echo ""
     echo -e "${GREEN}✓ All tests passed${NC}"
 else

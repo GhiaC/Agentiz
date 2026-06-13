@@ -1,11 +1,14 @@
 # Auth System Examples
 
-این فایل مثال‌های استفاده از سیستم Auth جدید را نشان می‌دهد.
+> 🇮🇷 نسخه فارسی: [AUTH_EXAMPLES_FA.md](AUTH_EXAMPLES_FA.md)
 
-## مزایای ساختار جدید
+This file shows how to use the node authorization (`auth:`) system that governs
+access to knowledge-tree nodes.
 
-### 1. **RBAC (Role-Based Access Control)**
-به جای تعریف دسترسی برای هر کاربر، از نقش‌ها استفاده می‌کنیم:
+## Why this structure
+
+### 1. RBAC (Role-Based Access Control)
+Instead of defining permissions per user, use roles:
 
 ```yaml
 auth:
@@ -18,8 +21,8 @@ auth:
       perms: "rw"   # Read + Write
 ```
 
-### 2. **Inheritance (ارث‌بری)**
-نودهای فرزند می‌توانند دسترسی‌های parent را به ارث ببرند:
+### 2. Inheritance
+Child nodes can inherit the parent's permissions:
 
 ```yaml
 # root/node.yaml
@@ -32,12 +35,12 @@ auth:
 
 # root/child/node.yaml
 auth:
-  inherit: true  # Inherits from parent
+  inherit: true  # Inherits from the parent
   # No need to redefine roles!
 ```
 
-### 3. **Groups (گروه‌بندی)**
-کاربران را در گروه‌ها قرار دهید:
+### 3. Groups
+Place users into groups:
 
 ```yaml
 auth:
@@ -48,8 +51,8 @@ auth:
       perms: "r"
 ```
 
-### 4. **Permission Strings (مثل Unix)**
-استفاده از string به جای boolean flags:
+### 4. Permission strings (Unix-style)
+Use a string instead of boolean flags:
 
 ```yaml
 perms: "rwx"  # read, write, execute
@@ -57,7 +60,7 @@ perms: "r"    # read-only
 perms: "rw"   # read + write
 ```
 
-یا استفاده از boolean flags برای وضوح بیشتر:
+…or use boolean flags for clarity:
 
 ```yaml
 read: true
@@ -65,9 +68,9 @@ write: false
 execute: true
 ```
 
-## مثال‌های کامل
+## Complete examples
 
-### مثال 1: ساده (فقط default)
+### Example 1 — simple (default only)
 
 ```yaml
 id: "public_node"
@@ -77,7 +80,7 @@ auth:
     perms: "r"  # Everyone can read
 ```
 
-### مثال 2: با Roles
+### Example 2 — with roles
 
 ```yaml
 id: "admin_node"
@@ -92,7 +95,7 @@ auth:
       perms: "r"
 ```
 
-### مثال 3: با Inheritance
+### Example 3 — with inheritance
 
 ```yaml
 # root/node.yaml
@@ -107,11 +110,11 @@ auth:
 # root/child/node.yaml
 id: "child"
 auth:
-  inherit: true  # Inherits admin role from parent
-  # Child nodes automatically get parent's permissions
+  inherit: true  # Inherits the admin role from the parent
+  # Child nodes automatically get the parent's permissions
 ```
 
-### مثال 4: User Override
+### Example 4 — user override
 
 ```yaml
 id: "special_node"
@@ -121,10 +124,10 @@ auth:
       perms: "rwx"
   users:
     "user123":
-      perms: "rw"  # Override: user123 can't execute even if admin
+      perms: "rw"  # Override: user123 cannot execute, even as admin
 ```
 
-### مثال 5: Groups
+### Example 5 — groups
 
 ```yaml
 id: "dev_node"
@@ -136,7 +139,7 @@ auth:
       perms: "r"
 ```
 
-### مثال 6: Complex (همه چیز)
+### Example 6 — complex (everything together)
 
 ```yaml
 id: "complex_node"
@@ -156,12 +159,12 @@ auth:
       perms: "rwx"
   users:
     "special_user":
-      perms: "rw"  # Override for specific user
+      perms: "rw"  # Override for a specific user
 ```
 
-## مقایسه با ساختار قبلی
+## Comparison with the old structure
 
-### قبل (مشکل‌دار):
+### Before (problematic):
 ```yaml
 auth:
   users:
@@ -175,16 +178,16 @@ auth:
     - user_id: "user2"
       can_edit: false
       can_read: true
-      # ... باید برای هر کاربر تکرار شود
+      # ... had to be repeated for every user
 ```
 
-**مشکلات:**
-- باید برای هر کاربر در هر نود تعریف شود
-- Duplication زیاد
-- مدیریت سخت
-- نمی‌تواند از parent ارث‌بری کند
+**Problems:**
+- Had to be defined for every user on every node
+- Heavy duplication
+- Hard to manage
+- Could not inherit from the parent
 
-### بعد (بهتر):
+### After (better):
 ```yaml
 auth:
   roles:
@@ -194,32 +197,38 @@ auth:
     perms: "r"
 ```
 
-**مزایا:**
-- یک بار تعریف می‌شود، همه جا استفاده می‌شود
-- Inheritance از parent
-- Groups و Roles
-- مقیاس‌پذیرتر
-- استاندارد دنیا (مثل Kubernetes, AWS IAM)
+**Benefits:**
+- Defined once, used everywhere
+- Inheritance from the parent
+- Groups and roles
+- More scalable
+- An industry-standard model (like Kubernetes, AWS IAM)
 
-## Permission Flags
+## Permission flags
 
-| Flag | Meaning | Boolean Equivalent |
-|------|---------|-------------------|
+| Flag | Meaning | Boolean equivalent |
+|------|---------|--------------------|
 | `r` | Read | `read: true` |
 | `w` | Write/Edit | `write: true` |
-| `x` | Execute/Access Next | `execute: true` |
+| `x` | Execute / Access next | `execute: true` |
 | `s` | See | `see: true` |
-| `d` | Visible in Docs | `visible_docs: true` |
-| `g` | Visible in Graph | `visible_graph: true` |
+| `d` | Visible in docs | `visible_docs: true` |
+| `g` | Visible in graph | `visible_graph: true` |
 
-## Priority Order
+## Priority order
 
-دسترسی‌ها به ترتیب زیر بررسی می‌شوند (اولین match برنده است):
+Permissions are evaluated in the following order (first match wins):
 
-1. **User-specific override** (بالاترین اولویت)
+1. **User-specific override** (highest priority)
 2. **Group permissions**
 3. **Role permissions**
-4. **Inherited from parent** (اگر `inherit: true`)
+4. **Inherited from parent** (if `inherit: true`)
 5. **Default permissions**
-6. **Deny all** (اگر هیچکدام match نکرد)
+6. **Deny all** (if nothing matched)
 
+---
+
+> **Note:** this `auth:` block controls access to *knowledge-tree nodes*. It is
+> separate from the **admin authentication** that protects the `/agentize`
+> dashboard and metrics endpoint — see [SECURITY.md](SECURITY.md) and
+> `SetAdminCredentials` / `AGENTIZE_ADMIN_USERNAME` / `AGENTIZE_ADMIN_PASSWORD`.
