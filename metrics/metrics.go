@@ -438,6 +438,23 @@ func ImageEdit(model, status string, dur time.Duration, inBytes, outBytes int64)
 }
 
 // ---------------------------------------------------------------------------
+// Store (persistence layer)
+// ---------------------------------------------------------------------------
+
+var storeDeletions = promauto.NewCounterVec(prometheus.CounterOpts{
+	Namespace: namespace, Subsystem: "store", Name: "deletions_total",
+	Help: "Destructive store operations by entity (session|user_data|user_file). Pairs with the store audit log.",
+}, []string{"entity"})
+
+// RecordStoreDeletion counts one destructive store operation (audit trail).
+func RecordStoreDeletion(entity string) {
+	if entity == "" {
+		entity = "unknown"
+	}
+	storeDeletions.WithLabelValues(entity).Inc()
+}
+
+// ---------------------------------------------------------------------------
 // HTTP exposition
 // ---------------------------------------------------------------------------
 

@@ -79,22 +79,28 @@ func (r *NodeRepository) LoadNode(path string) (*model.Node, error) {
 		Path: path,
 	}
 
-	// Load node.yaml (optional)
+	// Load node.yaml (optional — but when present it MUST parse: a node.yaml
+	// with broken auth config silently falling back to defaults would grant
+	// the wrong permissions).
 	meta, err := r.loadNodeMeta(fullPath)
-	if err == nil {
+	switch {
+	case err == nil:
 		node.ID = meta.ID
 		node.Title = meta.Title
 		node.Description = meta.Description
 		node.Summary = meta.Summary
 		node.Auth = meta.Auth
 		node.MCP = meta.MCP
-	} else {
+	case os.IsNotExist(err):
 		// Use defaults if node.yaml doesn't exist
 		node.ID = path
 		node.Auth = model.Auth{
 			Inherit: true,
 			Users:   make(map[string]*model.Permissions),
 		}
+	default:
+		log.Log.Errorf("fsrepo: node %s has malformed node.yaml: %v", path, err)
+		return nil, fmt.Errorf("node %s: %w", path, err)
 	}
 
 	// Load node.md (optional)
@@ -171,11 +177,9 @@ func (r *NodeRepository) loadNodeMeta(dirPath string) (*model.NodeMeta, error) {
 	yamlPath := filepath.Join(dirPath, "node.yaml")
 	data, err := os.ReadFile(yamlPath)
 	if err != nil {
-		return nil, err
+		return nil, err // os.IsNotExist-able: callers treat a missing file as "use defaults"
 	}
 
-	// For now, use a simple YAML parser
-	// In production, use gopkg.in/yaml.v3
 	meta := &model.NodeMeta{}
 	if err := parseYAML(data, meta); err != nil {
 		return nil, fmt.Errorf("failed to parse node.yaml: %w", err)

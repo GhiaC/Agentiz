@@ -54,7 +54,14 @@ func (l *LocalFileStore) keyToPath(key string) (string, error) {
 }
 
 // Save writes r to the file identified by key and returns key unchanged.
+//
+// Keys must be namespaced — at least one "/" segment (e.g.
+// "userID/uuid-filename") — so two callers using the same bare filename can
+// never overwrite each other's files in a flat namespace.
 func (l *LocalFileStore) Save(key string, r io.Reader) (string, error) {
+	if !strings.Contains(strings.Trim(key, "/"), "/") {
+		return "", fmt.Errorf("invalid storage key %q: keys must be namespaced (want at least one '/' segment, e.g. \"userID/filename\")", key)
+	}
 	path, err := l.keyToPath(key)
 	if err != nil {
 		return "", err

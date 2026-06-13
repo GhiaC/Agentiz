@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/ghiac/agentize/debuger"
 	"github.com/ghiac/agentize/model"
@@ -50,6 +51,13 @@ type Store interface {
 	PutUser(user *model.User) error
 	GetOrCreateUser(userID string) (*model.User, error)
 	PutMessage(message *model.Message) error
+	// PutMessages stores a batch of messages in one round trip (SQLite: one
+	// transaction; MongoDB: one bulk write). All-or-nothing on SQLite.
+	PutMessages(messages []*model.Message) error
+	// GetMessagesBySessionPage returns one page of a session's messages, newest
+	// first (limit <= 0 defaults to an internal page size; offset < 0 → 0).
+	// Prefer this over the unbounded read path for sessions that grow large.
+	GetMessagesBySessionPage(sessionID string, limit, offset int) ([]*model.Message, error)
 	AddOpenedFile(openedFile *model.OpenedFile) error
 	// CloseOpenedFile marks the currently-open record for (sessionID, filePath)
 	// closed. It is a no-op when the file is not currently open.
@@ -104,6 +112,12 @@ type Config struct {
 	MongoURI string
 	// MongoDatabase overrides the MongoDB database name (default "agentize").
 	MongoDatabase string
+	// MongoOpTimeout overrides the per-operation timeout for the mongodb
+	// backend (default 12s).
+	MongoOpTimeout time.Duration
+	// Quotas bounds per-user/per-session storage growth (zero values =
+	// unlimited). Enforced on every backend with ErrQuotaExceeded.
+	Quotas Quotas
 }
 
 // Open creates a Store for the configured backend. It is the single entry point
@@ -116,7 +130,12 @@ func Open(cfg Config) (Store, error) {
 		if path == "" {
 			path = "./data/sessions.db"
 		}
-		return NewDBStoreWithPath(path)
+		s, err := NewDBStoreWithPath(path)
+		if err != nil {
+			return nil, err
+		}
+		s.SetQuotas(cfg.Quotas)
+		return s, nil
 	case "mongodb", "mongo":
 		if cfg.MongoURI == "" {
 			return nil, fmt.Errorf("store: MongoURI is required for the mongodb backend")
@@ -126,7 +145,15 @@ func Open(cfg Config) (Store, error) {
 		if cfg.MongoDatabase != "" {
 			mcfg.Database = cfg.MongoDatabase
 		}
-		return NewMongoDBStore(mcfg)
+		if cfg.MongoOpTimeout > 0 {
+			mcfg.OpTimeout = cfg.MongoOpTimeout
+		}
+		s, err := NewMongoDBStore(mcfg)
+		if err != nil {
+			return nil, err
+		}
+		s.SetQuotas(cfg.Quotas)
+		return s, nil
 	default:
 		return nil, fmt.Errorf("store: unknown backend %q (want \"sqlite\" or \"mongodb\")", cfg.Backend)
 	}

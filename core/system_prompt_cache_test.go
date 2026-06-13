@@ -15,14 +15,15 @@ func putUserFile(t *testing.T, st interface {
 }, userID, fileID, name string) {
 	t.Helper()
 	uf := &model.UserFile{
-		FileID:    fileID,
-		UserID:    userID,
-		SessionID: userID + "-low-s0001",
-		Name:      name,
-		MIMEType:  "application/pdf",
-		Size:      2048,
-		Source:    model.FileSourceUploaded,
-		CreatedAt: time.Now(),
+		FileID:     fileID,
+		UserID:     userID,
+		SessionID:  userID + "-low-s0001",
+		Name:       name,
+		MIMEType:   "application/pdf",
+		Size:       2048,
+		StorageKey: userID + "/" + fileID + "-" + name,
+		Source:     model.FileSourceUploaded,
+		CreatedAt:  time.Now(),
 	}
 	if err := st.PutUserFile(uf); err != nil {
 		t.Fatalf("PutUserFile: %v", err)

@@ -139,6 +139,11 @@ func TestStoreConformance(t *testing.T) {
 			run("VisitedNodes", testVisitedNodes)
 			run("DeleteUserData", testDeleteUserData)
 			run("BackendInfo", testBackendInfo)
+			run("Validation", testValidation)
+			run("MessagePagination", testMessagePagination)
+			run("PutMessagesBatch", testPutMessagesBatch)
+			run("Quotas", testQuotas)
+			run("Maintainer", testMaintainer)
 		})
 	}
 }

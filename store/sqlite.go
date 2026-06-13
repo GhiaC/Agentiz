@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -13,21 +14,55 @@ import (
 	"unicode/utf8"
 
 	"github.com/ghiac/agentize/debuger"
+	"github.com/ghiac/agentize/log"
 	"github.com/ghiac/agentize/model"
 	_ "modernc.org/sqlite"
 )
 
+// execWrite executes a write statement, retrying with exponential backoff when
+// SQLite reports lock/busy contention. The busy_timeout pragma handles most
+// contention in-engine; this guards the rare cases that still surface.
+func (s *SQLiteStore) execWrite(query string, args ...interface{}) (sql.Result, error) {
+	backoff := 50 * time.Millisecond
+	var res sql.Result
+	var err error
+	for attempt := 0; attempt < 5; attempt++ {
+		res, err = s.db.Exec(query, args...)
+		if err == nil || !isSQLiteBusy(err) {
+			return res, err
+		}
+		log.Log.Warnf("store: sqlite busy (attempt %d), retrying in %s: %v", attempt+1, backoff, err)
+		time.Sleep(backoff)
+		backoff *= 2
+	}
+	return res, err
+}
+
+// isSQLiteBusy reports whether err is a lock-contention error worth retrying.
+func isSQLiteBusy(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "database is locked") ||
+		strings.Contains(msg, "database table is locked") ||
+		strings.Contains(msg, "SQLITE_BUSY")
+}
+
 // SQLiteStore is a SQLite implementation of SessionStore
 // It stores sessions in a SQLite database with JSON serialization
 type SQLiteStore struct {
-	db   *sql.DB
-	mu   sync.RWMutex
-	path string
+	db     *sql.DB
+	mu     sync.RWMutex
+	path   string
+	quotas Quotas
 
 	// UserNodes tracks visited nodes for each user (user-level, not session-level)
 	userNodes sync.Map
-	userLock  map[string]*sync.Mutex
-	nodesMu   sync.RWMutex // Protects userLock map
+	// userLock maps userID → *sync.Mutex. Entries are created with LoadOrStore
+	// and never deleted (the per-user mutex footprint is tiny), so a lock can
+	// never be removed between lookup and use.
+	userLock sync.Map
 }
 
 // NewSQLiteStore creates a new SQLite session store
@@ -54,13 +89,33 @@ func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
 
-	store := &SQLiteStore{
-		db:       db,
-		path:     dbPath,
-		userLock: make(map[string]*sync.Mutex),
+	// Explicit pool sizing. An in-memory database exists per connection, so the
+	// pool MUST be a single connection or different conns would see different
+	// databases. For file databases WAL allows concurrent readers alongside a
+	// writer, so a small pool is safe and avoids fd churn.
+	if dbPath == ":memory:" {
+		db.SetMaxOpenConns(1)
+		db.SetMaxIdleConns(1)
+	} else {
+		db.SetMaxOpenConns(4)
+		db.SetMaxIdleConns(4)
+		db.SetConnMaxLifetime(time.Hour)
 	}
 
-	// Create tables
+	store := &SQLiteStore{
+		db:   db,
+		path: dbPath,
+	}
+
+	// WAL mode (readers don't block the writer) and a busy timeout so writes
+	// under contention wait instead of failing with "database is locked".
+	// journal_mode is a no-op for in-memory databases.
+	if _, err := db.Exec(`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to apply pragmas: %w", err)
+	}
+
+	// Create tables and run versioned migrations (fail fast, never silent).
 	if err := store.initSchema(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("failed to initialize schema: %w", err)
@@ -68,6 +123,9 @@ func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
 
 	return store, nil
 }
+
+// SetQuotas configures storage quotas (zero values = unlimited). See Quotas.
+func (s *SQLiteStore) SetQuotas(q Quotas) { s.quotas = q }
 
 // Path returns the SQLite database path (":memory:" for in-memory stores). Used
 // by the debug dashboard to report where session/file metadata is persisted.
@@ -225,141 +283,180 @@ func (s *SQLiteStore) initSchema() error {
 		return err
 	}
 
-	// Migration: Add is_nonsense column if it doesn't exist (for existing databases)
-	// SQLite doesn't support IF NOT EXISTS for ALTER TABLE ADD COLUMN, so we ignore errors
-	_ = s.migrateAddIsNonsenseColumn()
+	// Versioned migrations: each runs once, is recorded in schema_version, and
+	// aborts startup on failure instead of silently leaving a partial schema.
+	return s.runMigrations()
+}
 
-	// Migration: Add new columns to summarization_logs table for existing databases
-	_ = s.migrateSummarizationLogsColumns()
+// sqliteMigration is one schema change: applied inside a transaction, recorded
+// in schema_version, executed exactly once per database.
+type sqliteMigration struct {
+	version int
+	desc    string
+	apply   func(tx *sql.Tx) error
+}
 
-	// Migration: Add agent_type and content_type columns to messages table
-	_ = s.migrateAddMessageTypeColumns()
-
-	// Migration: Add seq_id column to messages table if it doesn't exist (for existing databases)
-	_ = s.migrateAddSeqIDColumn()
-
-	// Migration: Add session_seq column to sessions table if it doesn't exist (for existing databases)
-	_ = s.migrateAddSessionSeqColumn()
-
-	// Migration: Add display_label to tool_calls for dashboard distinction
-	_ = s.migrateAddToolCallDisplayLabel()
-
-	// Migration: Add parent_file_id to user_files for derived files (e.g. edited images)
-	_ = s.migrateAddUserFileParentColumn()
-
-	// Migration: Create the route_traces table (Core decision/forward DAGs)
-	_ = s.migrateAddRouteTracesTable()
-
+// addColumns adds each "name TYPE ..." definition to table when the column does
+// not already exist. Genuinely idempotent: fresh databases create these columns
+// in the base schema, so the skip is silent at debug level only.
+func addColumns(tx *sql.Tx, table string, defs ...string) error {
+	existing := make(map[string]bool)
+	rows, err := tx.Query(`SELECT name FROM pragma_table_info(?)`, table)
+	if err != nil {
+		return fmt.Errorf("inspect %s: %w", table, err)
+	}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			rows.Close()
+			return err
+		}
+		existing[name] = true
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, def := range defs {
+		col := strings.Fields(def)[0]
+		if existing[col] {
+			log.Log.Debugf("store: migration: %s.%s already exists, skipping", table, col)
+			continue
+		}
+		if _, err := tx.Exec(fmt.Sprintf(`ALTER TABLE %s ADD COLUMN %s`, table, def)); err != nil {
+			return fmt.Errorf("add column %s.%s: %w", table, col, err)
+		}
+	}
 	return nil
 }
 
-// migrateAddRouteTracesTable creates the route_traces table and its indexes.
-// The full DAG (nodes + edges) is stored as JSON in the data column, like the
-// MongoDB backend; only the columns used for lookup/sorting are denormalized.
-// CREATE TABLE IF NOT EXISTS makes this safe on both fresh and existing databases.
-func (s *SQLiteStore) migrateAddRouteTracesTable() error {
-	_, err := s.db.Exec(`
-	CREATE TABLE IF NOT EXISTS route_traces (
-		trace_id TEXT PRIMARY KEY,
-		session_id TEXT NOT NULL,
-		user_id TEXT NOT NULL,
-		status TEXT DEFAULT '',
-		data TEXT NOT NULL,
-		created_at INTEGER NOT NULL
-	);
-	CREATE INDEX IF NOT EXISTS idx_route_traces_session_id ON route_traces(session_id);
-	CREATE INDEX IF NOT EXISTS idx_route_traces_user_id ON route_traces(user_id);
-	CREATE INDEX IF NOT EXISTS idx_route_traces_created_at ON route_traces(created_at);
-	`)
-	return err
-}
-
-// migrateAddUserFileParentColumn adds parent_file_id to user_files if it doesn't exist
-func (s *SQLiteStore) migrateAddUserFileParentColumn() error {
-	_, _ = s.db.Exec(`ALTER TABLE user_files ADD COLUMN parent_file_id TEXT DEFAULT ''`)
+func execAll(tx *sql.Tx, stmts ...string) error {
+	for _, stmt := range stmts {
+		if _, err := tx.Exec(stmt); err != nil {
+			return fmt.Errorf("%q: %w", stmt, err)
+		}
+	}
 	return nil
 }
 
-// migrateAddIsNonsenseColumn adds is_nonsense column to messages table if it doesn't exist
-func (s *SQLiteStore) migrateAddIsNonsenseColumn() error {
-	_, _ = s.db.Exec(`ALTER TABLE messages ADD COLUMN is_nonsense INTEGER DEFAULT 0`)
-	// Ignore error if column already exists
-	return nil
+// sqliteMigrations is the ordered, append-only migration list. NEVER reorder or
+// edit an applied entry — append a new version instead.
+var sqliteMigrations = []sqliteMigration{
+	{1, "messages.is_nonsense", func(tx *sql.Tx) error {
+		return addColumns(tx, "messages", `is_nonsense INTEGER DEFAULT 0`)
+	}},
+	{2, "summarization_logs detail columns + status index", func(tx *sql.Tx) error {
+		if err := addColumns(tx, "summarization_logs",
+			`session_title TEXT`, `previous_summary TEXT`, `previous_tags TEXT`,
+			`messages_before_count INTEGER DEFAULT 0`, `messages_after_count INTEGER DEFAULT 0`,
+			`archived_messages_count INTEGER DEFAULT 0`, `requested_model TEXT`,
+			`generated_summary TEXT`, `generated_tags TEXT`, `generated_title TEXT`,
+			`duration_ms INTEGER DEFAULT 0`, `summarization_type TEXT`, `completed_at INTEGER`,
+		); err != nil {
+			return err
+		}
+		return execAll(tx, `CREATE INDEX IF NOT EXISTS idx_summarization_logs_status ON summarization_logs(status)`)
+	}},
+	{3, "messages/tool_calls type + telemetry columns", func(tx *sql.Tx) error {
+		if err := addColumns(tx, "messages", `agent_type TEXT DEFAULT ''`, `content_type TEXT DEFAULT ''`); err != nil {
+			return err
+		}
+		return addColumns(tx, "tool_calls",
+			`agent_type TEXT DEFAULT ''`, `response_length INTEGER DEFAULT 0`,
+			`duration_ms INTEGER DEFAULT 0`, `tool_id TEXT DEFAULT ''`,
+			`status TEXT DEFAULT 'pending'`, `error TEXT DEFAULT ''`,
+		)
+	}},
+	{4, "messages.seq_id", func(tx *sql.Tx) error {
+		return addColumns(tx, "messages", `seq_id INTEGER DEFAULT 0`)
+	}},
+	{5, "sessions.session_seq + (user_id, agent_type) index", func(tx *sql.Tx) error {
+		if err := addColumns(tx, "sessions", `session_seq INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return err
+		}
+		return execAll(tx, `CREATE INDEX IF NOT EXISTS idx_sessions_user_agent ON sessions(user_id, agent_type)`)
+	}},
+	{6, "tool_calls.display_label", func(tx *sql.Tx) error {
+		return addColumns(tx, "tool_calls", `display_label TEXT DEFAULT ''`)
+	}},
+	{7, "user_files.parent_file_id", func(tx *sql.Tx) error {
+		return addColumns(tx, "user_files", `parent_file_id TEXT DEFAULT ''`)
+	}},
+	{8, "route_traces table", func(tx *sql.Tx) error {
+		return execAll(tx, `
+		CREATE TABLE IF NOT EXISTS route_traces (
+			trace_id TEXT PRIMARY KEY,
+			session_id TEXT NOT NULL,
+			user_id TEXT NOT NULL,
+			status TEXT DEFAULT '',
+			data TEXT NOT NULL,
+			created_at INTEGER NOT NULL
+		)`,
+			`CREATE INDEX IF NOT EXISTS idx_route_traces_session_id ON route_traces(session_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_route_traces_user_id ON route_traces(user_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_route_traces_created_at ON route_traces(created_at)`,
+		)
+	}},
+	{9, "opened_files (session_id, is_open) compound index", func(tx *sql.Tx) error {
+		return execAll(tx, `CREATE INDEX IF NOT EXISTS idx_opened_files_session_open ON opened_files(session_id, is_open)`)
+	}},
+	{10, "messages (session_id, seq_id) index for pagination", func(tx *sql.Tx) error {
+		return execAll(tx, `CREATE INDEX IF NOT EXISTS idx_messages_session_seq ON messages(session_id, seq_id)`)
+	}},
 }
 
-// migrateAddMessageTypeColumns adds agent_type and content_type columns to messages table
-func (s *SQLiteStore) migrateAddMessageTypeColumns() error {
-	_, _ = s.db.Exec(`ALTER TABLE messages ADD COLUMN agent_type TEXT DEFAULT ''`)
-	_, _ = s.db.Exec(`ALTER TABLE messages ADD COLUMN content_type TEXT DEFAULT ''`)
-	// Also add agent_type to tool_calls table
-	_, _ = s.db.Exec(`ALTER TABLE tool_calls ADD COLUMN agent_type TEXT DEFAULT ''`)
-	// Add response_length to tool_calls table
-	_, _ = s.db.Exec(`ALTER TABLE tool_calls ADD COLUMN response_length INTEGER DEFAULT 0`)
-	// Add duration_ms to tool_calls table (for tracking execution time)
-	_, _ = s.db.Exec(`ALTER TABLE tool_calls ADD COLUMN duration_ms INTEGER DEFAULT 0`)
-	// Add tool_id to tool_calls table (for sequential tool IDs)
-	_, _ = s.db.Exec(`ALTER TABLE tool_calls ADD COLUMN tool_id TEXT DEFAULT ''`)
-	// Add status and error to tool_calls table (pending|success|failed)
-	_, _ = s.db.Exec(`ALTER TABLE tool_calls ADD COLUMN status TEXT DEFAULT 'pending'`)
-	_, _ = s.db.Exec(`ALTER TABLE tool_calls ADD COLUMN error TEXT DEFAULT ''`)
-	// Ignore errors if columns already exist
-	return nil
-}
-
-// migrateAddToolCallDisplayLabel adds display_label to tool_calls for dashboard label/category display.
-func (s *SQLiteStore) migrateAddToolCallDisplayLabel() error {
-	_, _ = s.db.Exec(`ALTER TABLE tool_calls ADD COLUMN display_label TEXT DEFAULT ''`)
-	return nil
-}
-
-// migrateAddSeqIDColumn adds seq_id column to messages table if it doesn't exist
-// This is needed for backward compatibility with older databases
-// SQLite doesn't support IF NOT EXISTS for ALTER TABLE ADD COLUMN, so we ignore errors
-func (s *SQLiteStore) migrateAddSeqIDColumn() error {
-	_, _ = s.db.Exec(`ALTER TABLE messages ADD COLUMN seq_id INTEGER DEFAULT 0`)
-	// Ignore error if column already exists
-	return nil
-}
-
-// migrateAddSessionSeqColumn adds session_seq column to sessions table if it doesn't exist
-// This is needed for backward compatibility with older databases
-// Also creates the index for (user_id, agent_type) if it doesn't exist
-func (s *SQLiteStore) migrateAddSessionSeqColumn() error {
-	// Add session_seq column
-	_, _ = s.db.Exec(`ALTER TABLE sessions ADD COLUMN session_seq INTEGER NOT NULL DEFAULT 0`)
-	// Create index for (user_id, agent_type) for efficient MAX queries
-	_, _ = s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_sessions_user_agent ON sessions(user_id, agent_type)`)
-	// Ignore errors if column/index already exists
-	return nil
-}
-
-// migrateSummarizationLogsColumns adds new columns to summarization_logs table for existing databases
-func (s *SQLiteStore) migrateSummarizationLogsColumns() error {
-	// Add new columns - ignore errors if columns already exist
-	columns := []string{
-		`ALTER TABLE summarization_logs ADD COLUMN session_title TEXT`,
-		`ALTER TABLE summarization_logs ADD COLUMN previous_summary TEXT`,
-		`ALTER TABLE summarization_logs ADD COLUMN previous_tags TEXT`,
-		`ALTER TABLE summarization_logs ADD COLUMN messages_before_count INTEGER DEFAULT 0`,
-		`ALTER TABLE summarization_logs ADD COLUMN messages_after_count INTEGER DEFAULT 0`,
-		`ALTER TABLE summarization_logs ADD COLUMN archived_messages_count INTEGER DEFAULT 0`,
-		`ALTER TABLE summarization_logs ADD COLUMN requested_model TEXT`,
-		`ALTER TABLE summarization_logs ADD COLUMN generated_summary TEXT`,
-		`ALTER TABLE summarization_logs ADD COLUMN generated_tags TEXT`,
-		`ALTER TABLE summarization_logs ADD COLUMN generated_title TEXT`,
-		`ALTER TABLE summarization_logs ADD COLUMN duration_ms INTEGER DEFAULT 0`,
-		`ALTER TABLE summarization_logs ADD COLUMN summarization_type TEXT`,
-		`ALTER TABLE summarization_logs ADD COLUMN completed_at INTEGER`,
+// runMigrations applies every migration newer than the recorded schema version.
+// Each migration runs in its own transaction and is recorded on success, so a
+// failure leaves the database at a known version and aborts startup loudly.
+func (s *SQLiteStore) runMigrations() error {
+	if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS schema_version (
+		version INTEGER PRIMARY KEY,
+		description TEXT NOT NULL,
+		applied_at INTEGER NOT NULL
+	)`); err != nil {
+		return fmt.Errorf("create schema_version table: %w", err)
 	}
 
-	for _, col := range columns {
-		_, _ = s.db.Exec(col)
+	var current sql.NullInt64
+	if err := s.db.QueryRow(`SELECT MAX(version) FROM schema_version`).Scan(&current); err != nil {
+		return fmt.Errorf("read schema version: %w", err)
 	}
 
-	// Add index for status
-	_, _ = s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_summarization_logs_status ON summarization_logs(status)`)
-
+	for _, m := range sqliteMigrations {
+		if current.Valid && int64(m.version) <= current.Int64 {
+			continue
+		}
+		tx, err := s.db.Begin()
+		if err != nil {
+			return fmt.Errorf("migration %d (%s): begin: %w", m.version, m.desc, err)
+		}
+		if err := m.apply(tx); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("migration %d (%s) failed: %w", m.version, m.desc, err)
+		}
+		if _, err := tx.Exec(
+			`INSERT INTO schema_version (version, description, applied_at) VALUES (?, ?, ?)`,
+			m.version, m.desc, time.Now().Unix(),
+		); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("migration %d (%s): record: %w", m.version, m.desc, err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("migration %d (%s): commit: %w", m.version, m.desc, err)
+		}
+		log.Log.Infof("store: applied migration %d: %s", m.version, m.desc)
+	}
 	return nil
+}
+
+// SchemaVersion returns the highest applied migration version (0 = base schema
+// only). For diagnostics and the debug dashboard.
+func (s *SQLiteStore) SchemaVersion() (int, error) {
+	var current sql.NullInt64
+	if err := s.db.QueryRow(`SELECT MAX(version) FROM schema_version`).Scan(&current); err != nil {
+		return 0, err
+	}
+	return int(current.Int64), nil
 }
 
 // Close closes the database connection
@@ -367,27 +464,11 @@ func (s *SQLiteStore) Close() error {
 	return s.db.Close()
 }
 
-// getOrCreateLock gets or creates a mutex for a userID
+// getOrCreateLock returns the per-user mutex, creating it atomically on first
+// use. Entries are never deleted, so the returned lock is always valid.
 func (s *SQLiteStore) getOrCreateLock(userID string) *sync.Mutex {
-	s.nodesMu.RLock()
-	lock, exists := s.userLock[userID]
-	s.nodesMu.RUnlock()
-
-	if exists {
-		return lock
-	}
-
-	s.nodesMu.Lock()
-	defer s.nodesMu.Unlock()
-
-	// Double check after acquiring write lock
-	if lock, exists := s.userLock[userID]; exists {
-		return lock
-	}
-
-	lock = &sync.Mutex{}
-	s.userLock[userID] = lock
-	return lock
+	v, _ := s.userLock.LoadOrStore(userID, &sync.Mutex{})
+	return v.(*sync.Mutex)
 }
 
 // Get retrieves a session by ID
@@ -477,8 +558,8 @@ func (s *SQLiteStore) getMaxToolSeqForSession(sessionID string) int {
 // Put stores or updates a session
 // For Core sessions, this ensures only one Core session exists per user
 func (s *SQLiteStore) Put(session *model.Session) error {
-	if session == nil {
-		return fmt.Errorf("session cannot be nil")
+	if err := validateSession(session); err != nil {
+		return err
 	}
 
 	// Ensure user exists when storing a session (otherwise user is never created on first session)
@@ -509,7 +590,7 @@ func (s *SQLiteStore) Put(session *model.Session) error {
 	sessionSeq := extractSessionSeq(session.SessionID)
 
 	// Use INSERT OR REPLACE for upsert behavior
-	_, err = s.db.Exec(
+	_, err = s.execWrite(
 		`INSERT OR REPLACE INTO sessions (session_id, user_id, agent_type, session_seq, data, created_at, updated_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		session.SessionID,
@@ -550,11 +631,12 @@ func (s *SQLiteStore) Delete(sessionID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	_, err := s.db.Exec("DELETE FROM sessions WHERE session_id = ?", sessionID)
+	_, err := s.execWrite("DELETE FROM sessions WHERE session_id = ?", sessionID)
 	if err != nil {
 		return fmt.Errorf("failed to delete session: %w", err)
 	}
 
+	auditDeletion("session", sessionID, "")
 	return nil
 }
 
@@ -565,7 +647,9 @@ func (s *SQLiteStore) DeleteUserData(userID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	tx, err := s.db.Begin()
+	// Explicit serializable isolation: nothing (e.g. concurrent session
+	// creation) may interleave with the delete and leave orphans behind.
+	tx, err := s.db.BeginTx(context.Background(), &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
@@ -618,7 +702,11 @@ func (s *SQLiteStore) DeleteUserData(userID string) error {
 	}
 	// Ignore "user not found" - user might not exist yet
 
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	auditDeletion("user_data", userID, userID)
+	return nil
 }
 
 // List returns all sessions for a user
@@ -772,8 +860,8 @@ func (s *SQLiteStore) GetCoreSession(userID string) (*model.Session, error) {
 // PutCoreSession stores or updates a Core session for a user
 // This ensures only one Core session exists per user by deleting any existing Core sessions first
 func (s *SQLiteStore) PutCoreSession(session *model.Session) error {
-	if session == nil {
-		return fmt.Errorf("session cannot be nil")
+	if err := validateSession(session); err != nil {
+		return err
 	}
 	if session.AgentType != model.AgentTypeCore {
 		return fmt.Errorf("session must be of type Core")
@@ -974,8 +1062,8 @@ func (s *SQLiteStore) GetUser(userID string) (*model.User, error) {
 
 // PutUser stores or updates a user
 func (s *SQLiteStore) PutUser(user *model.User) error {
-	if user == nil {
-		return fmt.Errorf("user cannot be nil")
+	if err := validateUser(user); err != nil {
+		return err
 	}
 
 	s.mu.Lock()
@@ -1032,9 +1120,15 @@ func (s *SQLiteStore) GetOrCreateUser(userID string) (*model.User, error) {
 			}
 		}
 
-		// Save user if any backward compatibility computation was done
+		// Save user if any backward compatibility computation was done. The
+		// backfill is logged so a buggy computation can be traced instead of
+		// silently poisoning the record.
 		if needsSave {
-			_ = s.PutUser(user) // Best effort save
+			log.Log.Infof("store: backfilled SessionSeqs/ActiveSessionIDs for user %s (seqs=%v, active=%v)",
+				user.UserID, user.SessionSeqs, user.ActiveSessionIDs)
+			if err := s.PutUser(user); err != nil {
+				log.Log.Warnf("store: failed to persist backfilled user %s: %v", user.UserID, err)
+			}
 		}
 
 		return user, nil
@@ -1123,18 +1217,25 @@ func (s *SQLiteStore) computeActiveSessionIDs(user *model.User) error {
 	return nil
 }
 
-// PutMessage stores a message in the database
-func (s *SQLiteStore) PutMessage(message *model.Message) error {
-	if message == nil {
-		return fmt.Errorf("message cannot be nil")
+// checkMessageQuota enforces MaxMessagesPerSession (when configured) for n new
+// messages in sessionID. Callers must hold s.mu.
+func (s *SQLiteStore) checkMessageQuota(sessionID string, n int) error {
+	if s.quotas.MaxMessagesPerSession <= 0 {
+		return nil
 	}
+	var count int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE session_id = ?`, sessionID).Scan(&count); err != nil {
+		return fmt.Errorf("failed to count messages for quota: %w", err)
+	}
+	if count+n > s.quotas.MaxMessagesPerSession {
+		return fmt.Errorf("%w: session %s has %d messages (max %d)",
+			ErrQuotaExceeded, sessionID, count, s.quotas.MaxMessagesPerSession)
+	}
+	return nil
+}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	createdAt := message.CreatedAt.Unix()
-
-	// Convert bool to int for SQLite
+// messageInsertArgs flattens a message into the columns of the messages table.
+func messageInsertArgs(message *model.Message) []interface{} {
 	hasToolCalls := 0
 	if message.HasToolCalls {
 		hasToolCalls = 1
@@ -1143,15 +1244,7 @@ func (s *SQLiteStore) PutMessage(message *model.Message) error {
 	if message.IsNonsense {
 		isNonsense = 1
 	}
-
-	// Use INSERT OR REPLACE for upsert behavior
-	_, err := s.db.Exec(
-		`INSERT OR REPLACE INTO messages (
-			message_id, seq_id, user_id, session_id, role, content, model,
-			agent_type, content_type,
-			prompt_tokens, completion_tokens, total_tokens,
-			request_model, max_tokens, temperature, has_tool_calls, finish_reason, is_nonsense, created_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	return []interface{}{
 		message.MessageID,
 		message.SeqID,
 		message.UserID,
@@ -1170,34 +1263,91 @@ func (s *SQLiteStore) PutMessage(message *model.Message) error {
 		hasToolCalls,
 		message.FinishReason,
 		isNonsense,
-		createdAt,
-	)
+		message.CreatedAt.Unix(),
+	}
+}
 
-	if err != nil {
-		return fmt.Errorf("failed to store message: %w", err)
+const messageInsertSQL = `INSERT OR REPLACE INTO messages (
+		message_id, seq_id, user_id, session_id, role, content, model,
+		agent_type, content_type,
+		prompt_tokens, completion_tokens, total_tokens,
+		request_model, max_tokens, temperature, has_tool_calls, finish_reason, is_nonsense, created_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+
+// PutMessage stores a message in the database
+func (s *SQLiteStore) PutMessage(message *model.Message) error {
+	if err := validateMessage(message); err != nil {
+		return err
 	}
 
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if err := s.checkMessageQuota(message.SessionID, 1); err != nil {
+		return err
+	}
+
+	if _, err := s.execWrite(messageInsertSQL, messageInsertArgs(message)...); err != nil {
+		return fmt.Errorf("failed to store message: %w", err)
+	}
 	return nil
 }
 
-// GetMessagesBySession returns all messages for a session
-func (s *SQLiteStore) GetMessagesBySession(sessionID string) ([]*model.Message, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+// PutMessages stores a batch of messages in one transaction (a single fsync
+// instead of O(N) round trips). All-or-nothing: any invalid message or write
+// error rolls the whole batch back.
+func (s *SQLiteStore) PutMessages(messages []*model.Message) error {
+	if len(messages) == 0 {
+		return nil
+	}
+	for _, m := range messages {
+		if err := validateMessage(m); err != nil {
+			return err
+		}
+	}
 
-	rows, err := s.db.Query(
-		`SELECT message_id, seq_id, user_id, session_id, role, content, model,
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.quotas.MaxMessagesPerSession > 0 {
+		perSession := make(map[string]int)
+		for _, m := range messages {
+			perSession[m.SessionID]++
+		}
+		for sessionID, n := range perSession {
+			if err := s.checkMessageQuota(sessionID, n); err != nil {
+				return err
+			}
+		}
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.Prepare(messageInsertSQL)
+	if err != nil {
+		return fmt.Errorf("failed to prepare insert: %w", err)
+	}
+	defer stmt.Close()
+
+	for _, m := range messages {
+		if _, err := stmt.Exec(messageInsertArgs(m)...); err != nil {
+			return fmt.Errorf("failed to store message %s: %w", m.MessageID, err)
+		}
+	}
+	return tx.Commit()
+}
+
+const messageSelectColumns = `message_id, seq_id, user_id, session_id, role, content, model,
 			agent_type, content_type,
 			prompt_tokens, completion_tokens, total_tokens,
-			request_model, max_tokens, temperature, has_tool_calls, finish_reason, is_nonsense, created_at
-		FROM messages WHERE session_id = ? ORDER BY created_at DESC`,
-		sessionID,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query messages: %w", err)
-	}
-	defer rows.Close()
+			request_model, max_tokens, temperature, has_tool_calls, finish_reason, is_nonsense, created_at`
 
+// scanMessages decodes message rows produced by a messageSelectColumns query.
+func scanMessages(rows *sql.Rows) ([]*model.Message, error) {
 	var messages []*model.Message
 	for rows.Next() {
 		msg := &model.Message{}
@@ -1238,12 +1388,62 @@ func (s *SQLiteStore) GetMessagesBySession(sessionID string) ([]*model.Message, 
 		msg.CreatedAt = time.Unix(createdAt, 0)
 		messages = append(messages, msg)
 	}
-
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("error iterating messages: %w", err)
 	}
-
 	return messages, nil
+}
+
+// messagesPageSize is the internal page size GetMessagesBySession uses so a
+// huge session never sits in one unbounded result set on the database side.
+const messagesPageSize = 1000
+
+// GetMessagesBySessionPage returns one page of a session's messages, newest
+// first (the same ordering as GetMessagesBySession). limit <= 0 defaults to
+// messagesPageSize; offset < 0 is treated as 0.
+func (s *SQLiteStore) GetMessagesBySessionPage(sessionID string, limit, offset int) ([]*model.Message, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.getMessagesBySessionPageLocked(sessionID, limit, offset)
+}
+
+func (s *SQLiteStore) getMessagesBySessionPageLocked(sessionID string, limit, offset int) ([]*model.Message, error) {
+	if limit <= 0 {
+		limit = messagesPageSize
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	rows, err := s.db.Query(
+		`SELECT `+messageSelectColumns+`
+		FROM messages WHERE session_id = ? ORDER BY created_at DESC, seq_id DESC LIMIT ? OFFSET ?`,
+		sessionID, limit, offset,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query messages: %w", err)
+	}
+	defer rows.Close()
+	return scanMessages(rows)
+}
+
+// GetMessagesBySession returns all messages for a session, newest first. It is
+// implemented via pages internally; prefer GetMessagesBySessionPage for
+// sessions that can grow without bound.
+func (s *SQLiteStore) GetMessagesBySession(sessionID string) ([]*model.Message, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var all []*model.Message
+	for offset := 0; ; offset += messagesPageSize {
+		page, err := s.getMessagesBySessionPageLocked(sessionID, messagesPageSize, offset)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, page...)
+		if len(page) < messagesPageSize {
+			return all, nil
+		}
+	}
 }
 
 // GetMessagesByUser returns all messages for a user
@@ -1252,10 +1452,7 @@ func (s *SQLiteStore) GetMessagesByUser(userID string) ([]*model.Message, error)
 	defer s.mu.RUnlock()
 
 	rows, err := s.db.Query(
-		`SELECT message_id, seq_id, user_id, session_id, role, content, model,
-			agent_type, content_type,
-			prompt_tokens, completion_tokens, total_tokens,
-			request_model, max_tokens, temperature, has_tool_calls, finish_reason, is_nonsense, created_at
+		`SELECT `+messageSelectColumns+`
 		FROM messages WHERE user_id = ? ORDER BY created_at DESC`,
 		userID,
 	)
@@ -1263,59 +1460,13 @@ func (s *SQLiteStore) GetMessagesByUser(userID string) ([]*model.Message, error)
 		return nil, fmt.Errorf("failed to query messages: %w", err)
 	}
 	defer rows.Close()
-
-	var messages []*model.Message
-	for rows.Next() {
-		msg := &model.Message{}
-		var createdAt int64
-		var hasToolCallsInt int
-		var isNonsenseInt int
-		var agentType, contentType string
-
-		err := rows.Scan(
-			&msg.MessageID,
-			&msg.SeqID,
-			&msg.UserID,
-			&msg.SessionID,
-			&msg.Role,
-			&msg.Content,
-			&msg.Model,
-			&agentType,
-			&contentType,
-			&msg.PromptTokens,
-			&msg.CompletionTokens,
-			&msg.TotalTokens,
-			&msg.RequestModel,
-			&msg.MaxTokens,
-			&msg.Temperature,
-			&hasToolCallsInt,
-			&msg.FinishReason,
-			&isNonsenseInt,
-			&createdAt,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("failed to scan message: %w", err)
-		}
-
-		msg.AgentType = model.AgentType(agentType)
-		msg.ContentType = model.ContentType(contentType)
-		msg.HasToolCalls = hasToolCallsInt != 0
-		msg.IsNonsense = isNonsenseInt != 0
-		msg.CreatedAt = time.Unix(createdAt, 0)
-		messages = append(messages, msg)
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating messages: %w", err)
-	}
-
-	return messages, nil
+	return scanMessages(rows)
 }
 
 // AddOpenedFile records that a file was opened in a session
 func (s *SQLiteStore) AddOpenedFile(openedFile *model.OpenedFile) error {
-	if openedFile == nil {
-		return fmt.Errorf("openedFile cannot be nil")
+	if err := validateOpenedFile(openedFile); err != nil {
+		return err
 	}
 
 	s.mu.Lock()
@@ -1523,63 +1674,14 @@ func (s *SQLiteStore) GetAllMessages() ([]*model.Message, error) {
 	defer s.mu.RUnlock()
 
 	rows, err := s.db.Query(
-		`SELECT message_id, seq_id, user_id, session_id, role, content, model,
-			agent_type, content_type,
-			prompt_tokens, completion_tokens, total_tokens,
-			request_model, max_tokens, temperature, has_tool_calls, finish_reason, is_nonsense, created_at
+		`SELECT ` + messageSelectColumns + `
 		FROM messages ORDER BY created_at DESC`,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query messages: %w", err)
 	}
 	defer rows.Close()
-
-	var messages []*model.Message
-	for rows.Next() {
-		msg := &model.Message{}
-		var createdAt int64
-		var hasToolCallsInt int
-		var isNonsenseInt int
-		var agentType, contentType string
-
-		err := rows.Scan(
-			&msg.MessageID,
-			&msg.SeqID,
-			&msg.UserID,
-			&msg.SessionID,
-			&msg.Role,
-			&msg.Content,
-			&msg.Model,
-			&agentType,
-			&contentType,
-			&msg.PromptTokens,
-			&msg.CompletionTokens,
-			&msg.TotalTokens,
-			&msg.RequestModel,
-			&msg.MaxTokens,
-			&msg.Temperature,
-			&hasToolCallsInt,
-			&msg.FinishReason,
-			&isNonsenseInt,
-			&createdAt,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("failed to scan message: %w", err)
-		}
-
-		msg.AgentType = model.AgentType(agentType)
-		msg.ContentType = model.ContentType(contentType)
-		msg.HasToolCalls = hasToolCallsInt != 0
-		msg.IsNonsense = isNonsenseInt != 0
-		msg.CreatedAt = time.Unix(createdAt, 0)
-		messages = append(messages, msg)
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating messages: %w", err)
-	}
-
-	return messages, nil
+	return scanMessages(rows)
 }
 
 // GetAllOpenedFiles returns all opened files
@@ -1683,14 +1785,18 @@ func (s *SQLiteStore) GetOpenedFilesByUser(userID string) ([]*model.OpenedFile, 
 
 // PutUserFile inserts or updates a user file record.
 func (s *SQLiteStore) PutUserFile(f *model.UserFile) error {
-	if f == nil {
-		return fmt.Errorf("userFile cannot be nil")
+	if err := validateUserFile(f); err != nil {
+		return err
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	_, err := s.db.Exec(
+	if err := s.checkUserFileQuota(f); err != nil {
+		return err
+	}
+
+	_, err := s.execWrite(
 		`INSERT OR REPLACE INTO user_files (
 			file_id, user_id, session_id, name, mime_type, size, storage_key, source, parent_file_id, summary, created_at
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -1812,14 +1918,45 @@ func (s *SQLiteStore) GetAllUserFiles() ([]*model.UserFile, error) {
 	)
 }
 
+// checkUserFileQuota enforces per-user file-count and byte quotas (when
+// configured) for a new/updated file record. Callers must hold s.mu. Updates to
+// an existing file_id don't count as a new file.
+func (s *SQLiteStore) checkUserFileQuota(f *model.UserFile) error {
+	if s.quotas.MaxUserFilesPerUser <= 0 && s.quotas.MaxFileBytesPerUser <= 0 {
+		return nil
+	}
+	var count int
+	var bytes sql.NullInt64
+	var existing int
+	err := s.db.QueryRow(
+		`SELECT COUNT(*), COALESCE(SUM(size), 0),
+			COALESCE(SUM(CASE WHEN file_id = ? THEN 1 ELSE 0 END), 0)
+		 FROM user_files WHERE user_id = ?`,
+		f.FileID, f.UserID,
+	).Scan(&count, &bytes, &existing)
+	if err != nil {
+		return fmt.Errorf("failed to count user files for quota: %w", err)
+	}
+	if s.quotas.MaxUserFilesPerUser > 0 && existing == 0 && count+1 > s.quotas.MaxUserFilesPerUser {
+		return fmt.Errorf("%w: user %s has %d files (max %d)",
+			ErrQuotaExceeded, f.UserID, count, s.quotas.MaxUserFilesPerUser)
+	}
+	if s.quotas.MaxFileBytesPerUser > 0 && bytes.Int64+f.Size > s.quotas.MaxFileBytesPerUser {
+		return fmt.Errorf("%w: user %s would exceed %d bytes of files",
+			ErrQuotaExceeded, f.UserID, s.quotas.MaxFileBytesPerUser)
+	}
+	return nil
+}
+
 // DeleteUserFile removes a user file metadata record by ID.
 func (s *SQLiteStore) DeleteUserFile(fileID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if _, err := s.db.Exec("DELETE FROM user_files WHERE file_id = ?", fileID); err != nil {
+	if _, err := s.execWrite("DELETE FROM user_files WHERE file_id = ?", fileID); err != nil {
 		return fmt.Errorf("failed to delete user file: %w", err)
 	}
+	auditDeletion("user_file", fileID, "")
 	return nil
 }
 
@@ -1830,8 +1967,8 @@ func (s *SQLiteStore) GetSession(sessionID string) (*model.Session, error) {
 
 // PutToolCall stores a tool call in the database
 func (s *SQLiteStore) PutToolCall(toolCall *model.ToolCall) error {
-	if toolCall == nil {
-		return fmt.Errorf("toolCall cannot be nil")
+	if err := validateToolCall(toolCall); err != nil {
+		return err
 	}
 
 	s.mu.Lock()

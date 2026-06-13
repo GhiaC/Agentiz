@@ -7,15 +7,36 @@ func GetScripts() string {
         setTimeout(function() {
             location.reload();
         }, 30000);
-        
-        // Expandable content functionality
+
         document.addEventListener('DOMContentLoaded', function() {
+            // Expandable content
             document.querySelectorAll('.expandable-content').forEach(function(element) {
                 element.addEventListener('click', function(e) {
                     e.stopPropagation();
                     this.classList.toggle('expanded');
                 });
             });
+
+            // Mobile sidebar toggle
+            var app = document.getElementById('app');
+            var toggle = document.getElementById('sidebar-toggle');
+            var backdrop = document.getElementById('sidebar-backdrop');
+            if (toggle && app) {
+                toggle.addEventListener('click', function() { app.classList.toggle('sidebar-open'); });
+            }
+            if (backdrop && app) {
+                backdrop.addEventListener('click', function() { app.classList.remove('sidebar-open'); });
+            }
+
+            // Theme toggle (shares the 'agentize-theme' key with the docs UI)
+            var themeBtn = document.getElementById('theme-toggle');
+            if (themeBtn) {
+                themeBtn.addEventListener('click', function() {
+                    var cur = document.documentElement.getAttribute('data-bs-theme') === 'dark' ? 'light' : 'dark';
+                    document.documentElement.setAttribute('data-bs-theme', cur);
+                    try { localStorage.setItem('agentize-theme', cur); } catch (e) {}
+                });
+            }
         });
     `
 }

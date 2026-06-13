@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"sort"
 	"strconv"
 	"strings"
@@ -38,8 +39,12 @@ type MongoDBStore struct {
 
 	// UserNodes tracks visited nodes for each user (user-level, not session-level)
 	userNodes sync.Map
-	userLock  map[string]*sync.Mutex
-	nodesMu   sync.RWMutex // Protects userLock map
+	// userLock maps userID → *sync.Mutex; entries are created with LoadOrStore
+	// and never deleted, so a lock can never vanish between lookup and use.
+	userLock sync.Map
+
+	opTimeout time.Duration
+	quotas    Quotas
 }
 
 // MongoDBStoreConfig holds configuration for MongoDBStore
@@ -47,16 +52,32 @@ type MongoDBStoreConfig struct {
 	URI        string // MongoDB connection URI (e.g., "mongodb://localhost:27017")
 	Database   string // Database name (default: "agentize")
 	Collection string // Collection name (default: "sessions")
+	// ConnectTimeout bounds the initial connect+ping (default: 10s).
+	ConnectTimeout time.Duration
+	// OpTimeout bounds each store operation (default: 12s). Bulk deletes use
+	// 3× this value.
+	OpTimeout time.Duration
 }
 
 // DefaultMongoDBStoreConfig returns default configuration
 func DefaultMongoDBStoreConfig() MongoDBStoreConfig {
 	return MongoDBStoreConfig{
-		URI:        "mongodb://localhost:27017",
-		Database:   "agentize",
-		Collection: "sessions",
+		URI:            "mongodb://localhost:27017",
+		Database:       "agentize",
+		Collection:     "sessions",
+		ConnectTimeout: 10 * time.Second,
+		OpTimeout:      12 * time.Second,
 	}
 }
+
+// opCtx returns a context bounding one store operation by the configured
+// operation timeout.
+func (s *MongoDBStore) opCtx() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), s.opTimeout)
+}
+
+// SetQuotas configures storage quotas (zero values = unlimited). See Quotas.
+func (s *MongoDBStore) SetQuotas(q Quotas) { s.quotas = q }
 
 // URI returns the MongoDB connection URI this store was created with. Used by
 // the debug dashboard to report the connection target (credentials should be
@@ -95,8 +116,14 @@ func NewMongoDBStore(config MongoDBStoreConfig) (*MongoDBStore, error) {
 	if config.Collection == "" {
 		config.Collection = "sessions"
 	}
+	if config.ConnectTimeout <= 0 {
+		config.ConnectTimeout = 10 * time.Second
+	}
+	if config.OpTimeout <= 0 {
+		config.OpTimeout = 12 * time.Second
+	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), config.ConnectTimeout)
 	defer cancel()
 
 	// Configure connection pool for high load
@@ -134,7 +161,7 @@ func NewMongoDBStore(config MongoDBStoreConfig) (*MongoDBStore, error) {
 		userFilesCollection:         database.Collection("user_files"),
 		summarizationLogsCollection: database.Collection("summarization_logs"),
 		routeTracesCollection:       database.Collection("route_traces"),
-		userLock:                    make(map[string]*sync.Mutex),
+		opTimeout:                   config.OpTimeout,
 	}
 
 	// Create indexes
@@ -387,32 +414,16 @@ func (s *MongoDBStore) initIndexes(ctx context.Context) error {
 
 // Close closes the MongoDB connection
 func (s *MongoDBStore) Close() error {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := s.opCtx()
 	defer cancel()
 	return s.client.Disconnect(ctx)
 }
 
-// getOrCreateLock gets or creates a mutex for a userID
+// getOrCreateLock returns the per-user mutex, creating it atomically on first
+// use. Entries are never deleted, so the returned lock is always valid.
 func (s *MongoDBStore) getOrCreateLock(userID string) *sync.Mutex {
-	s.nodesMu.RLock()
-	lock, exists := s.userLock[userID]
-	s.nodesMu.RUnlock()
-
-	if exists {
-		return lock
-	}
-
-	s.nodesMu.Lock()
-	defer s.nodesMu.Unlock()
-
-	// Double check after acquiring write lock
-	if lock, exists := s.userLock[userID]; exists {
-		return lock
-	}
-
-	lock = &sync.Mutex{}
-	s.userLock[userID] = lock
-	return lock
+	v, _ := s.userLock.LoadOrStore(userID, &sync.Mutex{})
+	return v.(*sync.Mutex)
 }
 
 // sessionDocument represents a session document in MongoDB
@@ -446,7 +457,7 @@ func extractSessionSeqFromID(sessionID string) int {
 // Get retrieves a session by ID
 func (s *MongoDBStore) Get(sessionID string) (*model.Session, error) {
 	// MongoDB is thread-safe, no mutex needed
-	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	ctx, cancel := s.opCtx()
 	defer cancel()
 
 	var doc sessionDocument
@@ -488,34 +499,30 @@ func (s *MongoDBStore) Get(sessionID string) (*model.Session, error) {
 
 // getMaxSeqIDForSession returns the maximum seq_id for a session.
 // Used to restore MessageSeq counter correctly from database.
-// Uses aggregation pipeline for efficient querying (seq_id is stored as separate field).
+// A sort+limit(1) FindOne rides the (session_id, seq_id DESC) index directly —
+// no aggregation pipeline needed.
 func (s *MongoDBStore) getMaxSeqIDForSession(ctx context.Context, sessionID string) int {
-	// Use aggregation pipeline to find MAX(seq_id) efficiently
-	pipeline := mongo.Pipeline{
-		{{Key: "$match", Value: bson.M{"session_id": sessionID}}},
-		{{Key: "$group", Value: bson.M{
-			"_id":      nil,
-			"maxSeqID": bson.M{"$max": "$seq_id"},
-		}}},
+	var result struct {
+		SeqID int `bson:"seq_id"`
 	}
-
-	cursor, err := s.messagesCollection.Aggregate(ctx, pipeline)
+	err := s.messagesCollection.FindOne(ctx,
+		bson.M{"session_id": sessionID},
+		options.FindOne().
+			SetSort(bson.D{{Key: "seq_id", Value: -1}}).
+			SetProjection(bson.M{"seq_id": 1}),
+	).Decode(&result)
+	if err == mongo.ErrNoDocuments {
+		return 0
+	}
 	if err != nil {
-		// Fallback: if aggregation fails (e.g., old data without seq_id field), use old method
+		// Fallback: old data without a seq_id field — scan and unmarshal.
 		return s.getMaxSeqIDForSessionFallback(ctx, sessionID)
 	}
-	defer cursor.Close(ctx)
-
-	if cursor.Next(ctx) {
-		var result struct {
-			MaxSeqID int `bson:"maxSeqID"`
-		}
-		if err := cursor.Decode(&result); err == nil {
-			return result.MaxSeqID
-		}
+	if result.SeqID == 0 {
+		// Documents may predate the denormalized seq_id field.
+		return s.getMaxSeqIDForSessionFallback(ctx, sessionID)
 	}
-
-	return 0
+	return result.SeqID
 }
 
 // getMaxToolSeqForSession returns the maximum tool sequence number for a session from tool_calls collection.
@@ -583,8 +590,8 @@ func (s *MongoDBStore) getMaxSeqIDForSessionFallback(ctx context.Context, sessio
 // Put stores or updates a session
 // For Core sessions, this ensures only one Core session exists per user
 func (s *MongoDBStore) Put(session *model.Session) error {
-	if session == nil {
-		return fmt.Errorf("session cannot be nil")
+	if err := validateSession(session); err != nil {
+		return err
 	}
 
 	// Ensure user exists when storing a session (otherwise user is never created on first session)
@@ -615,7 +622,7 @@ func (s *MongoDBStore) Put(session *model.Session) error {
 		UpdatedAt:  session.UpdatedAt,
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := s.opCtx()
 	defer cancel()
 
 	opts := options.Replace().SetUpsert(true)
@@ -630,7 +637,7 @@ func (s *MongoDBStore) Put(session *model.Session) error {
 // Delete removes a session
 func (s *MongoDBStore) Delete(sessionID string) error {
 	// MongoDB is thread-safe, no mutex needed
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := s.opCtx()
 	defer cancel()
 
 	_, err := s.collection.DeleteOne(ctx, bson.M{"_id": sessionID})
@@ -638,6 +645,7 @@ func (s *MongoDBStore) Delete(sessionID string) error {
 		return fmt.Errorf("failed to delete session: %w", err)
 	}
 
+	auditDeletion("session", sessionID, "")
 	return nil
 }
 
@@ -645,7 +653,7 @@ func (s *MongoDBStore) Delete(sessionID string) error {
 // and opened files for a user. Resets user's ActiveSessionIDs and SessionSeqs,
 // and unbans the user (clears BanUntil, BanMessage, NonsenseCount).
 func (s *MongoDBStore) DeleteUserData(userID string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*s.opTimeout)
 	defer cancel()
 
 	userFilter := bson.M{"user_id": userID}
@@ -712,13 +720,14 @@ func (s *MongoDBStore) DeleteUserData(userID string) error {
 		}
 	}
 
+	auditDeletion("user_data", userID, userID)
 	return nil
 }
 
 // List returns all sessions for a user
 func (s *MongoDBStore) List(userID string) ([]*model.Session, error) {
 	// MongoDB is thread-safe, no mutex needed
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := s.opCtx()
 	defer cancel()
 
 	cursor, err := s.collection.Find(ctx, bson.M{"user_id": userID}, options.Find().SetSort(bson.D{{Key: "updated_at", Value: -1}}))
@@ -756,7 +765,7 @@ func (s *MongoDBStore) List(userID string) ([]*model.Session, error) {
 // GetNextSessionSeq returns the next session sequence number for a user and agent type
 // Uses MAX(session_seq) to avoid duplicate IDs when sessions are deleted
 func (s *MongoDBStore) GetNextSessionSeq(userID string, agentType model.AgentType) (int, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := s.opCtx()
 	defer cancel()
 
 	// Use aggregation to find MAX(session_seq) for this user and agent type
@@ -798,7 +807,7 @@ func (s *MongoDBStore) GetNextSessionSeq(userID string, agentType model.AgentTyp
 // If no Core session exists, it returns nil without error
 func (s *MongoDBStore) GetCoreSession(userID string) (*model.Session, error) {
 	// MongoDB is thread-safe, no mutex needed
-	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	ctx, cancel := s.opCtx()
 	defer cancel()
 
 	var doc sessionDocument
@@ -838,8 +847,8 @@ func (s *MongoDBStore) GetCoreSession(userID string) (*model.Session, error) {
 // PutCoreSession stores or updates a Core session for a user
 // This ensures only one Core session exists per user by deleting any existing Core sessions first
 func (s *MongoDBStore) PutCoreSession(session *model.Session) error {
-	if session == nil {
-		return fmt.Errorf("session cannot be nil")
+	if err := validateSession(session); err != nil {
+		return err
 	}
 	if session.AgentType != model.AgentTypeCore {
 		return fmt.Errorf("session must be of type Core")
@@ -851,7 +860,7 @@ func (s *MongoDBStore) PutCoreSession(session *model.Session) error {
 	}
 
 	// MongoDB is thread-safe, no mutex needed
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := s.opCtx()
 	defer cancel()
 
 	// Delete any existing Core sessions for this user
@@ -1003,7 +1012,7 @@ func (s *MongoDBStore) GetSession(sessionID string) (*model.Session, error) {
 // GetAllSessions returns all sessions grouped by userID
 func (s *MongoDBStore) GetAllSessions() (map[string][]*model.Session, error) {
 	// MongoDB is thread-safe, no mutex needed
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*s.opTimeout)
 	defer cancel()
 
 	cursor, err := s.collection.Find(ctx, bson.M{}, options.Find().SetSort(bson.D{{Key: "updated_at", Value: -1}}))
@@ -1045,7 +1054,7 @@ type userDocument struct {
 
 // GetUser retrieves a user by ID
 func (s *MongoDBStore) GetUser(userID string) (*model.User, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	ctx, cancel := s.opCtx()
 	defer cancel()
 
 	var doc userDocument
@@ -1077,11 +1086,11 @@ func (s *MongoDBStore) GetUser(userID string) (*model.User, error) {
 
 // PutUser stores or updates a user
 func (s *MongoDBStore) PutUser(user *model.User) error {
-	if user == nil {
-		return fmt.Errorf("user cannot be nil")
+	if err := validateUser(user); err != nil {
+		return err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := s.opCtx()
 	defer cancel()
 
 	data, err := json.Marshal(user)
@@ -1129,9 +1138,15 @@ func (s *MongoDBStore) GetOrCreateUser(userID string) (*model.User, error) {
 			}
 		}
 
-		// Save user if any backward compatibility computation was done
+		// Save user if any backward compatibility computation was done. The
+		// backfill is logged so a buggy computation can be traced instead of
+		// silently poisoning the record.
 		if needsSave {
-			_ = s.PutUser(user) // Best effort save
+			log.Log.Infof("store: backfilled SessionSeqs/ActiveSessionIDs for user %s (seqs=%v, active=%v)",
+				user.UserID, user.SessionSeqs, user.ActiveSessionIDs)
+			if err := s.PutUser(user); err != nil {
+				log.Log.Warnf("store: failed to persist backfilled user %s: %v", user.UserID, err)
+			}
 		}
 
 		return user, nil
@@ -1216,7 +1231,7 @@ func (s *MongoDBStore) computeActiveSessionIDs(user *model.User) error {
 
 // GetAllUsers returns all users
 func (s *MongoDBStore) GetAllUsers() ([]*model.User, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*s.opTimeout)
 	defer cancel()
 
 	cursor, err := s.usersCollection.Find(ctx, bson.M{})
@@ -1255,12 +1270,16 @@ type messageDocument struct {
 
 // PutMessage stores a message
 func (s *MongoDBStore) PutMessage(message *model.Message) error {
-	if message == nil {
-		return fmt.Errorf("message cannot be nil")
+	if err := validateMessage(message); err != nil {
+		return err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := s.opCtx()
 	defer cancel()
+
+	if err := s.checkMessageQuota(ctx, message.SessionID, 1); err != nil {
+		return err
+	}
 
 	data, err := json.Marshal(message)
 	if err != nil {
@@ -1285,17 +1304,132 @@ func (s *MongoDBStore) PutMessage(message *model.Message) error {
 	return nil
 }
 
-// GetMessagesBySession returns all messages for a session
-func (s *MongoDBStore) GetMessagesBySession(sessionID string) ([]*model.Message, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+// checkMessageQuota enforces MaxMessagesPerSession (when configured) for n new
+// messages in sessionID.
+func (s *MongoDBStore) checkMessageQuota(ctx context.Context, sessionID string, n int) error {
+	if s.quotas.MaxMessagesPerSession <= 0 {
+		return nil
+	}
+	count, err := s.messagesCollection.CountDocuments(ctx, bson.M{"session_id": sessionID})
+	if err != nil {
+		return fmt.Errorf("failed to count messages for quota: %w", err)
+	}
+	if int(count)+n > s.quotas.MaxMessagesPerSession {
+		return fmt.Errorf("%w: session %s has %d messages (max %d)",
+			ErrQuotaExceeded, sessionID, count, s.quotas.MaxMessagesPerSession)
+	}
+	return nil
+}
+
+// checkUserFileQuota enforces per-user file-count and byte quotas (when
+// configured) for a new/updated file record.
+func (s *MongoDBStore) checkUserFileQuota(ctx context.Context, f *model.UserFile) error {
+	if s.quotas.MaxUserFilesPerUser <= 0 && s.quotas.MaxFileBytesPerUser <= 0 {
+		return nil
+	}
+	files, err := s.GetUserFilesByUser(f.UserID)
+	if err != nil {
+		return fmt.Errorf("failed to list user files for quota: %w", err)
+	}
+	count := 0
+	var bytes int64
+	exists := false
+	for _, existing := range files {
+		count++
+		bytes += existing.Size
+		if existing.FileID == f.FileID {
+			exists = true
+		}
+	}
+	if s.quotas.MaxUserFilesPerUser > 0 && !exists && count+1 > s.quotas.MaxUserFilesPerUser {
+		return fmt.Errorf("%w: user %s has %d files (max %d)",
+			ErrQuotaExceeded, f.UserID, count, s.quotas.MaxUserFilesPerUser)
+	}
+	if s.quotas.MaxFileBytesPerUser > 0 && bytes+f.Size > s.quotas.MaxFileBytesPerUser {
+		return fmt.Errorf("%w: user %s would exceed %d bytes of files",
+			ErrQuotaExceeded, f.UserID, s.quotas.MaxFileBytesPerUser)
+	}
+	return nil
+}
+
+// PutMessages stores a batch of messages with one bulk write instead of O(N)
+// round trips. All messages are validated first; quota checks run per session.
+func (s *MongoDBStore) PutMessages(messages []*model.Message) error {
+	if len(messages) == 0 {
+		return nil
+	}
+	for _, m := range messages {
+		if err := validateMessage(m); err != nil {
+			return err
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*s.opTimeout)
 	defer cancel()
 
-	cursor, err := s.messagesCollection.Find(ctx, bson.M{"session_id": sessionID}, options.Find().SetSort(bson.D{{Key: "created_at", Value: -1}}))
+	if s.quotas.MaxMessagesPerSession > 0 {
+		perSession := make(map[string]int)
+		for _, m := range messages {
+			perSession[m.SessionID]++
+		}
+		for sessionID, n := range perSession {
+			if err := s.checkMessageQuota(ctx, sessionID, n); err != nil {
+				return err
+			}
+		}
+	}
+
+	models := make([]mongo.WriteModel, 0, len(messages))
+	for _, m := range messages {
+		data, err := json.Marshal(m)
+		if err != nil {
+			return fmt.Errorf("failed to marshal message %s: %w", m.MessageID, err)
+		}
+		doc := messageDocument{
+			MessageID: m.MessageID,
+			SessionID: m.SessionID,
+			UserID:    m.UserID,
+			SeqID:     m.SeqID,
+			Data:      string(data),
+			CreatedAt: m.CreatedAt,
+		}
+		models = append(models, mongo.NewReplaceOneModel().
+			SetFilter(bson.M{"_id": m.MessageID}).
+			SetReplacement(doc).
+			SetUpsert(true))
+	}
+	if _, err := s.messagesCollection.BulkWrite(ctx, models); err != nil {
+		return fmt.Errorf("failed to bulk store messages: %w", err)
+	}
+	return nil
+}
+
+// GetMessagesBySessionPage returns one page of a session's messages, newest
+// first (same ordering and defaults as the SQLite backend).
+func (s *MongoDBStore) GetMessagesBySessionPage(sessionID string, limit, offset int) ([]*model.Message, error) {
+	if limit <= 0 {
+		limit = messagesPageSize
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	ctx, cancel := s.opCtx()
+	defer cancel()
+
+	cursor, err := s.messagesCollection.Find(ctx, bson.M{"session_id": sessionID},
+		options.Find().
+			SetSort(bson.D{{Key: "created_at", Value: -1}, {Key: "seq_id", Value: -1}}).
+			SetSkip(int64(offset)).
+			SetLimit(int64(limit)))
 	if err != nil {
 		return nil, fmt.Errorf("failed to query messages: %w", err)
 	}
 	defer cursor.Close(ctx)
+	return decodeMessageCursor(ctx, cursor)
+}
 
+// decodeMessageCursor drains a messages cursor into model.Message values.
+func decodeMessageCursor(ctx context.Context, cursor *mongo.Cursor) ([]*model.Message, error) {
 	var messages []*model.Message
 	for cursor.Next(ctx) {
 		var doc messageDocument
@@ -1310,13 +1444,29 @@ func (s *MongoDBStore) GetMessagesBySession(sessionID string) ([]*model.Message,
 
 		messages = append(messages, message)
 	}
-
 	return messages, cursor.Err()
+}
+
+// GetMessagesBySession returns all messages for a session, newest first. It is
+// implemented via pages internally; prefer GetMessagesBySessionPage for
+// sessions that can grow without bound.
+func (s *MongoDBStore) GetMessagesBySession(sessionID string) ([]*model.Message, error) {
+	var all []*model.Message
+	for offset := 0; ; offset += messagesPageSize {
+		page, err := s.GetMessagesBySessionPage(sessionID, messagesPageSize, offset)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, page...)
+		if len(page) < messagesPageSize {
+			return all, nil
+		}
+	}
 }
 
 // GetMessagesByUser returns all messages for a user
 func (s *MongoDBStore) GetMessagesByUser(userID string) ([]*model.Message, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := s.opCtx()
 	defer cancel()
 
 	cursor, err := s.messagesCollection.Find(ctx, bson.M{"user_id": userID}, options.Find().SetSort(bson.D{{Key: "created_at", Value: -1}}))
@@ -1345,7 +1495,7 @@ func (s *MongoDBStore) GetMessagesByUser(userID string) ([]*model.Message, error
 
 // GetAllMessages returns all messages
 func (s *MongoDBStore) GetAllMessages() ([]*model.Message, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*s.opTimeout)
 	defer cancel()
 
 	cursor, err := s.messagesCollection.Find(ctx, bson.M{}, options.Find().SetSort(bson.D{{Key: "created_at", Value: -1}}))
@@ -1384,11 +1534,11 @@ type openedFileDocument struct {
 
 // AddOpenedFile records that a file was opened
 func (s *MongoDBStore) AddOpenedFile(openedFile *model.OpenedFile) error {
-	if openedFile == nil {
-		return fmt.Errorf("openedFile cannot be nil")
+	if err := validateOpenedFile(openedFile); err != nil {
+		return err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := s.opCtx()
 	defer cancel()
 
 	data, err := json.Marshal(openedFile)
@@ -1420,7 +1570,7 @@ func (s *MongoDBStore) AddOpenedFile(openedFile *model.OpenedFile) error {
 // later read reflects the closed state (IsOpen=false, ClosedAt set), exactly as
 // the SQLite backend reconstructs it from columns.
 func (s *MongoDBStore) CloseOpenedFile(sessionID string, filePath string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := s.opCtx()
 	defer cancel()
 
 	id := fmt.Sprintf("%s:%s", sessionID, filePath)
@@ -1460,7 +1610,7 @@ func (s *MongoDBStore) CloseOpenedFile(sessionID string, filePath string) error 
 
 // GetOpenedFilesBySession returns all opened files for a session
 func (s *MongoDBStore) GetOpenedFilesBySession(sessionID string) ([]*model.OpenedFile, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := s.opCtx()
 	defer cancel()
 
 	cursor, err := s.openedFilesCollection.Find(ctx, bson.M{"session_id": sessionID})
@@ -1493,7 +1643,7 @@ func (s *MongoDBStore) GetOpenedFilesBySession(sessionID string) ([]*model.Opene
 
 // GetCurrentlyOpenedFilesBySession returns only currently open files
 func (s *MongoDBStore) GetCurrentlyOpenedFilesBySession(sessionID string) ([]*model.OpenedFile, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := s.opCtx()
 	defer cancel()
 
 	cursor, err := s.openedFilesCollection.Find(ctx, bson.M{
@@ -1529,7 +1679,7 @@ func (s *MongoDBStore) GetCurrentlyOpenedFilesBySession(sessionID string) ([]*mo
 
 // GetAllOpenedFiles returns all opened files
 func (s *MongoDBStore) GetAllOpenedFiles() ([]*model.OpenedFile, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*s.opTimeout)
 	defer cancel()
 
 	cursor, err := s.openedFilesCollection.Find(ctx, bson.M{})
@@ -1559,7 +1709,7 @@ func (s *MongoDBStore) GetAllOpenedFiles() ([]*model.OpenedFile, error) {
 // GetOpenedFilesByUser returns opened files for a user sorted by OpenedAt (newest first).
 // MongoDB stores full document in Data; we filter by user_id after decode.
 func (s *MongoDBStore) GetOpenedFilesByUser(userID string) ([]*model.OpenedFile, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*s.opTimeout)
 	defer cancel()
 
 	cursor, err := s.openedFilesCollection.Find(ctx, bson.M{})
@@ -1628,12 +1778,16 @@ func decodeUserFiles(ctx context.Context, cursor *mongo.Cursor) ([]*model.UserFi
 
 // PutUserFile inserts or updates a user file record.
 func (s *MongoDBStore) PutUserFile(f *model.UserFile) error {
-	if f == nil {
-		return fmt.Errorf("userFile cannot be nil")
+	if err := validateUserFile(f); err != nil {
+		return err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := s.opCtx()
 	defer cancel()
+
+	if err := s.checkUserFileQuota(ctx, f); err != nil {
+		return err
+	}
 
 	data, err := json.Marshal(f)
 	if err != nil {
@@ -1657,7 +1811,7 @@ func (s *MongoDBStore) PutUserFile(f *model.UserFile) error {
 
 // GetUserFile returns a single user file by ID, or nil if not found.
 func (s *MongoDBStore) GetUserFile(fileID string) (*model.UserFile, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := s.opCtx()
 	defer cancel()
 
 	var doc userFileDocument
@@ -1677,7 +1831,7 @@ func (s *MongoDBStore) GetUserFile(fileID string) (*model.UserFile, error) {
 
 // GetUserFilesByUser returns all files for a user, newest first.
 func (s *MongoDBStore) GetUserFilesByUser(userID string) ([]*model.UserFile, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*s.opTimeout)
 	defer cancel()
 
 	opts := options.Find().SetSort(bson.D{{Key: "created_at", Value: -1}})
@@ -1690,7 +1844,7 @@ func (s *MongoDBStore) GetUserFilesByUser(userID string) ([]*model.UserFile, err
 
 // GetUserFilesBySession returns all files for a session, newest first.
 func (s *MongoDBStore) GetUserFilesBySession(sessionID string) ([]*model.UserFile, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*s.opTimeout)
 	defer cancel()
 
 	opts := options.Find().SetSort(bson.D{{Key: "created_at", Value: -1}})
@@ -1703,7 +1857,7 @@ func (s *MongoDBStore) GetUserFilesBySession(sessionID string) ([]*model.UserFil
 
 // GetAllUserFiles returns all user files, newest first.
 func (s *MongoDBStore) GetAllUserFiles() ([]*model.UserFile, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*s.opTimeout)
 	defer cancel()
 
 	opts := options.Find().SetSort(bson.D{{Key: "created_at", Value: -1}})
@@ -1716,12 +1870,13 @@ func (s *MongoDBStore) GetAllUserFiles() ([]*model.UserFile, error) {
 
 // DeleteUserFile removes a user file metadata record by ID.
 func (s *MongoDBStore) DeleteUserFile(fileID string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := s.opCtx()
 	defer cancel()
 
 	if _, err := s.userFilesCollection.DeleteOne(ctx, bson.M{"_id": fileID}); err != nil {
 		return fmt.Errorf("failed to delete user file: %w", err)
 	}
+	auditDeletion("user_file", fileID, "")
 	return nil
 }
 
@@ -1738,11 +1893,11 @@ type toolCallDocument struct {
 
 // PutToolCall stores a tool call
 func (s *MongoDBStore) PutToolCall(toolCall *model.ToolCall) error {
-	if toolCall == nil {
-		return fmt.Errorf("toolCall cannot be nil")
+	if err := validateToolCall(toolCall); err != nil {
+		return err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := s.opCtx()
 	defer cancel()
 
 	data, err := json.Marshal(toolCall)
@@ -1770,7 +1925,7 @@ func (s *MongoDBStore) PutToolCall(toolCall *model.ToolCall) error {
 
 // GetToolCallsBySession returns all tool calls for a session
 func (s *MongoDBStore) GetToolCallsBySession(sessionID string) ([]*model.ToolCall, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := s.opCtx()
 	defer cancel()
 
 	cursor, err := s.toolCallsCollection.Find(ctx, bson.M{"session_id": sessionID}, options.Find().SetSort(bson.D{{Key: "created_at", Value: -1}}))
@@ -1800,7 +1955,7 @@ func (s *MongoDBStore) GetToolCallsBySession(sessionID string) ([]*model.ToolCal
 // GetToolCallByID returns a tool call by its ID (OpenAI's tool_call_id), not by ToolID.
 // In MongoDB _id is ToolID; tool_call_id is stored as a separate field for this lookup.
 func (s *MongoDBStore) GetToolCallByID(toolCallID string) (*model.ToolCall, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	ctx, cancel := s.opCtx()
 	defer cancel()
 
 	var doc toolCallDocument
@@ -1822,7 +1977,7 @@ func (s *MongoDBStore) GetToolCallByID(toolCallID string) (*model.ToolCall, erro
 
 // GetToolCallByToolID returns a tool call by ToolID (sequential ID)
 func (s *MongoDBStore) GetToolCallByToolID(toolID string) (*model.ToolCall, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	ctx, cancel := s.opCtx()
 	defer cancel()
 
 	var doc toolCallDocument
@@ -1844,7 +1999,7 @@ func (s *MongoDBStore) GetToolCallByToolID(toolID string) (*model.ToolCall, erro
 
 // GetAllToolCalls returns all tool calls
 func (s *MongoDBStore) GetAllToolCalls() ([]*model.ToolCall, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*s.opTimeout)
 	defer cancel()
 
 	cursor, err := s.toolCallsCollection.Find(ctx, bson.M{}, options.Find().SetSort(bson.D{{Key: "created_at", Value: -1}}))
@@ -1874,7 +2029,7 @@ func (s *MongoDBStore) GetAllToolCalls() ([]*model.ToolCall, error) {
 // UpdateToolCallResponse updates the response for a tool call by ToolID and calculates duration.
 // When execErr != nil, sets status=failed and error=execErr.Error().
 func (s *MongoDBStore) UpdateToolCallResponse(toolID string, response string, execErr error) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := s.opCtx()
 	defer cancel()
 
 	now := time.Now()
@@ -1942,7 +2097,7 @@ func (s *MongoDBStore) PutSummarizationLog(log *model.SummarizationLog) error {
 		return fmt.Errorf("log cannot be nil")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := s.opCtx()
 	defer cancel()
 
 	data, err := json.Marshal(log)
@@ -1971,7 +2126,7 @@ func (s *MongoDBStore) PutSummarizationLog(log *model.SummarizationLog) error {
 
 // GetSummarizationLogsBySession returns all summarization logs for a session
 func (s *MongoDBStore) GetSummarizationLogsBySession(sessionID string) ([]*model.SummarizationLog, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := s.opCtx()
 	defer cancel()
 
 	// Newest first, matching the SQLite backend (contract parity).
@@ -2001,7 +2156,7 @@ func (s *MongoDBStore) GetSummarizationLogsBySession(sessionID string) ([]*model
 
 // GetAllSummarizationLogs returns all summarization logs
 func (s *MongoDBStore) GetAllSummarizationLogs() ([]*model.SummarizationLog, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*s.opTimeout)
 	defer cancel()
 
 	cursor, err := s.summarizationLogsCollection.Find(ctx, bson.M{}, options.Find().SetSort(bson.D{{Key: "created_at", Value: -1}}))
@@ -2050,7 +2205,7 @@ func (s *MongoDBStore) PutRouteTrace(trace *model.RouteTrace) error {
 		return fmt.Errorf("route trace cannot be nil")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := s.opCtx()
 	defer cancel()
 
 	data, err := json.Marshal(trace)
@@ -2077,7 +2232,7 @@ func (s *MongoDBStore) PutRouteTrace(trace *model.RouteTrace) error {
 
 // GetRouteTraceByID returns the trace by id, or (nil, nil) when not found.
 func (s *MongoDBStore) GetRouteTraceByID(traceID string) (*model.RouteTrace, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := s.opCtx()
 	defer cancel()
 
 	var doc routeTraceDocument
@@ -2112,7 +2267,7 @@ func (s *MongoDBStore) GetAllRouteTraces() ([]*model.RouteTrace, error) {
 
 // queryRouteTraces runs a filter and decodes the matching traces, newest first.
 func (s *MongoDBStore) queryRouteTraces(filter bson.M) ([]*model.RouteTrace, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*s.opTimeout)
 	defer cancel()
 
 	cursor, err := s.routeTracesCollection.Find(ctx, filter, options.Find().SetSort(bson.D{{Key: "created_at", Value: -1}, {Key: "_id", Value: -1}}))
@@ -2141,3 +2296,71 @@ var (
 	_ model.SessionStore = (*MongoDBStore)(nil)
 	_ debuger.DebugStore = (*MongoDBStore)(nil)
 )
+
+// ============================================================================
+// Maintenance (Maintainer interface)
+// ============================================================================
+
+// Backup is not supported for MongoDB from inside the application — use
+// mongodump/mongorestore (or cluster snapshots) against the deployment instead.
+// Implements Maintainer.
+func (s *MongoDBStore) Backup(w io.Writer) error {
+	return fmt.Errorf("%w: use mongodump against %s", ErrBackupUnsupported, redactURI(s.uri))
+}
+
+// Verify scans for orphaned child documents (messages, tool calls, opened
+// files, route traces whose session is gone; user files whose user is gone).
+// Implements Maintainer. Intended for the debug dashboard and operational checks.
+func (s *MongoDBStore) Verify() ([]Issue, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*s.opTimeout)
+	defer cancel()
+
+	sessionIDs, err := s.collection.Distinct(ctx, "_id", bson.M{})
+	if err != nil {
+		return nil, fmt.Errorf("store: verify: list sessions: %w", err)
+	}
+	userIDs, err := s.usersCollection.Distinct(ctx, "_id", bson.M{})
+	if err != nil {
+		return nil, fmt.Errorf("store: verify: list users: %w", err)
+	}
+
+	var issues []Issue
+	orphanScan := func(coll *mongo.Collection, parentField string, parents []interface{}, issueType, detail string) error {
+		cursor, err := coll.Find(ctx, bson.M{parentField: bson.M{"$nin": parents}},
+			options.Find().SetProjection(bson.M{"_id": 1}))
+		if err != nil {
+			return fmt.Errorf("store: verify %s: %w", issueType, err)
+		}
+		defer cursor.Close(ctx)
+		for cursor.Next(ctx) {
+			var doc struct {
+				ID string `bson:"_id"`
+			}
+			if err := cursor.Decode(&doc); err != nil {
+				continue
+			}
+			issues = append(issues, Issue{Type: issueType, ID: doc.ID, Detail: detail})
+		}
+		return cursor.Err()
+	}
+
+	checks := []struct {
+		coll      *mongo.Collection
+		field     string
+		parents   []interface{}
+		issueType string
+		detail    string
+	}{
+		{s.messagesCollection, "session_id", sessionIDs, "orphaned_message", "message references a session that no longer exists"},
+		{s.toolCallsCollection, "session_id", sessionIDs, "orphaned_tool_call", "tool call references a session that no longer exists"},
+		{s.openedFilesCollection, "session_id", sessionIDs, "orphaned_opened_file", "opened file references a session that no longer exists"},
+		{s.routeTracesCollection, "session_id", sessionIDs, "orphaned_route_trace", "route trace references a session that no longer exists"},
+		{s.userFilesCollection, "user_id", userIDs, "orphaned_user_file", "user file references a user that no longer exists"},
+	}
+	for _, c := range checks {
+		if err := orphanScan(c.coll, c.field, c.parents, c.issueType, c.detail); err != nil {
+			return nil, err
+		}
+	}
+	return issues, nil
+}

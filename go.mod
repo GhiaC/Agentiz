@@ -6,6 +6,7 @@ require (
 	github.com/a-h/templ v0.3.977
 	github.com/gin-gonic/gin v1.11.0
 	github.com/go-echarts/go-echarts/v2 v2.6.7
+	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/prometheus/client_golang v1.23.2
 	github.com/sashabaranov/go-openai v1.40.0
 	github.com/testcontainers/testcontainers-go/modules/mongodb v0.42.0
@@ -48,7 +49,6 @@ require (
 	github.com/goccy/go-yaml v1.18.0 // indirect
 	github.com/golang/snappy v1.0.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
-	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/klauspost/compress v1.18.5 // indirect
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect

@@ -5,29 +5,35 @@ import (
 	"sync"
 	"time"
 
+	lru "github.com/hashicorp/golang-lru/v2"
+
 	"github.com/ghiac/agentize/debuger"
 	"github.com/ghiac/agentize/model"
 )
 
+// Cache sizes for the DBStore read caches. Bounded LRUs so a long-running
+// server's cache cannot grow without limit.
+const (
+	sessionsCacheSize = 10000
+	usersCacheSize    = 10000
+)
+
 // DBStore is a simple wrapper around SQLiteStore with read cache
-// It uses in-memory cache for frequently accessed data (sessions, users) while persisting to SQLite
+// It uses bounded in-memory LRU caches for frequently accessed data
+// (sessions, users) while persisting to SQLite
 type DBStore struct {
 	// SQLite backend - all data is persisted in database
 	sqliteStore *SQLiteStore
 
-	// Read cache for sessions (simple LRU-like behavior)
-	sessionsCache map[string]*model.Session
-	sessionsMu    sync.RWMutex
-
-	// Read cache for users
-	usersCache map[string]*model.User
-	usersMu    sync.RWMutex
+	// Bounded read caches (thread-safe LRUs).
+	sessionsCache *lru.Cache[string, *model.Session]
+	usersCache    *lru.Cache[string, *model.User]
 
 	// UserNodes tracks visited nodes for each user (user-level, not session-level)
 	// This stays in-memory for performance as it's frequently accessed
 	userNodes sync.Map
-	userLock  map[string]*sync.Mutex
-	nodesMu   sync.RWMutex // Protects userLock map
+	// userLock maps userID → *sync.Mutex; created with LoadOrStore, never deleted.
+	userLock sync.Map
 }
 
 // UserNodes represents visited nodes for a user
@@ -49,11 +55,19 @@ func NewDBStoreWithPath(dbPath string) (*DBStore, error) {
 		return nil, fmt.Errorf("failed to initialize SQLite store: %w", err)
 	}
 
+	sessionsCache, err := lru.New[string, *model.Session](sessionsCacheSize)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create sessions cache: %w", err)
+	}
+	usersCache, err := lru.New[string, *model.User](usersCacheSize)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create users cache: %w", err)
+	}
+
 	return &DBStore{
 		sqliteStore:   sqliteStore,
-		sessionsCache: make(map[string]*model.Session),
-		usersCache:    make(map[string]*model.User),
-		userLock:      make(map[string]*sync.Mutex),
+		sessionsCache: sessionsCache,
+		usersCache:    usersCache,
 	}, nil
 }
 
@@ -83,40 +97,21 @@ func (s *DBStore) BackendInfo() debuger.BackendInfo {
 	return debuger.BackendInfo{Type: "SQLite"}
 }
 
-// getOrCreateLock gets or creates a mutex for a userID
+// getOrCreateLock returns the per-user mutex, creating it atomically on first
+// use. Entries are never deleted, so the returned lock is always valid.
 func (s *DBStore) getOrCreateLock(userID string) *sync.Mutex {
-	s.nodesMu.RLock()
-	lock, exists := s.userLock[userID]
-	s.nodesMu.RUnlock()
-
-	if exists {
-		return lock
-	}
-
-	s.nodesMu.Lock()
-	defer s.nodesMu.Unlock()
-
-	// Double check after acquiring write lock
-	if lock, exists := s.userLock[userID]; exists {
-		return lock
-	}
-
-	lock = &sync.Mutex{}
-	s.userLock[userID] = lock
-	return lock
+	v, _ := s.userLock.LoadOrStore(userID, &sync.Mutex{})
+	return v.(*sync.Mutex)
 }
 
 // Get retrieves a session by ID
 // First checks cache, then falls back to database
 func (s *DBStore) Get(sessionID string) (*model.Session, error) {
 	// Check cache first
-	s.sessionsMu.RLock()
-	if session, ok := s.sessionsCache[sessionID]; ok {
-		s.sessionsMu.RUnlock()
+	if session, ok := s.sessionsCache.Get(sessionID); ok {
 		// Return a copy to prevent external modification (using Clone to avoid copylocks)
 		return session.Clone(), nil
 	}
-	s.sessionsMu.RUnlock()
 
 	// Not in cache, get from database
 	session, err := s.sqliteStore.Get(sessionID)
@@ -125,9 +120,7 @@ func (s *DBStore) Get(sessionID string) (*model.Session, error) {
 	}
 
 	// Add to cache
-	s.sessionsMu.Lock()
-	s.sessionsCache[sessionID] = session.Clone()
-	s.sessionsMu.Unlock()
+	s.sessionsCache.Add(sessionID, session.Clone())
 
 	return session, nil
 }
@@ -141,9 +134,7 @@ func (s *DBStore) Put(session *model.Session) error {
 	}
 
 	// Update cache (using Clone to avoid copylocks)
-	s.sessionsMu.Lock()
-	s.sessionsCache[session.SessionID] = session.Clone()
-	s.sessionsMu.Unlock()
+	s.sessionsCache.Add(session.SessionID, session.Clone())
 
 	return nil
 }
@@ -157,9 +148,7 @@ func (s *DBStore) Delete(sessionID string) error {
 	}
 
 	// Remove from cache
-	s.sessionsMu.Lock()
-	delete(s.sessionsCache, sessionID)
-	s.sessionsMu.Unlock()
+	s.sessionsCache.Remove(sessionID)
 
 	return nil
 }
@@ -171,9 +160,7 @@ func (s *DBStore) GetCoreSession(userID string) (*model.Session, error) {
 	if err != nil || session == nil {
 		return session, err
 	}
-	s.sessionsMu.Lock()
-	s.sessionsCache[session.SessionID] = session.Clone()
-	s.sessionsMu.Unlock()
+	s.sessionsCache.Add(session.SessionID, session.Clone())
 	return session, nil
 }
 
@@ -182,9 +169,7 @@ func (s *DBStore) PutCoreSession(session *model.Session) error {
 	if err := s.sqliteStore.PutCoreSession(session); err != nil {
 		return err
 	}
-	s.sessionsMu.Lock()
-	s.sessionsCache[session.SessionID] = session.Clone()
-	s.sessionsMu.Unlock()
+	s.sessionsCache.Add(session.SessionID, session.Clone())
 	return nil
 }
 
@@ -298,14 +283,11 @@ func (s *DBStore) ClearVisitedNodes(userID string) {
 // First checks cache, then falls back to database
 func (s *DBStore) GetUser(userID string) (*model.User, error) {
 	// Check cache first
-	s.usersMu.RLock()
-	if user, ok := s.usersCache[userID]; ok {
-		s.usersMu.RUnlock()
+	if user, ok := s.usersCache.Get(userID); ok {
 		// Return a copy to prevent external modification
 		userCopy := *user
 		return &userCopy, nil
 	}
-	s.usersMu.RUnlock()
 
 	// Not in cache, get from database
 	user, err := s.sqliteStore.GetUser(userID)
@@ -315,10 +297,8 @@ func (s *DBStore) GetUser(userID string) (*model.User, error) {
 
 	// Add to cache if found
 	if user != nil {
-		s.usersMu.Lock()
 		userCopy := *user
-		s.usersCache[userID] = &userCopy
-		s.usersMu.Unlock()
+		s.usersCache.Add(userID, &userCopy)
 	}
 
 	return user, nil
@@ -333,10 +313,8 @@ func (s *DBStore) PutUser(user *model.User) error {
 	}
 
 	// Update cache
-	s.usersMu.Lock()
 	userCopy := *user
-	s.usersCache[user.UserID] = &userCopy
-	s.usersMu.Unlock()
+	s.usersCache.Add(user.UserID, &userCopy)
 
 	return nil
 }
@@ -351,9 +329,19 @@ func (s *DBStore) PutMessage(message *model.Message) error {
 	return s.sqliteStore.PutMessage(message)
 }
 
+// PutMessages stores a batch of messages in one transaction (delegates to SQLiteStore)
+func (s *DBStore) PutMessages(messages []*model.Message) error {
+	return s.sqliteStore.PutMessages(messages)
+}
+
 // GetMessagesBySession returns all messages for a session (delegates to SQLiteStore)
 func (s *DBStore) GetMessagesBySession(sessionID string) ([]*model.Message, error) {
 	return s.sqliteStore.GetMessagesBySession(sessionID)
+}
+
+// GetMessagesBySessionPage returns one page of a session's messages (delegates to SQLiteStore)
+func (s *DBStore) GetMessagesBySessionPage(sessionID string, limit, offset int) ([]*model.Message, error) {
+	return s.sqliteStore.GetMessagesBySessionPage(sessionID, limit, offset)
 }
 
 // GetMessagesByUser returns all messages for a user (delegates to SQLiteStore)
@@ -517,16 +505,12 @@ func (s *DBStore) DeleteUserData(userID string) error {
 	}
 
 	// Clear session cache for deleted sessions
-	s.sessionsMu.Lock()
 	for _, sess := range sessions {
-		delete(s.sessionsCache, sess.SessionID)
+		s.sessionsCache.Remove(sess.SessionID)
 	}
-	s.sessionsMu.Unlock()
 
 	// Clear user cache
-	s.usersMu.Lock()
-	delete(s.usersCache, userID)
-	s.usersMu.Unlock()
+	s.usersCache.Remove(userID)
 
 	return nil
 }
