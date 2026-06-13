@@ -24,8 +24,10 @@ const (
 	adminLoginPath  = "/agentize/login"
 )
 
-// SetAdminCredentials sets the admin username/password that protect every
-// /agentize web page (docs, graph, debug, metrics). Call before RegisterRoutes.
+// SetAdminCredentials sets the admin username/password that protect the
+// /agentize web pages (docs, graph, debug). /agentize/health stays open for
+// health checks; Prometheus metrics are served separately on a dedicated port
+// (see AGENTIZE_METRICS_ADDR), not on these pages. Call before RegisterRoutes.
 // When never called, the AGENTIZE_ADMIN_USERNAME / AGENTIZE_ADMIN_PASSWORD
 // environment variables are used; if those are empty too, auth is disabled.
 func (ag *Agentize) SetAdminCredentials(username, password string) {

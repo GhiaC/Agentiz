@@ -22,15 +22,20 @@ import (
 // When admin credentials are configured (SetAdminCredentials or the
 // AGENTIZE_ADMIN_USERNAME / AGENTIZE_ADMIN_PASSWORD env vars), every route
 // except /agentize/health and the login endpoints requires a signed-in admin.
+//
+// Prometheus metrics are NOT served on this router. Set AGENTIZE_METRICS_ADDR
+// (e.g. ":9091") to expose them on a dedicated, unauthenticated port instead —
+// see startMetricsServerFromEnv.
 func (ag *Agentize) RegisterRoutes(router *gin.Engine) {
 	ag.initAdminAuth()
+	ag.startMetricsServerFromEnv()
 	if ag.rawFileLimiter == nil {
 		// Throttle raw user-file downloads to 10/min per IP (burst 10), guarding
 		// against bulk exfiltration by fileID enumeration even when authenticated.
 		ag.rawFileLimiter = newIPRateLimiter(10, 10)
 	}
 
-	// Always-open endpoints
+	// Always-open endpoints (no admin session required).
 	router.GET("/agentize/health", ag.handleHealth)
 	router.GET(adminLoginPath, ag.handleLoginPage)
 	router.POST(adminLoginPath, ag.handleLoginSubmit)
@@ -38,7 +43,6 @@ func (ag *Agentize) RegisterRoutes(router *gin.Engine) {
 
 	p := ag.requireAdmin
 	router.GET("/agentize", p(ag.handleIndex))
-	router.GET("/agentize/metrics", p(metrics.GinHandler()))
 	router.GET("/agentize/graph", p(ag.handleGraph))
 	router.GET("/agentize/docs", p(ag.handleDocs))
 	router.GET("/agentize/debug", p(ag.handleDebug))
@@ -68,6 +72,25 @@ func (ag *Agentize) RegisterRoutes(router *gin.Engine) {
 	for _, page := range ag.extraDebugRoutes {
 		router.GET(page.Path, p(page.Handler))
 	}
+}
+
+// startMetricsServerFromEnv exposes the Prometheus metrics on a dedicated,
+// unauthenticated port when AGENTIZE_METRICS_ADDR is set (e.g. ":9091"). The
+// metrics are deliberately kept off the main /agentize server, which sits behind
+// the interactive admin login a scraper cannot satisfy. Ensure the dedicated
+// port is reachable only by Prometheus (bind an internal interface / restrict at
+// the network layer). When the variable is unset, metrics are not exposed.
+func (ag *Agentize) startMetricsServerFromEnv() {
+	addr := os.Getenv("AGENTIZE_METRICS_ADDR")
+	if addr == "" {
+		log.Log.Infof("[Agentize] ℹ️  Metrics endpoint not exposed — set AGENTIZE_METRICS_ADDR (e.g. \":9091\") to serve Prometheus metrics on a dedicated port")
+		return
+	}
+	if _, err := metrics.StartServer(addr); err != nil {
+		log.Log.Errorf("[Agentize] ⚠️  Failed to start metrics server on %s: %v", addr, err)
+		return
+	}
+	log.Log.Infof("[Agentize] 📊 Metrics server listening on %s (/metrics, /agentize/metrics)", addr)
 }
 
 // handleIndex handles the main index page with links to graph and docs
