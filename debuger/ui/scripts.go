@@ -3,11 +3,6 @@ package ui
 // GetScripts returns the JavaScript for the debug interface
 func GetScripts() string {
 	return `
-        // Auto-refresh every 30 seconds
-        setTimeout(function() {
-            location.reload();
-        }, 30000);
-
         document.addEventListener('DOMContentLoaded', function() {
             // Expandable content
             document.querySelectorAll('.expandable-content').forEach(function(element) {
