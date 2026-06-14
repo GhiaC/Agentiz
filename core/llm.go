@@ -10,7 +10,6 @@ import (
 	"github.com/ghiac/agentize/log"
 	"github.com/ghiac/agentize/metrics"
 	"github.com/ghiac/agentize/model"
-	"github.com/ghiac/agentize/planning"
 	"github.com/sashabaranov/go-openai"
 )
 
@@ -109,96 +108,25 @@ func (ch *CoreHandler) InvalidateSystemPromptCache(userID string) {
 	ch.invalidateSystemPrompt(userID)
 }
 
-// promptBudget tracks the running size of the assembled system-prompt array
-// against config.MaxSystemPromptSize. Required sections are always added;
-// optional sections that would push the total past the cap are dropped (with a
-// log line and a metric) so a user with huge histories cannot blow up the
-// token cost of every single message.
-type promptBudget struct {
-	prompts []string
-	used    int
-	limit   int
-	userID  string
-}
-
-func (b *promptBudget) addRequired(section string) {
-	if section == "" {
-		return
-	}
-	b.prompts = append(b.prompts, section)
-	b.used += len(section)
-}
-
-func (b *promptBudget) addOptional(name, section string) {
-	if section == "" {
-		return
-	}
-	if b.used+len(section) > b.limit {
-		metrics.SystemPromptSectionDropped(name)
-		log.Log.Warnf("[CoreHandler] ⚠️  System prompt over budget — dropping section | UserID: %s | Section: %s | SectionLen: %d | Used: %d | Limit: %d",
-			b.userID, name, len(section), b.used, b.limit)
-		return
-	}
-	b.prompts = append(b.prompts, section)
-	b.used += len(section)
-}
-
 // buildSystemPrompts builds the array of system prompts for the Core. Prefer
 // generateSystemPrompt on the hot path; this is the uncached builder it wraps.
 //
-// Sections are added in routing-priority order: the controller prompt, agent
-// descriptions and agent tools are required (the Core cannot route without
-// them); everything else is optional and subject to the size budget.
+// It is a thin projection of assembleSections (the single source of truth, see
+// prompt_sections.go): keep every section that survived the size budget, in
+// order. SystemPromptSectionsFor returns the same assembly with full metadata
+// for the debug UI, so the live array and the debug view never drift.
 func (ch *CoreHandler) buildSystemPrompts(userID string) ([]string, error) {
-	budget := &promptBudget{limit: ch.config.maxSystemPromptSize(), userID: userID}
-
-	budget.addRequired(coreControllerPrompt)
-
-	// Agent descriptions (replaces hardcoded UserAgent table)
-	budget.addRequired(ch.agents.BuildAgentsDescriptionPrompt())
-
-	// Agent tools (replaces buildUserAgentToolsPrompt)
-	budget.addRequired(ch.agents.BuildAgentToolsPrompt())
-
-	// Core's own session context (Summary + Tags)
-	ch.coreSessionsMu.RLock()
-	coreSession := ch.coreSessions[userID]
-	ch.coreSessionsMu.RUnlock()
-	if coreSession != nil {
-		budget.addOptional("core_session_context", ch.buildCoreSessionContext(coreSession))
-	}
-
-	// All agents' session contexts (Summary + Tags from each agent's active session)
-	budget.addOptional("agent_session_contexts", ch.agents.BuildAllSessionContextsPrompt(
-		ch.getSessionFunc(),
-		ch.getActiveSessionIDFunc(),
-		userID,
-	))
-
-	// User files: a compact catalog of the user's uploaded/generated files so the
-	// Core can hand a file's ID and name to a worker agent when delegating.
-	budget.addOptional("user_files", ch.buildUserFilesPrompt(userID))
-
-	// Active sessions prompt (which session is active per agent)
-	budget.addOptional("active_sessions", ch.agents.BuildActiveSessionsPrompt(
-		ch.getSessionFunc(),
-		ch.getActiveSessionIDFunc(),
-		userID,
-	))
-
-	// Sessions list prompt (for change_session)
-	sessionsPrompt, err := ch.sessionHandler.GetSessionsPrompt(userID)
+	sections, err := ch.assembleSections(userID, ch.currentCoreSession(userID))
 	if err != nil {
-		return nil, fmt.Errorf("failed to get sessions prompt: %w", err)
+		return nil, err
 	}
-	budget.addOptional("sessions_list", sessionsPrompt)
-
-	// Planning: when enabled, inject decision-making prompt so Core can choose execute_plan for multi-step tasks
-	if ch.orchestrator != nil {
-		budget.addOptional("planning", planning.CorePrompt())
+	prompts := make([]string, 0, len(sections))
+	for _, s := range sections {
+		if s.Included {
+			prompts = append(prompts, s.Content)
+		}
 	}
-
-	return budget.prompts, nil
+	return prompts, nil
 }
 
 // userFileLister is the subset of the store used to read a user's files. The

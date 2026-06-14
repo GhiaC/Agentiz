@@ -394,8 +394,14 @@ func RenderUserDetail(handler *debuger.DebugHandler, userID string, showDeletedS
 	}
 	content += renderCoreBrainCard(coreSession, len(userDocs))
 
+	// Core System Prompt card: the live (or store-preview) array of system
+	// messages the Core assembles to route this user. Collapsed by default; each
+	// section is its own collapsible box.
+	promptSections, promptErr := handler.GetCoreSystemPrompt(userID)
+	content += renderCoreSystemPromptCard(promptSections, handler.CoreSystemPromptIsPreview(), promptErr)
+
 	// Sessions card
-	content += ui.CardStartWithCount("Sessions", "diagram-3-fill", len(userSessions))
+	content += components.CollapsibleCardStartWithCount("Sessions", "diagram-3-fill", len(userSessions), false)
 
 	if len(userSessions) == 0 {
 		content += components.InfoAlert("No sessions found for this user.")
@@ -453,15 +459,17 @@ func RenderUserDetail(handler *debuger.DebugHandler, userID string, showDeletedS
 		content += components.ListGroupEnd()
 	}
 
-	content += ui.CardEnd()
+	content += components.CollapsibleCardEnd()
 
 	// Messages card
-	content += ui.CardStartWithAction("Messages", "chat-dots-fill", len(messages),
-		"/agentize/debug/messages?user="+template.URLQueryEscaper(userID), "View All")
+	content += components.CollapsibleCardStartWithCount("Messages", "chat-dots-fill", len(messages), false)
 
 	if len(messages) == 0 {
 		content += components.InfoAlert("No messages found for this user.")
 	} else {
+		content += fmt.Sprintf(`<div class="mb-3 text-end"><a href="%s" class="btn btn-sm btn-light">View All</a></div>`,
+			"/agentize/debug/messages?user="+template.URLQueryEscaper(userID))
+
 		rowConfig := components.DefaultMessageRowConfig()
 		rowConfig.ShowUser = false // Already on user page
 		rowConfig.ShowSession = true
@@ -485,10 +493,10 @@ func RenderUserDetail(handler *debuger.DebugHandler, userID string, showDeletedS
 		content += components.MessageTableScript()
 	}
 
-	content += ui.CardEnd()
+	content += components.CollapsibleCardEnd()
 
 	// Files card
-	content += ui.CardStartWithCount("Opened Files", "folder-fill", len(userFiles))
+	content += components.CollapsibleCardStartWithCount("Opened Files", "folder-fill", len(userFiles), false)
 
 	if len(userFiles) == 0 {
 		content += components.InfoAlert("No opened files found for this user.")
@@ -529,10 +537,10 @@ func RenderUserDetail(handler *debuger.DebugHandler, userID string, showDeletedS
 		content += components.TableEnd(true)
 	}
 
-	content += ui.CardEnd()
+	content += components.CollapsibleCardEnd()
 
 	// Documents card (real user files: uploaded or generated)
-	content += ui.CardStartWithCount("Documents", "file-earmark-text-fill", len(userDocs))
+	content += components.CollapsibleCardStartWithCount("Documents", "file-earmark-text-fill", len(userDocs), false)
 
 	if len(userDocs) == 0 {
 		content += components.InfoAlert("No documents found for this user.")
@@ -574,7 +582,7 @@ func RenderUserDetail(handler *debuger.DebugHandler, userID string, showDeletedS
 		content += components.TableEnd(true)
 	}
 
-	content += ui.CardEnd()
+	content += components.CollapsibleCardEnd()
 	content += ui.ContainerEnd()
 	return ui.Header("Agentize Debug - User: "+template.HTMLEscapeString(userID)) + ui.NavbarAndBody("/agentize/debug/users", content) + ui.Footer(), nil
 }
@@ -585,10 +593,10 @@ func RenderUserDetail(handler *debuger.DebugHandler, userID string, showDeletedS
 // docCount is how many real user files (documents) the Core can reference when
 // delegating to an agent.
 func renderCoreBrainCard(coreSession *model.Session, docCount int) string {
-	out := ui.CardStart("Core Agent (Brain)", "cpu-fill")
+	out := components.CollapsibleCardStart("Core Agent (Brain)", "cpu-fill", "", false)
 	if coreSession == nil {
 		out += components.InfoAlert("No Core session yet — the Core builds memory after the user's first messages.")
-		out += ui.CardEnd()
+		out += components.CollapsibleCardEnd()
 		return out
 	}
 
@@ -606,7 +614,6 @@ func renderCoreBrainCard(coreSession *model.Session, docCount int) string {
 	}
 
 	out += fmt.Sprintf(`
-<div class="card-body">
     <p class="text-muted mb-3">The long-term memory the Core router uses to route this user's messages. Updated in the background by summarization.</p>
     <table class="table table-sm table-borderless mb-0">
         <tbody>
@@ -618,8 +625,7 @@ func renderCoreBrainCard(coreSession *model.Session, docCount int) string {
             <tr><td class="text-end fw-bold" style="padding: 0.5rem 1rem;">Messages:</td><td style="padding: 0.5rem 1rem;">%s</td></tr>
             <tr><td class="text-end fw-bold" style="padding: 0.5rem 1rem;">Known Documents:</td><td style="padding: 0.5rem 1rem;">%s</td></tr>
         </tbody>
-    </table>
-</div>`,
+    </table>`,
 		components.InlineCode(coreSession.SessionID),
 		components.InlineCode(debuger.GetModelDisplay(coreSession.Model)),
 		summary,
@@ -628,6 +634,89 @@ func renderCoreBrainCard(coreSession *model.Session, docCount int) string {
 		components.CountBadge(coreSession.MessageSeq, "info"),
 		components.CountBadge(docCount, "secondary"),
 	)
-	out += ui.CardEnd()
+	out += components.CollapsibleCardEnd()
 	return out
+}
+
+// renderCoreSystemPromptCard renders the "Core System Prompt" card: the ordered
+// array of system messages the Core assembles to route this user, one collapsible
+// box per section (all collapsed by default). isPreview marks a store-only
+// reconstruction (no live Core wired); err is a build failure, if any.
+func renderCoreSystemPromptCard(sections []model.PromptSection, isPreview bool, err error) string {
+	totalBytes := 0
+	dropped := 0
+	for _, s := range sections {
+		totalBytes += s.Bytes
+		if !s.Included && s.Content != "" {
+			dropped++ // present but cut by the size budget
+		}
+	}
+
+	meta := components.Badge(fmt.Sprintf("%d sections", len(sections)), "secondary") +
+		" " + components.Badge(formatBytes(int64(totalBytes)), "info")
+	if dropped > 0 {
+		meta += " " + components.Badge(fmt.Sprintf("%d dropped", dropped), "warning text-dark")
+	}
+	if isPreview {
+		meta += " " + components.Badge("PREVIEW", "warning text-dark")
+	}
+
+	out := components.CollapsibleCardStart("Core System Prompt", "braces-asterisk", meta, false)
+
+	if isPreview {
+		out += components.WarningAlert("Store-only preview — no live Core is wired. The controller rules and this user's memory, files and sessions are real; agent-dependent sections appear only with a live Core (wire SetCoreSystemPromptProvider).")
+	} else {
+		out += `<p class="text-muted mb-3">The ordered array of system messages the Core sends to its routing LLM for this user, assembled live. Static sections (controller, agents) cache provider-side; dynamic sections are this user's memory.</p>`
+	}
+
+	switch {
+	case err != nil:
+		out += components.DangerAlert("Failed to build the system prompt: " + err.Error())
+	case len(sections) == 0:
+		out += components.InfoAlert("No system-prompt sections to show.")
+	default:
+		for i, s := range sections {
+			out += renderPromptSection(i+1, s)
+		}
+	}
+
+	out += components.CollapsibleCardEnd()
+	return out
+}
+
+// renderPromptSection renders one prompt section as a collapsed nested box with
+// classification badges (Required/Optional, Static/Dynamic, size, dropped/empty)
+// and its raw content.
+func renderPromptSection(idx int, s model.PromptSection) string {
+	var badges []string
+	if s.Required {
+		badges = append(badges, components.Badge("Required", "danger"))
+	} else {
+		badges = append(badges, components.Badge("Optional", "secondary"))
+	}
+	if s.Dynamic {
+		badges = append(badges, components.Badge("Dynamic", "info"))
+	} else {
+		badges = append(badges, components.Badge("Static", "success"))
+	}
+	badges = append(badges, components.Badge(formatBytes(int64(s.Bytes)), "secondary"))
+	switch {
+	case s.Content == "":
+		badges = append(badges, components.Badge("Empty", "secondary"))
+	case !s.Included:
+		badges = append(badges, components.Badge("Dropped (budget)", "warning text-dark"))
+	}
+
+	var body string
+	if s.Note != "" {
+		body += components.InfoAlert(s.Note)
+	}
+	if s.Content != "" {
+		body += fmt.Sprintf("<pre>%s</pre>", template.HTMLEscapeString(s.Content))
+	} else if s.Note == "" {
+		body += `<p class="text-muted mb-0"><em>(empty)</em></p>`
+	}
+
+	title := fmt.Sprintf("%d. %s", idx, s.Title)
+	return components.CollapsibleSection(title, strings.Join(badges, " "), body, false)
 }

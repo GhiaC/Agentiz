@@ -8,11 +8,13 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/ghiac/agentize/core"
 	"github.com/ghiac/agentize/debuger"
 	"github.com/ghiac/agentize/debuger/pages"
 	"github.com/ghiac/agentize/documents"
 	"github.com/ghiac/agentize/log"
 	"github.com/ghiac/agentize/metrics"
+	"github.com/ghiac/agentize/model"
 	"github.com/gin-gonic/gin"
 )
 
@@ -182,6 +184,19 @@ func (ag *Agentize) createDebugHandler() (*debuger.DebugHandler, error) {
 	if ag.userBillingHTMLProvider != nil {
 		handler.SetUserBillingHTMLProvider(ag.userBillingHTMLProvider)
 	}
+
+	// Wire the "Core System Prompt" card. A host with a live Core sets the
+	// provider (e.g. coreHandler.SystemPromptSectionsFor); otherwise fall back to
+	// a store-only preview so the card still shows the controller rules and this
+	// user's memory/files/sessions, flagged as a preview.
+	if ag.coreSystemPromptProvider != nil {
+		handler.SetCoreSystemPromptProvider(ag.coreSystemPromptProvider, false)
+	} else if sessionStore := ag.GetSessionStore(); sessionStore != nil {
+		handler.SetCoreSystemPromptProvider(func(userID string) ([]model.PromptSection, error) {
+			return core.PreviewSystemPromptSections(sessionStore, userID, core.CoreHandlerConfig{})
+		}, true)
+	}
+
 	return handler, nil
 }
 

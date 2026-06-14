@@ -61,6 +61,12 @@ type Agentize struct {
 	// Optional: provider for user billing/credit HTML on debug user detail page
 	userBillingHTMLProvider debuger.UserBillingHTMLProvider
 
+	// Optional: provider for the Core agent's live system-prompt sections on the
+	// debug user detail page. Wire it to a Core via SetCoreSystemPromptProvider
+	// (e.g. coreHandler.SystemPromptSectionsFor); when unset, a store-only preview
+	// is installed as the default in createDebugHandler.
+	coreSystemPromptProvider debuger.CoreSystemPromptProvider
+
 	// Optional: provider for extra rows appended to the System Info panel's "more
 	// info" section (e.g. application config provenance). Called on each render.
 	extraSystemInfoProvider func() []debuger.InfoKV
@@ -606,6 +612,19 @@ func (ag *Agentize) AddDebugPage(page DebugPage) {
 // When set, the returned HTML is rendered on the user detail page below the user info card.
 func (ag *Agentize) SetUserBillingHTMLProvider(fn debuger.UserBillingHTMLProvider) {
 	ag.userBillingHTMLProvider = fn
+}
+
+// SetCoreSystemPromptProvider wires the "Core System Prompt" card on the user
+// detail page to a live Core agent, so the page shows the exact system-prompt
+// array the Core assembles for that user. Typical wiring:
+//
+//	ag.SetCoreSystemPromptProvider(coreHandler.SystemPromptSectionsFor)
+//
+// When left unset, Agentize installs a store-only preview (core.PreviewSystemPromptSections)
+// so the card still shows the controller rules and the user's memory/files/sessions,
+// with agent-dependent sections marked as available only with a live Core.
+func (ag *Agentize) SetCoreSystemPromptProvider(fn debuger.CoreSystemPromptProvider) {
+	ag.coreSystemPromptProvider = fn
 }
 
 // SetExtraSystemInfoProvider sets an optional provider whose rows are appended to

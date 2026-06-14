@@ -300,6 +300,54 @@ func GetStyles() string {
         }
         .expandable-content.expanded .full-content { display: block; }
 
+        /* ============ Collapsible cards / sections (native <details>) ============ */
+        /* Collapsed by default; toggled by the browser, no JS. The <summary> reuses
+           .card-header so a collapsible card matches a regular one. */
+        .collapsible-card > summary.collapsible-summary {
+            display: flex; align-items: center; gap: 10px;
+            cursor: pointer; user-select: none; list-style: none;
+        }
+        .collapsible-card > summary::-webkit-details-marker { display: none; }
+        .collapsible-summary .collapsible-title { flex: 1; font-weight: 600; }
+        .collapsible-summary .collapsible-meta { display: flex; gap: 5px; align-items: center; flex-wrap: wrap; }
+        .collapsible-card > summary::after {
+            content: "\25B8"; color: var(--text-3); font-size: 13px; line-height: 1;
+            transition: transform 0.15s ease; flex-shrink: 0;
+        }
+        .collapsible-card[open] > summary::after { transform: rotate(90deg); color: var(--accent); }
+        .collapsible-card > summary:hover { background: var(--surface); }
+        .collapsible-card > summary:hover::after { color: var(--accent); }
+        /* When collapsed the header is the whole card: round all corners, drop the divider. */
+        .collapsible-card:not([open]) > summary {
+            border-bottom: none; border-radius: var(--radius) !important;
+        }
+
+        .collapsible-section {
+            border: 1px solid var(--border); border-radius: 8px;
+            margin-bottom: 8px; background: var(--surface-2); overflow: hidden;
+        }
+        .collapsible-section:last-child { margin-bottom: 0; }
+        .collapsible-section > summary.collapsible-section-summary {
+            display: flex; align-items: center; gap: 10px;
+            cursor: pointer; user-select: none; list-style: none;
+            padding: 8px 12px; font-size: 13px;
+        }
+        .collapsible-section > summary::-webkit-details-marker { display: none; }
+        .collapsible-section > summary::before {
+            content: "\25B8"; color: var(--text-3); font-size: 12px; line-height: 1;
+            transition: transform 0.15s ease; flex-shrink: 0;
+        }
+        .collapsible-section[open] > summary::before { transform: rotate(90deg); color: var(--accent); }
+        .collapsible-section > summary:hover { background: var(--surface); }
+        .collapsible-section-title { flex: 1; font-weight: 600; }
+        .collapsible-section-badges { display: flex; gap: 5px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+        .collapsible-section-body { padding: 0 12px 12px; }
+        .collapsible-section-body pre {
+            margin: 8px 0 0; max-height: 460px; overflow: auto;
+            white-space: pre-wrap; word-break: break-word; font-size: 12px; line-height: 1.5;
+        }
+        .collapsible-section-body .alert { margin-top: 8px; margin-bottom: 0; }
+
         /* ============ Scrollbars ============ */
         ::-webkit-scrollbar { width: 10px; height: 10px; }
         ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 99px; border: 2px solid transparent; background-clip: padding-box; }

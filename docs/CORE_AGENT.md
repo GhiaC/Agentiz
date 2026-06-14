@@ -63,10 +63,14 @@ A `RouteTrace` (the routing DAG) is recorded alongside for the debug dashboard
 
 ## 4. The system-prompt array (the heart)
 
-The Core does **not** use a single system prompt. `buildSystemPrompts(userID)`
-([core/llm.go:50-103](../core/llm.go)) returns a `[]string`; `buildMessages`
-([core/llm.go:105](../core/llm.go)) then emits **one `system` message per entry**,
-in order, before the conversation messages. The array, in build order:
+The Core does **not** use a single system prompt. `assembleSections`
+([core/prompt_sections.go](../core/prompt_sections.go)) is the single builder of
+the ordered section list; `buildSystemPrompts(userID)` ([core/llm.go](../core/llm.go))
+projects the *included* sections into a `[]string`, and `buildMessages`
+([core/llm.go](../core/llm.go)) then emits **one `system` message per entry**, in
+order, before the conversation messages. The same `assembleSections` feeds the
+debug view (`SystemPromptSectionsFor`, §6), so the array and the UI never drift.
+The array, in build order:
 
 | # | Section | Source | Varies by | Stability |
 |---|---------|--------|-----------|-----------|
@@ -97,13 +101,14 @@ Two important properties:
   happens on `create_session` / `change_session` ([core/tools.go](../core/tools.go))
   and via the exported `InvalidateSystemPromptCache` (wired to summarization, §5).
   Cache lookups are observable via `agentize_system_prompt_cache_total{result=hit|miss|stale}`.
-- **Size budget.** `buildSystemPrompts` assembles sections through a `promptBudget`
-  capped at `CoreHandlerConfig.MaxSystemPromptSize` (default **120000 chars**).
-  Sections 1–3 (controller, agent descriptions, agent tools) are required; the
-  per-user sections are optional and dropped — logged and counted in
+- **Size budget.** `assembleSections` enforces a running size budget capped at
+  `CoreHandlerConfig.MaxSystemPromptSize` (default **120000 chars**). Sections 1–3
+  (controller, agent descriptions, agent tools) are required; the per-user sections
+  are optional and marked *not included* — logged and counted in
   `agentize_system_prompt_sections_dropped_total{section}` — when they would push
   the total past the cap, so one user's huge history cannot inflate every message's
-  token cost.
+  token cost. `buildSystemPrompts` ships only the included sections; the debug view
+  still lists the dropped ones (flagged "Dropped") so an operator can see what was cut.
 
 ### Section 6 — User Files (handing files to a worker agent)
 
@@ -188,17 +193,34 @@ what covers the worker agents' sessions.)
   last-summarized time, message count, and known-document count
   (`renderCoreBrainCard` [debuger/pages/users.go](../debuger/pages/users.go)).
 
+- **Core System Prompt panel**: directly below the Brain card, a collapsed card shows
+  the *exact ordered array of system messages* the Core assembles to route this user —
+  one collapsible box per section, each tagged **Required/Optional**, **Static/Dynamic**,
+  its byte size, and whether it was **Dropped** by the budget
+  (`renderCoreSystemPromptCard` [debuger/pages/users.go](../debuger/pages/users.go)).
+  It is fed via the `Agentize.SetCoreSystemPromptProvider` hook by
+  `CoreHandler.SystemPromptSectionsFor` (the live array); when no Core is wired,
+  Agentize installs `core.PreviewSystemPromptSections` as the default — a store-only
+  reconstruction (real controller + the user's memory/files/sessions, with
+  agent-dependent sections flagged "available with a live Core"), badged **PREVIEW**.
+  See §7 for the one-line wiring.
+
+  The page also makes the secondary cards (Brain, Core System Prompt, Sessions,
+  Messages, Opened Files, Documents) **collapsible and collapsed by default** via the
+  native-`<details>` `Collapsible*` components ([debuger/ui/components/collapsible.go](../debuger/ui/components/collapsible.go)).
+
 ## 7. Extending the Core — where changes land
 
 | You want to change… | Touch |
 |----------------------|-------|
 | Core's hard rules / routing policy | `core/core_controller.md` (embedded prompt) |
-| Which prompt sections exist & their order | `buildSystemPrompts` ([core/llm.go:50](../core/llm.go)) |
+| Which prompt sections exist & their order | `assembleSections` ([core/prompt_sections.go](../core/prompt_sections.go)) |
 | How a user's memory renders into the prompt | `buildCoreSessionContext` ([core/session.go:109](../core/session.go)) + `agentmanager/prompt.go` builders |
 | How memory is produced | `summarizeSession` + `DefaultSummarizationPrompts` ([engine/schedules.go](../engine/schedules.go)) |
 | The memory shape itself | `Session` struct ([model/session.go:39](../model/session.go)) + `store/` (SQLite/Mongo persistence) |
 | Files the Core knows about | `store.GetUserFilesByUser` (via type-assertion on `GetStore()`, as in [core/session.go:52](../core/session.go)) |
 | Core "brain" debug view | `RenderUserDetail` ([debuger/pages/users.go:169](../debuger/pages/users.go)) |
+| The live system-prompt debug view | `SystemPromptSectionsFor` / `PreviewSystemPromptSections` ([core/prompt_sections.go](../core/prompt_sections.go)) + `Agentize.SetCoreSystemPromptProvider` |
 
 ### Wiring the prompt cache invalidation (host responsibility)
 
@@ -218,11 +240,26 @@ TTL expires. Two invariants worth preserving:
 
 - Keep the static prefix (sections 1–3) byte-identical regardless of cache state, so
   provider-side prompt caching keeps working independently of the app cache.
-- Any new dynamic section added to `buildSystemPrompts` is covered by the cache for
+- Any new dynamic section added to `assembleSections` is covered by the cache for
   free, but if it can change *without* a summarization or session event, add an
   `invalidateSystemPrompt(userID)` call at its mutation point — as the Core's image
   upload path does ([core/vision.go](../core/vision.go)) so a just-received file
   appears in the User Files section on the same message rather than after the TTL.
+
+### Wiring the live system-prompt debug view (host responsibility)
+
+To show the *real* assembled prompt (not the store-only preview) on the user detail
+page, the host wires the debug provider to its Core — one line where it already holds
+the `CoreHandler`:
+
+```go
+ag.SetCoreSystemPromptProvider(coreHandler.SystemPromptSectionsFor)
+```
+
+Without it, Agentize installs `core.PreviewSystemPromptSections` automatically, so the
+card still works (badged **PREVIEW**) using only the store — handy before a Core is
+wired. The library carries the whole capability, so this stays a single import-and-wire
+step for the host with nothing to touch in the library itself.
 
 ---
 
