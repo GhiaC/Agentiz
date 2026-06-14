@@ -54,6 +54,19 @@ type CoreHandlerConfig struct {
 	// MaxLLMIterations bounds the Core's LLM tool loop per message. Zero falls
 	// back to the default of 10.
 	MaxLLMIterations int
+
+	// AppPolicy is optional deployment-specific guidance injected as a static
+	// system-prompt section right after the Core Controller section. Use it for
+	// product/domain rules that must NOT live in the generic embedded
+	// core_controller.md — output language, message-length limits, which
+	// app-owned capabilities to delegate, and how to handle deployment signals
+	// (e.g. quota/billing). Its rules refine and may override the generic
+	// controller for this deployment. Empty disables the section.
+	AppPolicy string
+
+	// AppPolicyTitle overrides the heading of the AppPolicy section. Empty falls
+	// back to "Deployment Policy".
+	AppPolicyTitle string
 }
 
 // Default limits for CoreHandlerConfig zero values.
@@ -98,6 +111,14 @@ func (c CoreHandlerConfig) maxLLMIterations() int {
 		return c.MaxLLMIterations
 	}
 	return defaultMaxLLMIterations
+}
+
+// appPolicyTitle returns the configured AppPolicy section title or its default.
+func (c CoreHandlerConfig) appPolicyTitle() string {
+	if c.AppPolicyTitle != "" {
+		return c.AppPolicyTitle
+	}
+	return "Deployment Policy"
 }
 
 // CoreHandler is the main orchestrator that manages user conversations

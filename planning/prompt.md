@@ -19,7 +19,7 @@ Planning builds an execution **Plan** (a DAG of steps) and runs it step-by-step.
 **When NOT to use**
 
 - **Single question or one-off task** → answer directly or use `call_agent_{name}`.
-- **Domain-specific agent work** (billing, referral links, image generation, price/market data) → delegate to the right agent via `call_agent_*`, not execute_plan.
+- **Domain-specific agent work** (any capability owned by a specialized agent) → delegate to the right agent via `call_agent_*`, not execute_plan.
 - **One agent is enough** and there is no need for a step graph → use `call_agent_{name}` only.
 
 ## Tool
@@ -32,4 +32,4 @@ Planning builds an execution **Plan** (a DAG of steps) and runs it step-by-step.
 
 1. **Multi-step or clear step dependencies?** → `execute_plan`
 2. **Simple or single-agent task?** → `call_agent_{name}`
-3. **Billing, payment, image, market, or other agent-owned domain?** → Delegate to agent; do **not** use `execute_plan`
+3. **A capability owned by a specific agent?** → Delegate to that agent; do **not** use `execute_plan`

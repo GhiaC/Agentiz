@@ -65,6 +65,67 @@ func TestSystemPromptSectionsFor_KeysAndClassification(t *testing.T) {
 	}
 }
 
+// TestAppPolicySection_InjectedWhenConfigured verifies the deployment-policy
+// injection hook: when CoreHandlerConfig.AppPolicy is set, it appears as a
+// required, static section titled by AppPolicyTitle, positioned in the static
+// prefix right after the Core Controller; when empty, no such section exists.
+func TestAppPolicySection_InjectedWhenConfigured(t *testing.T) {
+	ch, _ := newTestCoreHandler(t, []string{"researcher"})
+
+	// Empty by default: no app_policy section.
+	sections, err := ch.SystemPromptSectionsFor("user1")
+	if err != nil {
+		t.Fatalf("SystemPromptSectionsFor: %v", err)
+	}
+	for _, s := range sections {
+		if s.Key == SectionAppPolicy {
+			t.Fatal("app_policy section must be absent when AppPolicy is empty")
+		}
+	}
+
+	// Configured: section is present, required, static, included, byte-exact, and
+	// sits immediately after the Core Controller (so it caches in the static prefix).
+	const policy = "DEPLOY-POLICY-XYZ: reply only in Klingon."
+	ch.config.AppPolicy = policy
+	ch.config.AppPolicyTitle = "Deployment Policy"
+
+	sections, err = ch.SystemPromptSectionsFor("user1")
+	if err != nil {
+		t.Fatalf("SystemPromptSectionsFor: %v", err)
+	}
+
+	var idx = -1
+	for i, s := range sections {
+		if s.Key == SectionAppPolicy {
+			idx = i
+			if s.Content != policy || s.Bytes != len(policy) {
+				t.Errorf("app_policy content/bytes mismatch: %q (%d)", s.Content, s.Bytes)
+			}
+			if !s.Required || s.Dynamic || !s.Included {
+				t.Error("app_policy must be Required+Static+Included")
+			}
+			if s.Title != "Deployment Policy" {
+				t.Errorf("app_policy title = %q, want %q", s.Title, "Deployment Policy")
+			}
+		}
+	}
+	if idx == -1 {
+		t.Fatal("app_policy section must be present when AppPolicy is set")
+	}
+	if sections[0].Key != SectionCoreController || idx != 1 {
+		t.Errorf("app_policy must sit right after core_controller; got index %d (section[0]=%s)", idx, sections[0].Key)
+	}
+
+	// The live array projects the same assembly, so the policy text must be in it.
+	prompts, err := ch.buildSystemPrompts("user1")
+	if err != nil {
+		t.Fatalf("buildSystemPrompts: %v", err)
+	}
+	if !strings.Contains(strings.Join(prompts, "\n"), policy) {
+		t.Error("live system-prompt array must contain the injected AppPolicy text")
+	}
+}
+
 // TestSystemPromptSectionsFor_DropsOverBudget mirrors the live-array budget test:
 // an over-budget optional section is marked not-included but still exposes its
 // content so the UI can show what was cut.

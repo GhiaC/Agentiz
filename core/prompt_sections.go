@@ -15,6 +15,7 @@ import (
 // them in sync with the values passed to metrics.SystemPromptSectionDropped.
 const (
 	SectionCoreController       = "core_controller"
+	SectionAppPolicy            = "app_policy"
 	SectionAgents               = "agents"
 	SectionAgentTools           = "agent_tools"
 	SectionCoreSessionContext   = "core_session_context"
@@ -57,15 +58,26 @@ func (ch *CoreHandler) assembleSections(userID string, coreSession *model.Sessio
 
 	specs := []sectionSpec{
 		{SectionCoreController, "Core Controller", true, false, coreControllerPrompt},
-		{SectionAgents, "Available Agents", true, false, ch.agents.BuildAgentsDescriptionPrompt()},
-		{SectionAgentTools, "Registered Agent Tools", true, false, ch.agents.BuildAgentToolsPrompt()},
-		{SectionCoreSessionContext, "Core Session Context", false, true, coreCtx},
-		{SectionAgentSessionContexts, "Agent Session Contexts", false, true,
-			ch.agents.BuildAllSessionContextsPrompt(ch.getSessionFunc(), ch.getActiveSessionIDFunc(), userID)},
-		{SectionUserFiles, "User Files", false, true, ch.buildUserFilesPrompt(userID)},
-		{SectionActiveSessions, "Active Sessions", false, true,
-			ch.agents.BuildActiveSessionsPrompt(ch.getSessionFunc(), ch.getActiveSessionIDFunc(), userID)},
 	}
+
+	// Deployment Policy: optional app-supplied rules (output language, length
+	// limits, app-owned capabilities to delegate, billing/quota handling). It sits
+	// in the static prefix right after the controller so it caches provider-side
+	// and so its rules refine/override the generic controller for this deployment.
+	if ap := ch.config.AppPolicy; ap != "" {
+		specs = append(specs, sectionSpec{SectionAppPolicy, ch.config.appPolicyTitle(), true, false, ap})
+	}
+
+	specs = append(specs,
+		sectionSpec{SectionAgents, "Available Agents", true, false, ch.agents.BuildAgentsDescriptionPrompt()},
+		sectionSpec{SectionAgentTools, "Registered Agent Tools", true, false, ch.agents.BuildAgentToolsPrompt()},
+		sectionSpec{SectionCoreSessionContext, "Core Session Context", false, true, coreCtx},
+		sectionSpec{SectionAgentSessionContexts, "Agent Session Contexts", false, true,
+			ch.agents.BuildAllSessionContextsPrompt(ch.getSessionFunc(), ch.getActiveSessionIDFunc(), userID)},
+		sectionSpec{SectionUserFiles, "User Files", false, true, ch.buildUserFilesPrompt(userID)},
+		sectionSpec{SectionActiveSessions, "Active Sessions", false, true,
+			ch.agents.BuildActiveSessionsPrompt(ch.getSessionFunc(), ch.getActiveSessionIDFunc(), userID)},
+	)
 
 	// Sessions list (for change_session) can fail when the store is unreachable;
 	// surface that rather than silently shipping a prompt without it.
