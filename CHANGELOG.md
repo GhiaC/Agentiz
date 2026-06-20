@@ -9,6 +9,15 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 API, security & observability hardening (improvement roadmap
 [chapter 04](docs/improvements/04-api-security-observability.md)).
 
+### Fixed
+- **`collect_result` no longer fails with "result not found in session".**
+  Oversized tool results were stored on a freshly-fetched session clone inside
+  `saveToolResult` and then clobbered by `ProcessMessage`'s single
+  `Put(session)` (the store returns a copy on every `Get`), so the stored result
+  vanished before `collect_result` could read it. The result is now written onto
+  the live session the loop persists. Affected every tool whose output exceeded
+  `MaxToolResultLength`.
+
 ### Security
 - **Raw user-file downloads are rate limited** to 10 requests/min per IP
   (burst 10), in addition to the existing admin auth, to blunt bulk exfiltration

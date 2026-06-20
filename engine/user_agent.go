@@ -995,26 +995,6 @@ func truncateForLog(s string, maxLen int) string {
 	return s[:maxLen] + "..."
 }
 
-// saveToolResult stores a tool result and returns the result ID.
-// Returns empty string if the result could not be persisted.
-func (e *Engine) saveToolResult(sessionID string, result string) string {
-	session, err := e.Sessions.Get(sessionID)
-	if err != nil {
-		log.Log.Warnf("[Engine] saveToolResult: failed to get session %s: %v", sessionID, err)
-		return ""
-	}
-	if session.ToolResults == nil {
-		session.ToolResults = make(map[string]string)
-	}
-	resultID := generateResultID(sessionID)
-	session.ToolResults[resultID] = result
-	if err := e.Sessions.Put(session); err != nil {
-		log.Log.Warnf("[Engine] saveToolResult: failed to persist session %s: %v", sessionID, err)
-		return ""
-	}
-	return resultID
-}
-
 // GetToolResult retrieves a stored tool result by ID
 func (e *Engine) GetToolResult(sessionID string, resultID string) (string, bool) {
 	session, err := e.Sessions.Get(sessionID)
@@ -1028,8 +1008,18 @@ func (e *Engine) GetToolResult(sessionID string, resultID string) (string, bool)
 	return result, ok
 }
 
-// processToolResult checks if result exceeds max length and returns truncated message if needed
-func (e *Engine) processToolResult(sessionID string, result string) string {
+// processToolResult checks whether result exceeds the max length and, if so,
+// stores the full result ON THE PASSED SESSION (under a generated result ID) and
+// returns a short message pointing the model at collect_result.
+//
+// It MUST store on the session object the caller already holds — not on a fresh
+// clone fetched from the store — because the store returns a copy on every Get
+// (DBStore.Get → Clone). The surrounding ProcessMessage loop persists the
+// session once, after all tool calls, via a single Sessions.Put(session). A
+// self-contained Get→modify→Put here would write a different clone that the
+// loop's later Put(session) then overwrites, dropping ToolResults — which is
+// exactly why collect_result used to fail with "result not found in session".
+func (e *Engine) processToolResult(session *model.Session, result string) string {
 	maxLen := e.llmConfig.MaxToolResultLength
 	if maxLen <= 0 {
 		maxLen = 250 // Default
@@ -1039,11 +1029,12 @@ func (e *Engine) processToolResult(sessionID string, result string) string {
 		return result
 	}
 
-	// Store full result and return truncated message
-	resultID := e.saveToolResult(sessionID, result)
-	if resultID == "" {
-		return result[:maxLen] + "... [truncated, full result could not be stored]"
+	if session.ToolResults == nil {
+		session.ToolResults = make(map[string]string)
 	}
+	resultID := generateResultID(session.SessionID)
+	session.ToolResults[resultID] = result
+
 	return fmt.Sprintf("Tool result exceeds %d characters (exact: %d characters). To retrieve specific information from this result, use the `collect_result` tool with result_id=\"%s\" and specify what information you need.",
 		maxLen, len(result), resultID)
 }
@@ -1560,12 +1551,14 @@ func (e *Engine) executeTool(
 
 	NotifyStatus(ctx, session.UserID, sessionID, StatusToolDone, toolDetail)
 
-	// Process result (truncate if needed)
+	// Process result (truncate if needed). Pass the live session so an oversized
+	// result is stored on it and persisted by the caller's single Put(session);
+	// see processToolResult for why a clone must not be used here.
 	var processedResult string
 	if toolCall.Function.Name == "collect_result" {
 		processedResult = result
 	} else {
-		processedResult = e.processToolResult(sessionID, result)
+		processedResult = e.processToolResult(session, result)
 	}
 
 	// Update persister with result
