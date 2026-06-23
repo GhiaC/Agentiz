@@ -513,6 +513,21 @@ func (lr *LocalRunner) runLLMStep(ctx context.Context, plan *Plan, step *Step) (
 	if prompt == "" {
 		prompt = plan.Input
 	}
+	// Feed the step the outputs of the steps it depends on, so a dependent
+	// llm_call can actually act on upstream data (e.g. summarize a prior
+	// tool_call's result). Without this an llm_call only ever sees its own
+	// prompt plus the original user input — never its dependencies' outputs —
+	// which silently drops data across the DAG. collect remains the right
+	// choice for a pure fan-in/join; this just makes a dependent llm_call
+	// behave the way a plan author naturally expects.
+	deps, _, _, missing := collectDependencyOutputs(plan, step)
+	if len(missing) > 0 {
+		lr.logger.Warnf("planning: plan %s llm_call step %s: dependencies contributed no output: %v",
+			plan.ID, step.ID, missing)
+	}
+	if deps != "" {
+		prompt += "\n\n" + deps
+	}
 	return lr.runPrompt(ctx, plan, prompt)
 }
 
@@ -583,26 +598,7 @@ func (lr *LocalRunner) runConditionalStep(_ context.Context, plan *Plan, step *S
 // Dependencies that contributed no output (skipped, or nil/empty result) are
 // reported under the "missing_inputs" metadata key and logged.
 func (lr *LocalRunner) runCollectStep(ctx context.Context, plan *Plan, step *Step) (*StepResult, error) {
-	var b strings.Builder
-	var tokens int
-	var from, missing []string
-	for _, d := range dependencyResults(plan, step) {
-		if d.Status == StepSkipped || d.Result == nil || d.Result.Output == "" {
-			missing = append(missing, d.ID)
-			continue
-		}
-		if b.Len() > 0 {
-			b.WriteString("\n\n")
-		}
-		label := d.Name
-		if label == "" {
-			label = d.ID
-		}
-		b.WriteString("## " + label + "\n" + d.Result.Output)
-		tokens += d.Result.TokensUsed
-		from = append(from, d.ID)
-	}
-	collected := b.String()
+	collected, tokens, from, missing := collectDependencyOutputs(plan, step)
 	if len(missing) > 0 {
 		lr.logger.Warnf("planning: plan %s collect step %s: dependencies contributed no output: %v",
 			plan.ID, step.ID, missing)
@@ -694,6 +690,33 @@ func dependencyResults(plan *Plan, step *Step) []*Step {
 		}
 	}
 	return deps
+}
+
+// collectDependencyOutputs concatenates the outputs of step's completed
+// dependencies into one labeled block ("## <name>\n<output>", with a blank line
+// between entries), in DependsOn order. It returns that block, the sum of the
+// dependencies' reported tokens, the IDs that contributed, and the IDs that
+// were skipped or produced no output. Shared by collect and llm_call so a step
+// can actually see the data it depends on.
+func collectDependencyOutputs(plan *Plan, step *Step) (text string, tokens int, from, missing []string) {
+	var b strings.Builder
+	for _, d := range dependencyResults(plan, step) {
+		if d.Status == StepSkipped || d.Result == nil || d.Result.Output == "" {
+			missing = append(missing, d.ID)
+			continue
+		}
+		if b.Len() > 0 {
+			b.WriteString("\n\n")
+		}
+		label := d.Name
+		if label == "" {
+			label = d.ID
+		}
+		b.WriteString("## " + label + "\n" + d.Result.Output)
+		tokens += d.Result.TokensUsed
+		from = append(from, d.ID)
+	}
+	return b.String(), tokens, from, missing
 }
 
 // evalCondition evaluates cond against the plan/step and returns (matched,

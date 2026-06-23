@@ -113,6 +113,37 @@ func TestLocalRunner_Collect_AggregatesDependencies(t *testing.T) {
 	}
 }
 
+func TestLocalRunner_LLMStep_ReceivesDependencyOutputs(t *testing.T) {
+	llm := &mockLLM{out: "summary", tokens: 7}
+	lr := NewLocalRunner(llm, &mockTools{})
+	plan := &Plan{ID: "p1", Input: "original request", Steps: []*Step{
+		{ID: "a", Name: "Namespaces", Status: StepCompleted, Result: &StepResult{Output: "ns-1\nns-2"}},
+		{ID: "b", Type: StepLLMCall, Status: StepPending,
+			Config: StepConfig{Prompt: "Summarize the namespaces"}, DependsOn: []string{"a"}},
+	}}
+
+	res, err := lr.RunStep(context.Background(), plan, findStep(plan, "b"))
+	if err != nil {
+		t.Fatalf("RunStep: %v", err)
+	}
+	if res.Output != "summary" {
+		t.Errorf("unexpected output %q", res.Output)
+	}
+	if len(llm.calls) != 1 {
+		t.Fatalf("expected exactly 1 LLM call, got %d", len(llm.calls))
+	}
+	sent := llm.calls[0]
+	if !strings.Contains(sent, "Summarize the namespaces") {
+		t.Errorf("prompt should retain the step's own prompt, got %q", sent)
+	}
+	if !strings.Contains(sent, "ns-1") || !strings.Contains(sent, "ns-2") {
+		t.Errorf("llm_call should receive its dependency's output, got %q", sent)
+	}
+	if !strings.Contains(sent, "Namespaces") {
+		t.Errorf("dependency output should be labeled by step name, got %q", sent)
+	}
+}
+
 func TestLocalRunner_HumanReview_AutoApproveByDefault(t *testing.T) {
 	lr := NewLocalRunner(&mockLLM{}, &mockTools{}) // no reviewer wired
 	plan := &Plan{ID: "p1", Input: "review me", Steps: []*Step{
