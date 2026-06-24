@@ -98,6 +98,24 @@ func (ch *CoreHandler) ProcessMessageWithImage(
 	traceStart := time.Now()
 	defer func() { ch.persistRouteTrace(rec, time.Since(traceStart)) }()
 
+	ctx = model.WithUserID(ctx, userID)
+
+	// Early quota check: fail before recording the image and building the
+	// (potentially large) system prompt so an over-quota user costs nothing.
+	// The per-call vision check below (with vision metadata) stays authoritative.
+	if ch.Callback != nil {
+		if cbErr := ch.Callback.BeforeAction(ctx, &engine.UsageEvent{
+			UserID:    userID,
+			SessionID: coreSession.SessionID,
+			EventType: engine.EventLLMCall,
+			Name:      engine.EventNameLLMCall,
+			Model:     llmModel,
+		}); cbErr != nil {
+			rec.Fail(cbErr.Error())
+			return cbErr.Error(), nil
+		}
+	}
+
 	// Record the inbound image as a user file (best-effort) when a recorder is wired.
 	if ch.fileRecorder != nil {
 		imageName := "image" + imageExtension(imageMimeType)
@@ -172,8 +190,6 @@ func (ch *CoreHandler) ProcessMessageWithImage(
 	}
 
 	messages = append(messages, userMsg)
-
-	ctx = model.WithUserID(ctx, userID)
 
 	log.Log.Infof("[CoreHandler] 🔵 VISION LLM >> Model: %s | Messages: %d | Image included", llmModel, len(messages))
 

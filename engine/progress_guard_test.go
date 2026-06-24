@@ -1,6 +1,9 @@
 package engine
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
 
 func TestProgressGuard_FirstMessage(t *testing.T) {
 	pg := NewProgressGuard()
@@ -36,6 +39,33 @@ func TestProgressGuard_QueueWhileInProgress(t *testing.T) {
 	drained2 := pg.DrainQueue("u1")
 	if len(drained2) != 0 {
 		t.Errorf("expected empty queue after drain, got %d", len(drained2))
+	}
+}
+
+// TestProgressGuard_QueueCapEnforced verifies the per-key queue is bounded at
+// maxQueuedPerKey: a client hammering the endpoint while a request is in flight
+// still gets the "in progress" response (TryQueue stays true), but messages past
+// the cap are dropped and the oldest ones are preserved — so memory cannot grow
+// without limit.
+func TestProgressGuard_QueueCapEnforced(t *testing.T) {
+	pg := NewProgressGuard()
+	pg.SetInProgress("u1", true)
+
+	over := maxQueuedPerKey + 5
+	for i := 0; i < over; i++ {
+		if !pg.TryQueue("u1", fmt.Sprintf("msg%d", i)) {
+			t.Fatalf("TryQueue should stay true while in-progress (msg %d)", i)
+		}
+	}
+
+	drained := pg.DrainQueue("u1")
+	if len(drained) != maxQueuedPerKey {
+		t.Fatalf("queue should be capped at %d, got %d", maxQueuedPerKey, len(drained))
+	}
+	// The oldest messages are the ones kept; the overflow is dropped.
+	if drained[0] != "msg0" || drained[maxQueuedPerKey-1] != fmt.Sprintf("msg%d", maxQueuedPerKey-1) {
+		t.Errorf("cap should keep the oldest %d messages, got first=%q last=%q",
+			maxQueuedPerKey, drained[0], drained[len(drained)-1])
 	}
 }
 

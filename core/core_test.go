@@ -332,6 +332,29 @@ func TestProcessMessage_RecordsRouteTrace(t *testing.T) {
 	}
 }
 
+// TestRunCoreTool_RequiredArgsValidated locks in C7: tool sites whose schema
+// marks an argument required must reject a missing/empty value instead of
+// silently treating it as a no-op (update_status) or a zero default (sleep).
+func TestRunCoreTool_RequiredArgsValidated(t *testing.T) {
+	ch, _ := newTestCoreHandler(t, nil)
+	ctx := context.Background()
+	cases := []struct {
+		name, tool, args, substr string
+	}{
+		{"update_status missing message", "update_status", `{}`, "message is required"},
+		{"sleep missing seconds", "sleep", `{}`, "seconds is required"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			call := openai.ToolCall{Function: openai.FunctionCall{Name: tc.tool, Arguments: tc.args}}
+			_, err := ch.runCoreToolImpl(ctx, "user1", "sess1", "msg1", call)
+			if err == nil || !strings.Contains(err.Error(), tc.substr) {
+				t.Errorf("expected error containing %q, got %v", tc.substr, err)
+			}
+		})
+	}
+}
+
 // newReadyAgentEngine builds a fully DB-ready worker Engine that shares the given
 // Sessions store (so the Core can dispatch into it) and is backed by its own
 // MockLLMTransport — letting a test detect whether the agent actually ran by

@@ -375,10 +375,11 @@ func (ch *CoreHandler) runCoreToolImpl(
 
 	switch toolName {
 	case "update_status":
-		message, _ := args["message"].(string)
-		if message != "" {
-			engine.NotifyStatus(ctx, userID, "", engine.StatusCustom, message)
+		message, err := requireStringArg(args, "message")
+		if err != nil {
+			return "", err
 		}
+		engine.NotifyStatus(ctx, userID, "", engine.StatusCustom, message)
 		return "status updated", nil
 
 	case "create_session":
@@ -597,9 +598,9 @@ func (ch *CoreHandler) banUserTool(_ context.Context, userID string, args map[st
 }
 
 func (ch *CoreHandler) sleepTool(ctx context.Context, args map[string]interface{}) (string, error) {
-	seconds, _ := args["seconds"].(float64)
-	if seconds <= 0 {
-		return "", fmt.Errorf("seconds must be a positive number")
+	seconds, ok := args["seconds"].(float64)
+	if !ok || seconds <= 0 {
+		return "", fmt.Errorf("seconds is required and must be a positive number")
 	}
 	const maxSleep = 300
 	if seconds > maxSleep {
