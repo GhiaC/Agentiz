@@ -802,67 +802,99 @@ func numericCompare(a, b string) int {
 	}
 }
 
-// runParallelStep runs the sub-steps concurrently and waits for ALL of them to
-// finish (no early return — no goroutine is left writing into shared state
-// after this function returns). Conditional sub-steps are rejected because they
-// mutate sibling step statuses concurrently. On failure every failed sub-step
-// is marked failed and reported to the observer individually, and the returned
-// error names each failed sub-step.
+// runParallelStep runs a block's sub-steps as an ISOLATED mini-plan over their
+// own slice. Independent sub-steps with no dependencies are all ready at once and
+// run concurrently — the common fan-out, behaviourally identical to before. A
+// conditional sub-step's skip-propagation (runConditionalStep + PropagateSkips)
+// operates only on these sub-steps via the branch-scoped plan, so it can never
+// race a sibling block or the parent plan.Steps; validateParallelBranches (dag.go)
+// guarantees a gated sub-step never runs concurrently with the conditional that
+// gates it. Every batch is awaited before the next begins (no goroutine is left
+// writing shared state). On failure each failed sub-step is marked failed and
+// reported to the observer individually, and the returned error names each one.
 func (lr *LocalRunner) runParallelStep(ctx context.Context, plan *Plan, step *Step) (*StepResult, error) {
 	subs := step.Config.SubSteps
 	if len(subs) == 0 {
 		return &StepResult{}, nil
 	}
-	for _, s := range subs {
-		if s != nil && s.Type == StepConditional {
-			return nil, fmt.Errorf("%w: step %q: conditional inside parallel is not supported", ErrInvalidStep, s.ID)
-		}
-	}
-	var wg sync.WaitGroup
-	results := make([]*StepResult, len(subs))
-	errs := make([]error, len(subs))
-	for i, sub := range subs {
-		wg.Add(1)
-		go func(idx int, s *Step) {
-			defer wg.Done()
-			res, err := lr.RunStep(ctx, plan, s)
-			results[idx] = res
-			errs[idx] = err
-		}(i, sub)
-	}
-	wg.Wait()
+	// A branch-scoped plan sharing the parent's immutable identity but owning the
+	// sub-step slice, so findStep/PropagateSkips/runConditionalStep confine every
+	// mutation to this block.
+	branch := &Plan{ID: plan.ID, UserID: plan.UserID, SessionID: plan.SessionID, Input: plan.Input, Steps: subs}
 
-	var combined string
-	var totalTokens int
 	var failures []error
-	now := time.Now()
-	for i, e := range errs {
-		sub := subs[i]
-		if e != nil {
-			sub.Status = StepFailed
-			sub.Error = e.Error()
-			sub.CompletedAt = &now
-			lr.logger.Errorf("planning: plan %s parallel step %s sub-step %s failed: %v",
-				plan.ID, step.ID, sub.ID, e)
-			if lr.observer != nil {
-				lr.observer.OnStepFailed(plan, sub, e)
+	for {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		// Cascade skips from any conditional that ran in the previous batch so a
+		// non-selected branch's descendants don't stall the block.
+		PropagateSkips(subs)
+		ready := ReadySteps(subs)
+		if len(ready) == 0 {
+			break
+		}
+		results := make([]*StepResult, len(ready))
+		errs := make([]error, len(ready))
+		var wg sync.WaitGroup
+		for i, sub := range ready {
+			wg.Add(1)
+			go func(idx int, s *Step) {
+				defer wg.Done()
+				results[idx], errs[idx] = lr.RunStep(ctx, branch, s)
+			}(i, sub)
+		}
+		wg.Wait()
+
+		now := time.Now()
+		for i, sub := range ready {
+			if errs[i] != nil {
+				sub.Status = StepFailed
+				sub.Error = errs[i].Error()
+				sub.CompletedAt = &now
+				lr.logger.Errorf("planning: plan %s parallel step %s sub-step %s failed: %v",
+					plan.ID, step.ID, sub.ID, errs[i])
+				if lr.observer != nil {
+					lr.observer.OnStepFailed(plan, sub, errs[i])
+				}
+				failures = append(failures, fmt.Errorf("sub-step %q: %w", sub.ID, errs[i]))
+				continue
 			}
-			failures = append(failures, fmt.Errorf("sub-step %q: %w", sub.ID, e))
-			continue
-		}
-		sub.Status = StepCompleted
-		sub.Result = results[i]
-		sub.CompletedAt = &now
-		if lr.observer != nil {
-			lr.observer.OnStepCompleted(plan, sub, results[i])
-		}
-		if results[i] != nil {
-			combined += results[i].Output
-			totalTokens += results[i].TokensUsed
+			sub.Status = StepCompleted
+			sub.Result = results[i]
+			sub.CompletedAt = &now
+			if lr.observer != nil {
+				lr.observer.OnStepCompleted(plan, sub, results[i])
+			}
 		}
 	}
 	if len(failures) > 0 {
 		return nil, fmt.Errorf("parallel step %q: %w", step.ID, errors.Join(failures...))
+	}
+
+	// Defensive: every sub-step must have reached a terminal state. A leftover
+	// pending/running step means an in-block dependency never resolved (an
+	// out-of-block DependsOn that slipped past validateParallelBranches, or a
+	// step run directly via RunStep without ValidatePlan). Surface it instead of
+	// reporting success while silently dropping the step's output.
+	for _, sub := range subs {
+		if sub != nil && sub.Status != StepCompleted && sub.Status != StepFailed && sub.Status != StepSkipped {
+			return nil, fmt.Errorf("%w: parallel step %q: sub-step %q did not run (unresolved dependency?)",
+				ErrStepFailed, step.ID, sub.ID)
+		}
+	}
+
+	// Combine the data outputs in declaration order for determinism. A
+	// conditional sub-step contributes control flow, not data, and a skipped
+	// sub-step contributes nothing.
+	var combined string
+	var totalTokens int
+	for _, sub := range subs {
+		if sub == nil || sub.Type == StepConditional || sub.Status != StepCompleted || sub.Result == nil {
+			continue
+		}
+		combined += sub.Result.Output
+		totalTokens += sub.Result.TokensUsed
 	}
 	return &StepResult{Output: combined, TokensUsed: totalTokens}, nil
 }

@@ -824,3 +824,49 @@ func (m *mockCallback) BeforeAction(ctx context.Context, ev *engine.UsageEvent) 
 func (m *mockCallback) AfterAction(ctx context.Context, ev *engine.UsageEvent) {
 	m.afterCalled = true
 }
+
+// Test the bug: a sub-step with out-of-block dependency silently stays Pending
+func TestRunParallelStep_PendingSubStepNotTerminal(t *testing.T) {
+	// A sub-step depending on a step OUTSIDE its parallel block can never resolve
+	// inside the isolated mini-plan the runner uses, so it would silently stay
+	// Pending while the block reports success — the original "silent data loss"
+	// bug. It is now rejected up front by validateParallelBranches.
+	tools := &perToolExecutor{errBy: map[string]error{}}
+	lr := NewLocalRunner(&mockLLM{out: "ok"}, tools)
+
+	sub1 := &Step{
+		ID:        "sub1",
+		Type:      StepToolCall,
+		Status:    StepPending,
+		DependsOn: []string{"external"}, // NOT a sub-step of the parallel block
+		Config:    StepConfig{ToolName: "tool1"},
+	}
+	sub2 := &Step{
+		ID:     "sub2",
+		Type:   StepToolCall,
+		Status: StepPending,
+		Config: StepConfig{ToolName: "tool2"},
+	}
+	par := &Step{
+		ID:     "par",
+		Type:   StepParallel,
+		Status: StepPending,
+		Config: StepConfig{SubSteps: []*Step{sub1, sub2}},
+	}
+	plan := pendingPlan("p1", par)
+
+	_, err := lr.Run(context.Background(), plan)
+	if !errors.Is(err, ErrInvalidStep) {
+		t.Fatalf("expected the out-of-block dependency to be rejected, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "not a sub-step of the same parallel block") {
+		t.Errorf("error should name the out-of-block dependency: %v", err)
+	}
+	// Validation fails before any sub-step executes — no silent partial run.
+	if len(tools.calls) != 0 {
+		t.Errorf("no sub-step should have run, got calls %v", tools.calls)
+	}
+	if plan.Status != PlanFailed {
+		t.Errorf("plan status: got %s, want failed", plan.Status)
+	}
+}

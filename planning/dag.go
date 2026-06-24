@@ -27,10 +27,13 @@ var knownConditionOperators = map[string]bool{
 }
 
 // ValidatePlan validates a plan before execution: DAG shape (via ValidateDAG)
-// plus per-step-type required fields — tool_call needs a tool_name, conditional
-// steps must use a known operator, and conditional steps are not allowed inside
-// parallel sub-steps (they mutate shared plan state). Both planners and
-// LocalRunner.Run call this so invalid plans fail before any step executes.
+// plus per-step-type required fields — tool_call needs a tool_name and
+// conditional steps must use a known operator. A conditional MAY run inside a
+// parallel block (the runner gives each branch an isolated plan-slice view, see
+// runParallelStep), but only when its branch targets stay inside that block,
+// depend on it, and are gated by a single conditional — validateParallelBranches
+// enforces those invariants. Both planners and LocalRunner.Run call this so
+// invalid plans fail before any step executes.
 func ValidatePlan(plan *Plan) error {
 	if plan == nil {
 		return fmt.Errorf("%w: nil plan", ErrInvalidStep)
@@ -38,10 +41,10 @@ func ValidatePlan(plan *Plan) error {
 	if err := ValidateDAG(plan.Steps); err != nil {
 		return err
 	}
-	return validateStepConfigs(plan.Steps, false)
+	return validateStepConfigs(plan.Steps)
 }
 
-func validateStepConfigs(steps []*Step, inParallel bool) error {
+func validateStepConfigs(steps []*Step) error {
 	for _, s := range steps {
 		if s == nil {
 			continue
@@ -52,19 +55,96 @@ func validateStepConfigs(steps []*Step, inParallel bool) error {
 				return fmt.Errorf("%w: tool_call step %q has empty tool_name", ErrInvalidStep, s.ID)
 			}
 		case StepConditional:
-			if inParallel {
-				return fmt.Errorf("%w: step %q: conditional inside parallel is not supported", ErrInvalidStep, s.ID)
-			}
 			if s.Condition != nil && !knownConditionOperators[normalizeOperator(s.Condition.Operator)] {
 				return fmt.Errorf("%w: conditional step %q has unknown operator %q", ErrInvalidStep, s.ID, s.Condition.Operator)
 			}
 		case StepParallel:
-			if err := validateStepConfigs(s.Config.SubSteps, true); err != nil {
+			if err := validateParallelBranches(s.ID, s.Config.SubSteps); err != nil {
+				return err
+			}
+			if err := validateStepConfigs(s.Config.SubSteps); err != nil {
 				return err
 			}
 		}
 	}
 	return nil
+}
+
+// validateParallelBranches enforces the invariants that let a parallel block run
+// as an isolated mini-plan over its own sub-step slice (runParallelStep). Because
+// each block resolves dependencies and propagates skips only within that slice:
+//
+//   - every sub-step's DependsOn must reference another sub-step of the SAME
+//     block — a dependency outside the block could never resolve, so the
+//     sub-step would silently never run (and the block would report success
+//     while dropping its output);
+//
+// and additionally, for every step a conditional sub-step branches to:
+//
+//  1. in-block: the target is one of the block's own sub-steps, so the
+//     conditional can never reach across to a sibling branch or the parent plan;
+//  2. gated by a dependency: the target depends on the conditional, so it is
+//     never ready — and thus never running in another goroutine — at the same
+//     time the conditional flips its status to skipped;
+//  3. single owner: no target is gated by two different conditionals, so no two
+//     goroutines ever write the same step's status.
+//
+// Together these make conditional-in-parallel race-free by construction rather
+// than by locking.
+func validateParallelBranches(parallelID string, subs []*Step) error {
+	inBlock := make(map[string]*Step, len(subs))
+	for _, s := range subs {
+		if s != nil && s.ID != "" {
+			inBlock[s.ID] = s
+		}
+	}
+	// Every sub-step's dependencies must stay inside the block (see above).
+	for _, s := range subs {
+		if s == nil {
+			continue
+		}
+		for _, depID := range s.DependsOn {
+			if _, ok := inBlock[depID]; !ok {
+				return fmt.Errorf("%w: sub-step %q in parallel %q depends on %q, which is not a sub-step of the same parallel block",
+					ErrInvalidStep, s.ID, parallelID, depID)
+			}
+		}
+	}
+	gatedBy := make(map[string]string) // target ID -> conditional ID that gates it
+	for _, s := range subs {
+		if s == nil || s.Type != StepConditional {
+			continue
+		}
+		for _, ids := range s.Branches {
+			for _, id := range ids {
+				target, ok := inBlock[id]
+				if !ok {
+					return fmt.Errorf("%w: conditional sub-step %q in parallel %q branches to %q, which is not a sub-step of the same parallel block",
+						ErrInvalidStep, s.ID, parallelID, id)
+				}
+				if owner, dup := gatedBy[id]; dup && owner != s.ID {
+					return fmt.Errorf("%w: sub-step %q in parallel %q is gated by two conditionals (%q and %q)",
+						ErrInvalidStep, id, parallelID, owner, s.ID)
+				}
+				gatedBy[id] = s.ID
+				if !stepDependsOn(target, s.ID) {
+					return fmt.Errorf("%w: sub-step %q in parallel %q is a branch of conditional %q but does not depend on it",
+						ErrInvalidStep, id, parallelID, s.ID)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// stepDependsOn reports whether s lists id in its DependsOn.
+func stepDependsOn(s *Step, id string) bool {
+	for _, d := range s.DependsOn {
+		if d == id {
+			return true
+		}
+	}
+	return false
 }
 
 // ValidateDAG checks that all step dependencies exist and that the graph has no cycles.

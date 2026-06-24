@@ -116,12 +116,63 @@ func TestValidatePlan(t *testing.T) {
 			wantOK: true,
 		},
 		{
-			name: "conditional inside parallel",
+			name: "valid conditional inside parallel",
 			plan: &Plan{Steps: []*Step{{
 				ID: "par", Type: StepParallel,
-				Config: StepConfig{SubSteps: []*Step{{ID: "c1", Type: StepConditional}}},
+				Config: StepConfig{SubSteps: []*Step{
+					{ID: "c1", Type: StepConditional, Condition: &Condition{Field: "input", Operator: "contains", Value: "x"}, Branches: map[string][]string{"true": {"t"}, "false": {"f"}}},
+					{ID: "t", Type: StepLLMCall, DependsOn: []string{"c1"}, Config: StepConfig{Prompt: "t"}},
+					{ID: "f", Type: StepLLMCall, DependsOn: []string{"c1"}, Config: StepConfig{Prompt: "f"}},
+				}},
 			}}},
-			substr: "conditional inside parallel",
+			wantOK: true,
+		},
+		{
+			name: "conditional in parallel branches outside block",
+			plan: &Plan{Steps: []*Step{{
+				ID: "par", Type: StepParallel,
+				Config: StepConfig{SubSteps: []*Step{
+					{ID: "c1", Type: StepConditional, Branches: map[string][]string{"true": {"external"}}},
+				}},
+			}}},
+			substr: "not a sub-step",
+		},
+		{
+			name: "conditional in parallel branch missing dependency",
+			plan: &Plan{Steps: []*Step{{
+				ID: "par", Type: StepParallel,
+				Config: StepConfig{SubSteps: []*Step{
+					{ID: "c1", Type: StepConditional, Branches: map[string][]string{"true": {"t"}}},
+					{ID: "t", Type: StepLLMCall, Config: StepConfig{Prompt: "t"}}, // missing DependsOn c1
+				}},
+			}}},
+			substr: "does not depend on it",
+		},
+		{
+			name: "conditional in parallel target gated twice",
+			plan: &Plan{Steps: []*Step{{
+				ID: "par", Type: StepParallel,
+				Config: StepConfig{SubSteps: []*Step{
+					{ID: "c1", Type: StepConditional, Branches: map[string][]string{"true": {"t"}}},
+					{ID: "c2", Type: StepConditional, Branches: map[string][]string{"true": {"t"}}},
+					{ID: "t", Type: StepLLMCall, DependsOn: []string{"c1", "c2"}, Config: StepConfig{Prompt: "t"}},
+				}},
+			}}},
+			substr: "gated by two conditionals",
+		},
+		{
+			// A parallel block runs as an isolated mini-plan, so a sub-step
+			// depending on a step OUTSIDE the block could never resolve — reject
+			// it up front instead of silently never running it.
+			name: "parallel sub-step depends outside the block",
+			plan: &Plan{Steps: []*Step{
+				{ID: "ext", Type: StepLLMCall, Config: StepConfig{Prompt: "x"}},
+				{ID: "par", Type: StepParallel, DependsOn: []string{"ext"},
+					Config: StepConfig{SubSteps: []*Step{
+						{ID: "t", Type: StepToolCall, DependsOn: []string{"ext"}, Config: StepConfig{ToolName: "tp"}},
+					}}},
+			}},
+			substr: "not a sub-step of the same parallel block",
 		},
 		{
 			name: "tool sub-step without tool_name inside parallel",
@@ -180,8 +231,30 @@ func TestLocalRunner_Run_RejectsInvalidPlanUpfront(t *testing.T) {
 	}
 }
 
-func TestLLMPlanner_ParsePlan_RejectsConditionalInsideParallel(t *testing.T) {
-	content := `{"steps":[{"id":"par","type":"parallel","sub_steps":[{"id":"c1","type":"conditional"}]}]}`
+func TestLLMPlanner_ParsePlan_AcceptsValidConditionalInsideParallel(t *testing.T) {
+	// A conditional sub-step whose branch targets are in-block and depend on it
+	// is now valid (the runner isolates each branch — see runParallelStep).
+	content := `{"steps":[{"id":"par","type":"parallel","sub_steps":[
+		{"id":"c1","type":"conditional","condition":{"field":"input","operator":"contains","value":"x"},"branches":{"true":["t"],"false":["f"]}},
+		{"id":"t","type":"llm_call","depends_on":["c1"],"config":{"prompt":"t"}},
+		{"id":"f","type":"llm_call","depends_on":["c1"],"config":{"prompt":"f"}}
+	]}]}`
+	p := NewLLMPlanner(&mockChatClient{response: content}, "m")
+	plan, err := p.CreatePlan(context.Background(), PlanInput{UserID: "u1", Message: "go"})
+	if err != nil {
+		t.Fatalf("expected valid conditional-in-parallel plan, got %v", err)
+	}
+	if len(plan.Steps) != 1 || len(plan.Steps[0].Config.SubSteps) != 3 {
+		t.Fatalf("unexpected parsed shape: %+v", plan.Steps)
+	}
+}
+
+func TestLLMPlanner_ParsePlan_RejectsConditionalBranchEscapingParallel(t *testing.T) {
+	// A conditional sub-step branching to a step outside its parallel block is
+	// still rejected at parse time (it could not be isolated safely).
+	content := `{"steps":[{"id":"par","type":"parallel","sub_steps":[
+		{"id":"c1","type":"conditional","branches":{"true":["outside"]}}
+	]}]}`
 	p := NewLLMPlanner(&mockChatClient{response: content}, "m")
 	_, err := p.CreatePlan(context.Background(), PlanInput{UserID: "u1", Message: "go"})
 	if !errors.Is(err, ErrInvalidStep) {
@@ -198,17 +271,160 @@ func TestLLMPlanner_ParsePlan_RejectsUnknownOperator(t *testing.T) {
 	}
 }
 
-// --- P1: conditional inside parallel rejected at run time too ---
+// --- P1 (long-term): a conditional may now run INSIDE a parallel block; the
+// runner executes each block as an isolated mini-plan so a conditional's
+// skip-propagation stays within the block and never races siblings. ---
 
-func TestLocalRunner_ParallelStep_RejectsConditionalSubStep(t *testing.T) {
-	lr := NewLocalRunner(&mockLLM{out: "ok"}, &mockTools{})
-	step := &Step{
-		ID: "par", Type: StepParallel,
-		Config: StepConfig{SubSteps: []*Step{{ID: "c1", Type: StepConditional, Status: StepPending}}},
+func hasCall(calls []string, name string) bool {
+	for _, c := range calls {
+		if c == name {
+			return true
+		}
 	}
-	_, err := lr.RunStep(context.Background(), pendingPlan("p1", step), step)
-	if !errors.Is(err, ErrInvalidStep) || !strings.Contains(err.Error(), "conditional inside parallel") {
-		t.Fatalf("expected conditional-inside-parallel rejection, got %v", err)
+	return false
+}
+
+func TestLocalRunner_ConditionalInParallel_Runs(t *testing.T) {
+	tools := &perToolExecutor{errBy: map[string]error{}}
+	obs := &countingObserver{}
+	lr := NewLocalRunner(&mockLLM{out: "ok"}, tools, WithLocalObserver(obs))
+
+	cond := &Step{
+		ID: "cond", Type: StepConditional, Status: StepPending,
+		Condition: &Condition{Field: "input", Operator: "contains", Value: "yes"},
+		Branches:  map[string][]string{"true": {"t"}, "false": {"f"}},
+	}
+	tStep := &Step{ID: "t", Type: StepToolCall, Status: StepPending, DependsOn: []string{"cond"}, Config: StepConfig{ToolName: "tpath"}}
+	fStep := &Step{ID: "f", Type: StepToolCall, Status: StepPending, DependsOn: []string{"cond"}, Config: StepConfig{ToolName: "fpath"}}
+	indep := &Step{ID: "indep", Type: StepToolCall, Status: StepPending, Config: StepConfig{ToolName: "ipath"}}
+	par := &Step{ID: "par", Type: StepParallel, Status: StepPending, Config: StepConfig{SubSteps: []*Step{cond, tStep, fStep, indep}}}
+
+	plan := pendingPlan("p1", par)
+	plan.Input = "yes please"
+
+	if _, err := lr.Run(context.Background(), plan); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if plan.Status != PlanCompleted {
+		t.Fatalf("plan status: got %s", plan.Status)
+	}
+	if cond.Status != StepCompleted || tStep.Status != StepCompleted || indep.Status != StepCompleted {
+		t.Errorf("statuses: cond=%s t=%s indep=%s", cond.Status, tStep.Status, indep.Status)
+	}
+	if fStep.Status != StepSkipped {
+		t.Errorf("non-selected branch should be skipped, got %s", fStep.Status)
+	}
+	tools.mu.Lock()
+	calls := append([]string(nil), tools.calls...)
+	tools.mu.Unlock()
+	if hasCall(calls, "fpath") {
+		t.Errorf("skipped branch tool must not execute, calls=%v", calls)
+	}
+	if !hasCall(calls, "tpath") || !hasCall(calls, "ipath") {
+		t.Errorf("selected + independent tools should run, calls=%v", calls)
+	}
+}
+
+func TestLocalRunner_ConditionalInParallel_NoDataRace(t *testing.T) {
+	tools := &perToolExecutor{errBy: map[string]error{}}
+	store := NewMemoryStore()
+	lr := NewLocalRunner(&mockLLM{out: "ok"}, tools, WithLocalStore(store))
+
+	// Many independent conditional groups in ONE parallel block: every
+	// conditional runs concurrently in the first batch and skips ONLY its own
+	// false-branch sub-step; the selected sub-steps then run concurrently in the
+	// next batch. Run with -race: a skip that escaped its branch — or any shared
+	// plan.Steps mutation — would trip the detector.
+	var subs []*Step
+	for i := 0; i < 12; i++ {
+		c := fmt.Sprintf("c%d", i)
+		tt := fmt.Sprintf("t%d", i)
+		ff := fmt.Sprintf("f%d", i)
+		subs = append(subs,
+			&Step{ID: c, Type: StepConditional, Status: StepPending,
+				Condition: &Condition{Field: "input", Operator: "contains", Value: "yes"},
+				Branches:  map[string][]string{"true": {tt}, "false": {ff}}},
+			&Step{ID: tt, Type: StepToolCall, Status: StepPending, DependsOn: []string{c}, Config: StepConfig{ToolName: tt}},
+			&Step{ID: ff, Type: StepToolCall, Status: StepPending, DependsOn: []string{c}, Config: StepConfig{ToolName: ff}},
+		)
+	}
+	par := &Step{ID: "par", Type: StepParallel, Status: StepPending, Config: StepConfig{SubSteps: subs}}
+	plan := pendingPlan("p1", par)
+	plan.Input = "yes"
+	_ = store.Save(context.Background(), plan)
+
+	if _, err := lr.Run(context.Background(), plan); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if plan.Status != PlanCompleted {
+		t.Errorf("plan status: got %s", plan.Status)
+	}
+	for _, s := range subs {
+		switch {
+		case strings.HasPrefix(s.ID, "t"):
+			if s.Status != StepCompleted {
+				t.Errorf("selected %s: got %s", s.ID, s.Status)
+			}
+		case strings.HasPrefix(s.ID, "f"):
+			if s.Status != StepSkipped {
+				t.Errorf("non-selected %s: got %s", s.ID, s.Status)
+			}
+		}
+	}
+}
+
+func TestLocalRunner_ConditionalInParallel_SkipStaysInBranch(t *testing.T) {
+	tools := &perToolExecutor{errBy: map[string]error{}}
+	lr := NewLocalRunner(&mockLLM{out: "ok"}, tools)
+
+	// Group A picks the true branch, group B picks the false branch — in the same
+	// parallel block. Each conditional must affect only its own targets.
+	condA := &Step{ID: "condA", Type: StepConditional, Status: StepPending,
+		Condition: &Condition{Field: "input", Operator: "contains", Value: "A"},
+		Branches:  map[string][]string{"true": {"tA"}, "false": {"fA"}}}
+	tA := &Step{ID: "tA", Type: StepToolCall, Status: StepPending, DependsOn: []string{"condA"}, Config: StepConfig{ToolName: "tA"}}
+	fA := &Step{ID: "fA", Type: StepToolCall, Status: StepPending, DependsOn: []string{"condA"}, Config: StepConfig{ToolName: "fA"}}
+	condB := &Step{ID: "condB", Type: StepConditional, Status: StepPending,
+		Condition: &Condition{Field: "input", Operator: "contains", Value: "ZZZ"},
+		Branches:  map[string][]string{"true": {"tB"}, "false": {"fB"}}}
+	tB := &Step{ID: "tB", Type: StepToolCall, Status: StepPending, DependsOn: []string{"condB"}, Config: StepConfig{ToolName: "tB"}}
+	fB := &Step{ID: "fB", Type: StepToolCall, Status: StepPending, DependsOn: []string{"condB"}, Config: StepConfig{ToolName: "fB"}}
+
+	par := &Step{ID: "par", Type: StepParallel, Status: StepPending,
+		Config: StepConfig{SubSteps: []*Step{condA, tA, fA, condB, tB, fB}}}
+	plan := pendingPlan("p1", par)
+	plan.Input = "A only" // contains "A", not "ZZZ"
+
+	if _, err := lr.Run(context.Background(), plan); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if tA.Status != StepCompleted || fA.Status != StepSkipped {
+		t.Errorf("group A: tA=%s fA=%s", tA.Status, fA.Status)
+	}
+	if fB.Status != StepCompleted || tB.Status != StepSkipped {
+		t.Errorf("group B: tB=%s fB=%s", tB.Status, fB.Status)
+	}
+}
+
+// Defense in depth: even when a parallel block is run directly via RunStep
+// (bypassing ValidatePlan), a sub-step whose dependency cannot resolve inside
+// the isolated block must surface as an error, never be silently dropped while
+// the block reports success.
+func TestLocalRunner_ParallelStep_StalledSubStepErrors(t *testing.T) {
+	lr := NewLocalRunner(&mockLLM{out: "ok"}, &perToolExecutor{errBy: map[string]error{}})
+	// "t" depends on "ghost", which is not a sub-step of the block.
+	par := &Step{ID: "par", Type: StepParallel, Status: StepPending,
+		Config: StepConfig{SubSteps: []*Step{
+			{ID: "t", Type: StepToolCall, Status: StepPending, DependsOn: []string{"ghost"}, Config: StepConfig{ToolName: "tp"}},
+		}}}
+	plan := pendingPlan("p1", par)
+
+	_, err := lr.RunStep(context.Background(), plan, par)
+	if !errors.Is(err, ErrStepFailed) {
+		t.Fatalf("expected ErrStepFailed for a stalled sub-step, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "did not run") {
+		t.Errorf("error should explain the stall: %v", err)
 	}
 }
 
@@ -353,6 +569,35 @@ func TestLocalRunner_RunStep_HardTimeout_EngineIgnoresContext(t *testing.T) {
 	}
 	if elapsed >= time.Second {
 		t.Errorf("runner did not move on at the deadline: took %s", elapsed)
+	}
+}
+
+// A hard step Timeout bounds the TOTAL time across retries, not each attempt —
+// otherwise MaxRetries would multiply the configured timeout (the "3×" footgun).
+func TestLocalRunner_RunStep_HardTimeout_BoundedAcrossRetries(t *testing.T) {
+	llm := &mockLLM{out: "late", delay: 2 * time.Second} // ignores ctx
+	lr := NewLocalRunner(llm, &mockTools{})
+	step := &Step{
+		ID: "s1", Type: StepLLMCall, Status: StepPending,
+		Config: StepConfig{Prompt: "x", Timeout: 50 * time.Millisecond, MaxRetries: 2},
+	}
+	plan := pendingPlan("p1", step)
+
+	start := time.Now()
+	_, err := lr.RunStep(context.Background(), plan, step)
+	elapsed := time.Since(start)
+
+	if !errors.Is(err, ErrStepTimeout) {
+		t.Fatalf("expected ErrStepTimeout, got %v", err)
+	}
+	if elapsed >= time.Second {
+		t.Errorf("timeout was not bounded across retries: took %s", elapsed)
+	}
+	llm.mu.Lock()
+	calls := len(llm.calls)
+	llm.mu.Unlock()
+	if calls != 1 {
+		t.Errorf("expected a single attempt once the shared deadline fired, got %d", calls)
 	}
 }
 
@@ -591,6 +836,45 @@ func TestTemporalRunner_RunStep_DescriptiveError(t *testing.T) {
 	}
 }
 
+// P6/P10: the TemporalRunner reports store-sync failures via the persist-error
+// handler instead of swallowing them, mirroring the LocalRunner contract.
+func TestTemporalRunner_PersistErrorHandlerCalled(t *testing.T) {
+	storeErr := errors.New("disk full")
+	var mu sync.Mutex
+	var reported []error
+	adapter := &mockTemporalAdapter{
+		workflowID: "wf-1",
+		queries: []*Plan{
+			{ID: "p1", Status: PlanCompleted, Steps: []*Step{{ID: "s1", Status: StepCompleted, Result: &StepResult{Output: "done"}}}},
+		},
+	}
+	runner := NewTemporalRunner(adapter,
+		WithTemporalStore(&failingStore{PlanStore: NewMemoryStore(), updateErr: storeErr}),
+		WithTemporalPersistErrorHandler(func(_ *Plan, err error) {
+			mu.Lock()
+			reported = append(reported, err)
+			mu.Unlock()
+		}),
+	)
+	result, err := runner.Run(context.Background(), &Plan{ID: "p1", Status: PlanPending})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.Output != "done" {
+		t.Errorf("output: got %q", result.Output)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(reported) == 0 {
+		t.Fatal("expected persist-error handler to be called on store sync failure")
+	}
+	for _, e := range reported {
+		if !errors.Is(e, storeErr) {
+			t.Errorf("expected store error, got %v", e)
+		}
+	}
+}
+
 // --- P9: collect reports dependencies that contributed nothing ---
 
 func TestLocalRunner_CollectStep_ReportsMissingInputs(t *testing.T) {
@@ -637,5 +921,66 @@ func TestLocalRunner_Parallel_NoDataRace(t *testing.T) {
 	}
 	if plan.Status != PlanCompleted {
 		t.Errorf("plan status: got %s", plan.Status)
+	}
+}
+
+// Test case: conditional inside parallel, branch target with out-of-block dependency
+func TestLocalRunner_ConditionalInParallel_TransitiveDep_Bug(t *testing.T) {
+	tools := &perToolExecutor{errBy: map[string]error{}}
+	lr := NewLocalRunner(&mockLLM{out: "ok"}, tools)
+
+	// Plan structure:
+	// par (parallel)
+	//   cond (conditional)
+	//   t (depends on cond and external) ← cond is in-block, but external is NOT
+	// external (outside the parallel)
+
+	cond := &Step{
+		ID: "cond", Type: StepConditional, Status: StepPending,
+		Condition: &Condition{Field: "input", Operator: "contains", Value: "yes"},
+		Branches:  map[string][]string{"true": {"t"}},
+	}
+	// t depends on BOTH cond (in-block) and external (out-of-block)
+	tStep := &Step{
+		ID: "t", Type: StepToolCall, Status: StepPending,
+		DependsOn: []string{"cond", "external"},
+		Config:    StepConfig{ToolName: "tpath"},
+	}
+	par := &Step{ID: "par", Type: StepParallel, Status: StepPending, Config: StepConfig{SubSteps: []*Step{cond, tStep}}}
+	external := &Step{ID: "external", Type: StepToolCall, Status: StepPending, Config: StepConfig{ToolName: "epath"}}
+
+	plan := pendingPlan("p1", par, external)
+	plan.Input = "yes please"
+
+	// ValidatePlan should catch this, but if it doesn't...
+	err := ValidatePlan(plan)
+	if err != nil {
+		t.Logf("ValidatePlan caught the issue: %v", err)
+		return
+	}
+
+	// If ValidatePlan passed, then Run should either fail or silently leave t unexecuted
+	result, err := lr.Run(context.Background(), plan)
+	if err != nil {
+		t.Logf("Run failed (good): %v", err)
+		return
+	}
+
+	// Check if t was actually executed
+	if result != nil {
+		t.Logf("Plan completed. Checking if t was executed...")
+		for _, s := range plan.Steps {
+			if s.ID == "par" && s.Type == StepParallel {
+				for _, sub := range s.Config.SubSteps {
+					if sub.ID == "t" {
+						if sub.Status != StepCompleted {
+							t.Errorf("BUG CONFIRMED: t is %s (should be Completed or error should have been returned)", sub.Status)
+						} else {
+							t.Logf("t was executed: %s", sub.Status)
+						}
+					}
+				}
+			}
+		}
 	}
 }

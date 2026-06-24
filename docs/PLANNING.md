@@ -78,6 +78,16 @@ A `Step` ([planning/types.go:77](../planning/types.go)) has an `id`, `type`, `na
   include `eq`/`ne`/`contains`/`not_contains`/`empty`/`not_empty`/`gt`/`lt`. **Contract:**
   a branch's steps should `depends_on` the conditional and each branch list should be
   complete.
+  - **Inside `parallel`:** a `conditional` may be a `parallel` sub-step. The runner runs
+    each `parallel` block as an isolated mini-plan over its own sub-step slice
+    (`runParallelStep`), so a conditional's skip-propagation is confined to that block and
+    cannot race a sibling branch or the parent plan. Because a block is self-contained,
+    **every sub-step's `depends_on` must reference another sub-step of the same block** (a
+    dependency outside the block could never resolve). On top of that,
+    `validateParallelBranches` requires each conditional branch target to (1) be a sub-step
+    of the *same* block, (2) `depends_on` the conditional that gates it, and (3) be gated by
+    a single conditional. A conditional inside `parallel` can therefore branch only on the
+    plan input or another in-block sub-step's output.
 - **`collect`** is the join counterpart to `parallel`: it concatenates the (non-skipped)
   outputs of its `depends_on` steps; with a `prompt` and an LLM it synthesizes them
   instead. A skipped dependency is a *resolved* dependency (it just contributes nothing),
@@ -125,8 +135,11 @@ are abandoned via the hard deadline machinery), then marks `PlanCancelled` in th
 
 **Validation & failure path.** `ValidatePlan` ([planning/dag.go](../planning/dag.go))
 runs in both planners and at the start of `Run`: DAG shape, `tool_call` steps must have a
-`tool_name`, conditional operators must be known, and `conditional` is rejected inside
-`parallel` sub-steps. On a step failure all state mutations happen first, the store is
+`tool_name`, and conditional operators must be known. A `conditional` **may** run inside a
+`parallel` block (§3); `validateParallelBranches` keeps each block self-contained — every
+sub-step's `depends_on` must stay in-block, and a conditional's branch targets must also
+depend on it and be gated by a single conditional — so each block runs as an isolated
+mini-plan. On a step failure all state mutations happen first, the store is
 updated **once**, and the observer receives exactly one `OnStepFailed` (step-specific)
 followed by one `OnPlanFailed` (plan-level). When a `parallel` sub-step fails, all
 branches still run to completion, each failed sub-step gets its own `OnStepFailed`, and
@@ -238,9 +251,11 @@ holds; see §7).
 
 - In-memory plan store by default — durable history requires wiring a `Persister`
   (e.g. the shipped `FilePersister`, §7).
-- `conditional` inside a `parallel` sub-step is unsupported — now **rejected by
-  `ValidatePlan`** at plan-parse and run time (it would mutate shared plan state
-  concurrently); lifting the limitation needs per-branch plan views.
+- `conditional` inside a `parallel` sub-step is **supported**: each `parallel` block runs
+  as an isolated mini-plan over its own sub-step slice, so a conditional's skips stay in
+  its branch (§3). The trade-off is that a block is self-contained — every sub-step's
+  `depends_on` must reference an in-block sibling, and a conditional can branch only on the
+  plan input or an in-block sub-step's output (all enforced by `validateParallelBranches`).
 - A hard step `Timeout` abandons (not stops) an attempt that ignores the context — the
   goroutine drains in the background (§4).
 - No per-step-type or duration metrics yet — only run/step counters (§9).

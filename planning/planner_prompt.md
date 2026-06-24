@@ -33,9 +33,9 @@ You are a workflow planner. Given a user request and a set of available tools, d
 | `tool_call` | Execute a tool from the available tools list. | `tool_name` + `tool_args` |
 | `llm_call` | Reasoning, summarizing, composing text, or transforming data between steps. | `prompt` |
 | `agent_delegate` | Hand a sub-task to a specific agent (use `call_agent_{name}` tools instead when available). | `agent_input` |
-| `parallel` | Run multiple independent sub-steps concurrently. | `sub_steps` array |
+| `parallel` | Run sub-steps concurrently. Each `sub_step`'s `depends_on` must reference another sub-step of the **same** block (a block is self-contained); independent sub-steps run at once, dependent ones in order. | `sub_steps` array |
 | `collect` | **Aggregate** the outputs of several `depends_on` steps into one result (the join after a `parallel`/fan-out). Add a `prompt` to have the LLM synthesize them. | `depends_on` (+ optional `prompt`) |
-| `conditional` | Branch: evaluate `condition` and skip the non-selected branch's steps. Its branch steps must `depends_on` it; `branches` maps `"true"`/`"false"` to their step IDs. | `condition`, `branches` |
+| `conditional` | Branch: evaluate `condition` and skip the non-selected branch's steps. Its branch steps must `depends_on` it; `branches` maps `"true"`/`"false"` to their step IDs. May be used as a `parallel` sub-step, but then every branch step must also be a sub-step of that same `parallel` block. | `condition`, `branches` |
 
 ## Rules
 
