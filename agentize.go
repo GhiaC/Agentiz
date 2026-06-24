@@ -17,8 +17,10 @@ import (
 	"github.com/ghiac/agentize/imageedit"
 	"github.com/ghiac/agentize/llmutils"
 	"github.com/ghiac/agentize/log"
+	"github.com/ghiac/agentize/metrics"
 	"github.com/ghiac/agentize/model"
 	"github.com/ghiac/agentize/planning"
+	"github.com/ghiac/agentize/review"
 	"github.com/ghiac/agentize/store"
 	"github.com/ghiac/agentize/visualize"
 	"github.com/gin-gonic/gin"
@@ -76,6 +78,11 @@ type Agentize struct {
 
 	// Optional: planning orchestrator (nil = planning disabled)
 	orchestrator *planning.Orchestrator
+
+	// Human-in-the-loop reviews. The manager is created lazily (the store always
+	// supports reviews); a metrics ResolveListener is registered on creation.
+	reviewManager *review.Manager
+	reviewMu      sync.Mutex
 
 	// Admin credentials protecting the /agentize web pages. When empty, the
 	// values of AGENTIZE_ADMIN_USERNAME / AGENTIZE_ADMIN_PASSWORD are used; if
@@ -344,6 +351,82 @@ func (ag *Agentize) GetRepository() *fsrepo.NodeRepository {
 // (store.Store satisfies store.SessionStore, so existing callers keep working.)
 func (ag *Agentize) GetSessionStore() store.Store {
 	return ag.engine.Sessions
+}
+
+// --- Human-in-the-loop reviews (chapter 10) ---
+
+// GetReviewStore returns the durable review store (store.Store satisfies
+// review.Store on every backend).
+func (ag *Agentize) GetReviewStore() review.Store {
+	return ag.engine.Sessions
+}
+
+// ReviewManager returns the lazily-created review manager — the one object every
+// frontend talks to. Use it to wire resume-on-review for planning, e.g.:
+//
+//	ag.ReviewManager().OnResolve(planning.ResumeOnReview(runner, nil))
+//
+// so a decision from any UI (the debug dashboard form, a Telegram button, an API
+// call) resumes the suspended plan through the single Resolve entry point.
+func (ag *Agentize) ReviewManager() *review.Manager {
+	ag.reviewMu.Lock()
+	defer ag.reviewMu.Unlock()
+	if ag.reviewManager == nil {
+		ag.reviewManager = review.New(ag.GetReviewStore(), nil)
+		// Count every decision and keep the pending gauge fresh regardless of
+		// which frontend made the decision.
+		ag.reviewManager.OnResolve(func(_ context.Context, r *model.ReviewRequest) {
+			metrics.RecordReview(r.Kind, string(r.Status))
+			ag.refreshPendingReviewsGauge()
+		})
+	}
+	return ag.reviewManager
+}
+
+// SetReviewNotifier wires the creation hook so a frontend (Telegram, push, email)
+// is given the chance to present a review the moment it is raised. Optional: when
+// unset, reviews are still persisted and resolvable from any other surface.
+func (ag *Agentize) SetReviewNotifier(n review.Notifier) {
+	ag.ReviewManager().SetNotifier(n)
+}
+
+// RequestReview creates a pending review, persists it, fires the notifier, and
+// returns its id. Generic and not planning-specific (Kind/RefID describe the
+// subject) so any host code can gate any action on a human decision.
+func (ag *Agentize) RequestReview(ctx context.Context, r *model.ReviewRequest) (string, error) {
+	id, err := ag.ReviewManager().Request(ctx, r)
+	if err == nil {
+		ag.refreshPendingReviewsGauge()
+	}
+	return id, err
+}
+
+// refreshPendingReviewsGauge sets agentize_reviews_pending from the global pending
+// count. Best-effort: a store error leaves the previous value.
+func (ag *Agentize) refreshPendingReviewsGauge() {
+	if pend, err := ag.GetReviewStore().ListPendingReviews(""); err == nil {
+		metrics.SetPendingReviews(len(pend))
+	}
+}
+
+// ResolveReview records a decision on a pending review and returns the updated
+// record. It is the single entry point every UI calls (the dashboard POST, a
+// Telegram button handler, an API) and is idempotent.
+func (ag *Agentize) ResolveReview(ctx context.Context, reviewID, decision, note, decidedBy string) (*model.ReviewRequest, error) {
+	return ag.ReviewManager().Resolve(ctx, reviewID, decision, note, decidedBy)
+}
+
+// ListPendingReviews returns pending reviews for a user (userID == "" = all),
+// and refreshes the pending-reviews gauge.
+func (ag *Agentize) ListPendingReviews(_ context.Context, userID string) ([]*model.ReviewRequest, error) {
+	reviews, err := ag.GetReviewStore().ListPendingReviews(userID)
+	if err != nil {
+		return nil, err
+	}
+	if userID == "" {
+		metrics.SetPendingReviews(len(reviews))
+	}
+	return reviews, nil
 }
 
 // GetEngine returns the internal engine

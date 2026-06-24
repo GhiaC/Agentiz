@@ -489,6 +489,35 @@ func RecordStoreDeletion(entity string) {
 	storeDeletions.WithLabelValues(entity).Inc()
 }
 
+var (
+	reviewsTotal = factory.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace, Subsystem: "reviews", Name: "total",
+		Help: "Human-in-the-loop review decisions by kind (plan_step|tool_call|payment|custom) and decision (approved|rejected|expired|canceled).",
+	}, []string{"kind", "decision"})
+
+	reviewsPending = factory.NewGauge(prometheus.GaugeOpts{
+		Namespace: namespace, Subsystem: "reviews", Name: "pending",
+		Help: "Number of pending (unresolved) human-in-the-loop reviews.",
+	})
+)
+
+// RecordReview counts one resolved review by kind and decision (terminal status).
+func RecordReview(kind, decision string) {
+	if kind == "" {
+		kind = "unknown"
+	}
+	if decision == "" {
+		decision = "unknown"
+	}
+	reviewsTotal.WithLabelValues(kind, decision).Inc()
+}
+
+// SetPendingReviews sets the pending-reviews gauge (restart-safe: derive it from
+// the store's pending count rather than tracking a drifting delta).
+func SetPendingReviews(n int) {
+	reviewsPending.Set(float64(n))
+}
+
 // StoreQuery records the latency of one store operation. operation is the store
 // method name (e.g. "Get", "PutMessage"); backend is "sqlite" or "mongodb".
 func StoreQuery(operation, backend string, dur time.Duration) {

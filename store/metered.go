@@ -161,6 +161,21 @@ func (m *meteredStore) PutRouteTrace(trace *model.RouteTrace) error {
 	return m.Store.PutRouteTrace(trace)
 }
 
+func (m *meteredStore) PutReviewRequest(r *model.ReviewRequest) error {
+	defer m.observe("PutReviewRequest", time.Now())
+	return m.Store.PutReviewRequest(r)
+}
+
+func (m *meteredStore) GetReviewRequest(id string) (*model.ReviewRequest, error) {
+	defer m.observe("GetReviewRequest", time.Now())
+	return m.Store.GetReviewRequest(id)
+}
+
+func (m *meteredStore) ListPendingReviews(userID string) ([]*model.ReviewRequest, error) {
+	defer m.observe("ListPendingReviews", time.Now())
+	return m.Store.ListPendingReviews(userID)
+}
+
 // --- Debug reads + aggregates (debuger.DebugStore) ---
 
 func (m *meteredStore) GetAllSessions() (map[string][]*model.Session, error) {

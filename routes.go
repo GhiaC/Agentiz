@@ -65,6 +65,8 @@ func (ag *Agentize) RegisterRoutes(router *gin.Engine) {
 	router.GET("/agentize/debug/routes/:traceID", p(ag.handleDebugRouteDetail))
 	router.GET("/agentize/debug/summarized", p(ag.handleDebugSummarized))
 	router.GET("/agentize/debug/summarized/:logID", p(ag.handleDebugSummarizationLogDetail))
+	router.GET("/agentize/debug/reviews", p(ag.handleDebugReviews))
+	router.POST("/agentize/debug/reviews/:reviewID/resolve", p(ag.handleDebugReviewResolve))
 
 	// Register extra debug pages (with sidebar entry)
 	for _, page := range ag.extraDebugPages {
@@ -274,6 +276,52 @@ func (ag *Agentize) handleDebugUserDetail(c *gin.Context) {
 
 	c.Header("Content-Type", "text/html; charset=utf-8")
 	c.String(200, html)
+}
+
+// handleDebugReviews lists pending human-in-the-loop reviews across all users.
+func (ag *Agentize) handleDebugReviews(c *gin.Context) {
+	reviews, err := ag.ListPendingReviews(c.Request.Context(), "")
+	if err != nil {
+		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to load reviews: %v", err)})
+		return
+	}
+	html, err := pages.RenderReviews(reviews)
+	if err != nil {
+		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to generate reviews page: %v", err)})
+		return
+	}
+	c.Header("Content-Type", "text/html; charset=utf-8")
+	c.String(200, html)
+}
+
+// handleDebugReviewResolve records an approve/reject decision for one review. It
+// is audited and routes through the same Manager.Resolve every UI uses, so a
+// plan suspended on the review resumes (when ResumeOnReview is wired).
+func (ag *Agentize) handleDebugReviewResolve(c *gin.Context) {
+	reviewID := c.Param("reviewID")
+	if reviewID == "" {
+		c.JSON(400, gin.H{"error": "reviewID parameter is required"})
+		return
+	}
+	decision := c.PostForm("decision")
+	note := c.PostForm("note")
+	if decision == "" {
+		log.Log.Warnf("[Agentize] [AUDIT] resolve-review REJECTED (no decision) | review=%s ip=%s", reviewID, c.ClientIP())
+		metrics.AuditAction("resolve_review", "rejected")
+		c.JSON(400, gin.H{"error": "decision is required"})
+		return
+	}
+
+	log.Log.Warnf("[Agentize] [AUDIT] resolve-review START | review=%s decision=%s ip=%s", reviewID, decision, c.ClientIP())
+	if _, err := ag.ResolveReview(c.Request.Context(), reviewID, decision, note, "admin:"+c.ClientIP()); err != nil {
+		metrics.AuditAction("resolve_review", "error")
+		log.Log.Errorf("[Agentize] [AUDIT] resolve-review FAILED | review=%s ip=%s error=%v", reviewID, c.ClientIP(), err)
+		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to resolve review: %v", err)})
+		return
+	}
+	metrics.AuditAction("resolve_review", "ok")
+	log.Log.Warnf("[Agentize] [AUDIT] resolve-review OK | review=%s decision=%s ip=%s", reviewID, decision, c.ClientIP())
+	c.Redirect(302, "/agentize/debug/reviews")
 }
 
 // handleDebugUserDeleteData deletes all sessions and messages for a user

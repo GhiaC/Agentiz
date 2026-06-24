@@ -36,6 +36,7 @@ type MongoDBStore struct {
 	userFilesCollection         *mongo.Collection
 	summarizationLogsCollection *mongo.Collection
 	routeTracesCollection       *mongo.Collection
+	reviewsCollection           *mongo.Collection
 
 	// UserNodes tracks visited nodes for each user (user-level, not session-level)
 	userNodes sync.Map
@@ -161,6 +162,7 @@ func NewMongoDBStore(config MongoDBStoreConfig) (*MongoDBStore, error) {
 		userFilesCollection:         database.Collection("user_files"),
 		summarizationLogsCollection: database.Collection("summarization_logs"),
 		routeTracesCollection:       database.Collection("route_traces"),
+		reviewsCollection:           database.Collection("reviews"),
 		opTimeout:                   config.OpTimeout,
 	}
 
@@ -407,6 +409,33 @@ func (s *MongoDBStore) initIndexes(ctx context.Context) error {
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create route_traces user_id+created_at index: %w", err)
+	}
+
+	// ============================================================================
+	// Reviews Collection Indexes
+	// ============================================================================
+
+	// Index for ListPendingReviews: user_id + status + created_at DESC (newest first)
+	_, err = s.reviewsCollection.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{
+			{Key: "user_id", Value: 1},
+			{Key: "status", Value: 1},
+			{Key: "created_at", Value: -1},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create reviews user_id+status index: %w", err)
+	}
+
+	// Index for ListPendingReviews across all users: status + created_at DESC.
+	_, err = s.reviewsCollection.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{
+			{Key: "status", Value: 1},
+			{Key: "created_at", Value: -1},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create reviews status+created_at index: %w", err)
 	}
 
 	return nil
@@ -681,6 +710,11 @@ func (s *MongoDBStore) DeleteUserData(userID string) error {
 	// Delete route_traces by user_id
 	if _, err := s.routeTracesCollection.DeleteMany(ctx, userFilter); err != nil {
 		return fmt.Errorf("failed to delete route_traces: %w", err)
+	}
+
+	// Delete reviews by user_id
+	if _, err := s.reviewsCollection.DeleteMany(ctx, userFilter); err != nil {
+		return fmt.Errorf("failed to delete reviews: %w", err)
 	}
 
 	// Delete tool_calls, summarization_logs and opened_files. These now carry a
@@ -2305,6 +2339,111 @@ func (s *MongoDBStore) queryRouteTraces(filter bson.M) ([]*model.RouteTrace, err
 		traces = append(traces, trace)
 	}
 	return traces, cursor.Err()
+}
+
+// ============================================================================
+// Reviews (human-in-the-loop)
+// ============================================================================
+
+// reviewDocument represents a review request in MongoDB. The full request is
+// JSON-serialized into Data; user_id/status/created_at are denormalized for the
+// pending-list query, mirroring the SQLite columns for contract parity.
+type reviewDocument struct {
+	ID        string    `bson:"_id"`
+	SessionID string    `bson:"session_id"`
+	UserID    string    `bson:"user_id"`
+	Status    string    `bson:"status"`
+	Data      string    `bson:"data"`
+	CreatedAt time.Time `bson:"created_at"`
+}
+
+// PutReviewRequest upserts a review request keyed by ID.
+func (s *MongoDBStore) PutReviewRequest(r *model.ReviewRequest) error {
+	if r == nil {
+		return fmt.Errorf("review request cannot be nil")
+	}
+	if r.ID == "" {
+		return fmt.Errorf("review request must have an ID")
+	}
+
+	ctx, cancel := s.opCtx()
+	defer cancel()
+
+	if r.CreatedAt.IsZero() {
+		r.CreatedAt = time.Now()
+	}
+	data, err := json.Marshal(r)
+	if err != nil {
+		return fmt.Errorf("failed to marshal review request: %w", err)
+	}
+
+	doc := reviewDocument{
+		ID:        r.ID,
+		SessionID: r.SessionID,
+		UserID:    r.UserID,
+		Status:    string(r.Status),
+		Data:      string(data),
+		CreatedAt: r.CreatedAt,
+	}
+
+	opts := options.Replace().SetUpsert(true)
+	_, err = s.reviewsCollection.ReplaceOne(ctx, bson.M{"_id": r.ID}, doc, opts)
+	if err != nil {
+		return fmt.Errorf("failed to store review request: %w", err)
+	}
+	return nil
+}
+
+// GetReviewRequest returns the review request by id, or (nil, nil) when absent.
+func (s *MongoDBStore) GetReviewRequest(id string) (*model.ReviewRequest, error) {
+	ctx, cancel := s.opCtx()
+	defer cancel()
+
+	var doc reviewDocument
+	err := s.reviewsCollection.FindOne(ctx, bson.M{"_id": id}).Decode(&doc)
+	if err == mongo.ErrNoDocuments {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to query review request: %w", err)
+	}
+	r := &model.ReviewRequest{}
+	if err := unmarshalJSONOrBSON(doc.Data, r); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal review request: %w", err)
+	}
+	return r, nil
+}
+
+// ListPendingReviews returns pending review requests newest first. userID == ""
+// returns pending requests across all users.
+func (s *MongoDBStore) ListPendingReviews(userID string) ([]*model.ReviewRequest, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*s.opTimeout)
+	defer cancel()
+
+	filter := bson.M{"status": string(model.ReviewPending)}
+	if userID != "" {
+		filter["user_id"] = userID
+	}
+	cursor, err := s.reviewsCollection.Find(ctx, filter,
+		options.Find().SetSort(bson.D{{Key: "created_at", Value: -1}, {Key: "_id", Value: -1}}))
+	if err != nil {
+		return nil, fmt.Errorf("failed to query pending reviews: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	var reqs []*model.ReviewRequest
+	for cursor.Next(ctx) {
+		var doc reviewDocument
+		if err := cursor.Decode(&doc); err != nil {
+			return nil, fmt.Errorf("failed to decode review request: %w", err)
+		}
+		r := &model.ReviewRequest{}
+		if err := unmarshalJSONOrBSON(doc.Data, r); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal review request: %w", err)
+		}
+		reqs = append(reqs, r)
+	}
+	return reqs, cursor.Err()
 }
 
 // Ensure MongoDBStore implements model.SessionStore and debuger.DebugStore

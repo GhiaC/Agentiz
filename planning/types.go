@@ -26,6 +26,10 @@ const (
 	StepCompleted StepStatus = "completed"
 	StepFailed    StepStatus = "failed"
 	StepSkipped   StepStatus = "skipped"
+	// StepWaiting marks a human_review step suspended awaiting an async review
+	// decision. The runner does NOT park a goroutine; the plan is persisted and
+	// resumed when the review resolves (see Resume / ResumeOnReview).
+	StepWaiting StepStatus = "waiting"
 )
 
 // --- Plan Status ---
@@ -38,6 +42,9 @@ const (
 	PlanCompleted PlanStatus = "completed"
 	PlanFailed    PlanStatus = "failed"
 	PlanCancelled PlanStatus = "cancelled"
+	// PlanWaiting marks a plan suspended on a human_review step awaiting an async
+	// decision. The plan is persisted and resumes when the review resolves.
+	PlanWaiting PlanStatus = "waiting"
 )
 
 // --- Condition (for conditional steps) ---

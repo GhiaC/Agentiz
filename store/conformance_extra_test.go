@@ -272,6 +272,93 @@ func testVerifyDetectsOrphans(t *testing.T, st Store) {
 	}
 }
 
+// testReviews exercises the ReviewStore contract (chapter 10): round-trip,
+// pending-list by user and across all users, resolve dropping the review from
+// pending, and DeleteUserData removing a user's reviews — identically on both
+// backends.
+func testReviews(t *testing.T, st Store) {
+	// Absent -> (nil, nil), never an error.
+	if got, err := st.GetReviewRequest("nope"); err != nil || got != nil {
+		t.Fatalf("GetReviewRequest(absent) = %v, %v; want nil, nil", got, err)
+	}
+
+	r := model.NewReviewRequest("plan_step", "plan-1/step-2")
+	r.UserID = "user-1"
+	r.SessionID = "sess-1"
+	r.Title = "Approve deploy"
+	r.Content = "ship it?"
+	if err := st.PutReviewRequest(r); err != nil {
+		t.Fatalf("PutReviewRequest: %v", err)
+	}
+
+	got, err := st.GetReviewRequest(r.ID)
+	if err != nil || got == nil {
+		t.Fatalf("GetReviewRequest: %v, %v", got, err)
+	}
+	if got.Kind != "plan_step" || got.RefID != "plan-1/step-2" || got.Status != model.ReviewPending || got.Title != "Approve deploy" {
+		t.Errorf("round-trip mismatch: %+v", got)
+	}
+
+	// Pending list, by user and across all users.
+	for _, uid := range []string{"user-1", ""} {
+		pend, err := st.ListPendingReviews(uid)
+		if err != nil {
+			t.Fatalf("ListPendingReviews(%q): %v", uid, err)
+		}
+		if len(pend) != 1 || pend[0].ID != r.ID {
+			t.Fatalf("ListPendingReviews(%q) = %+v, want [%s]", uid, contentsRev(pend), r.ID)
+		}
+	}
+
+	// A second user's review is isolated per-user but visible in the all list.
+	r2 := model.NewReviewRequest("payment", "order-9")
+	r2.UserID = "user-2"
+	if err := st.PutReviewRequest(r2); err != nil {
+		t.Fatalf("PutReviewRequest r2: %v", err)
+	}
+	if pend, _ := st.ListPendingReviews("user-1"); len(pend) != 1 {
+		t.Errorf("user-1 pending should stay 1, got %d", len(pend))
+	}
+	if pend, _ := st.ListPendingReviews(""); len(pend) != 2 {
+		t.Errorf("all-users pending should be 2, got %d", len(pend))
+	}
+
+	// Resolving (an upsert) drops the review from the pending list.
+	got.Status = model.ReviewApproved
+	got.Decision = "approve"
+	got.DecidedBy = "admin"
+	got.DecidedAt = time.Now()
+	if err := st.PutReviewRequest(got); err != nil {
+		t.Fatalf("PutReviewRequest (resolve): %v", err)
+	}
+	if pend, _ := st.ListPendingReviews("user-1"); len(pend) != 0 {
+		t.Errorf("resolved review should drop from pending, got %d", len(pend))
+	}
+	if reloaded, _ := st.GetReviewRequest(r.ID); reloaded == nil ||
+		reloaded.Status != model.ReviewApproved || reloaded.Decision != "approve" || reloaded.DecidedBy != "admin" {
+		t.Errorf("resolved review not persisted: %+v", reloaded)
+	}
+
+	// DeleteUserData removes the user's reviews but leaves other users'.
+	if err := st.DeleteUserData("user-1"); err != nil {
+		t.Fatalf("DeleteUserData: %v", err)
+	}
+	if got, _ := st.GetReviewRequest(r.ID); got != nil {
+		t.Errorf("review should be gone after DeleteUserData, got %+v", got)
+	}
+	if pend, _ := st.ListPendingReviews(""); len(pend) != 1 || pend[0].ID != r2.ID {
+		t.Errorf("only user-2's pending review should remain, got %+v", contentsRev(pend))
+	}
+}
+
+func contentsRev(rs []*model.ReviewRequest) []string {
+	out := make([]string, len(rs))
+	for i, r := range rs {
+		out[i] = r.ID
+	}
+	return out
+}
+
 // testMessageSeqRestore guards the MessageSeq-restoration path (SQLite MAX,
 // Mongo sort+limit FindOne — S16): on reload, a session's MessageSeq must be
 // raised to the highest stored seq_id so a restart never reuses a message ID.

@@ -484,6 +484,21 @@ func (s *DBStore) GetAllRouteTraces() ([]*model.RouteTrace, error) {
 	return s.sqliteStore.GetAllRouteTraces()
 }
 
+// PutReviewRequest upserts a review request (delegates to SQLiteStore)
+func (s *DBStore) PutReviewRequest(r *model.ReviewRequest) error {
+	return s.sqliteStore.PutReviewRequest(r)
+}
+
+// GetReviewRequest returns a review request by id (delegates to SQLiteStore)
+func (s *DBStore) GetReviewRequest(id string) (*model.ReviewRequest, error) {
+	return s.sqliteStore.GetReviewRequest(id)
+}
+
+// ListPendingReviews returns pending reviews (delegates to SQLiteStore)
+func (s *DBStore) ListPendingReviews(userID string) ([]*model.ReviewRequest, error) {
+	return s.sqliteStore.ListPendingReviews(userID)
+}
+
 // PutToolCall stores a tool call (delegates to SQLiteStore)
 func (s *DBStore) PutToolCall(toolCall *model.ToolCall) error {
 	return s.sqliteStore.PutToolCall(toolCall)

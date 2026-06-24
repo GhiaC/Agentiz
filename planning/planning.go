@@ -5,6 +5,7 @@ package planning
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -142,6 +143,12 @@ func (o *Orchestrator) Execute(ctx context.Context, input PlanInput) (*PlanResul
 	}
 
 	result, err := o.runner.Run(ctx, plan, runOpts...)
+
+	// A plan suspended awaiting a human review is not a failure — surface it as-is
+	// (the host resumes it when the review resolves); never replan it.
+	if errors.Is(err, ErrPlanWaiting) {
+		return result, err
+	}
 
 	// Replan-on-failure (opt-in via WithReplanOnFailure): ask the planner to
 	// revise the plan around the failed step, persist the revision, and re-run.

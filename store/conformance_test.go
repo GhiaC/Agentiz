@@ -143,6 +143,7 @@ func TestStoreConformance(t *testing.T) {
 			run("MessagePagination", testMessagePagination)
 			run("PutMessagesBatch", testPutMessagesBatch)
 			run("Quotas", testQuotas)
+			run("Reviews", testReviews)
 			run("Maintainer", testMaintainer)
 			run("VerifyDetectsOrphans", testVerifyDetectsOrphans)
 			run("MessageSeqRestore", testMessageSeqRestore)

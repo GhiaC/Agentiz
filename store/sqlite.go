@@ -403,6 +403,22 @@ var sqliteMigrations = []sqliteMigration{
 	{10, "messages (session_id, seq_id) index for pagination", func(tx *sql.Tx) error {
 		return execAll(tx, `CREATE INDEX IF NOT EXISTS idx_messages_session_seq ON messages(session_id, seq_id)`)
 	}},
+	{11, "reviews table", func(tx *sql.Tx) error {
+		return execAll(tx, `
+		CREATE TABLE IF NOT EXISTS reviews (
+			request_id TEXT PRIMARY KEY,
+			session_id TEXT DEFAULT '',
+			user_id TEXT DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'pending',
+			data TEXT NOT NULL,
+			created_at INTEGER NOT NULL,
+			decided_at INTEGER DEFAULT 0
+		)`,
+			`CREATE INDEX IF NOT EXISTS idx_reviews_user_status ON reviews(user_id, status)`,
+			`CREATE INDEX IF NOT EXISTS idx_reviews_status ON reviews(status)`,
+			`CREATE INDEX IF NOT EXISTS idx_reviews_created_at ON reviews(created_at)`,
+		)
+	}},
 }
 
 // runMigrations applies every migration newer than the recorded schema version.
@@ -673,6 +689,9 @@ func (s *SQLiteStore) DeleteUserData(userID string) error {
 	}
 	if _, err := tx.Exec("DELETE FROM route_traces WHERE user_id = ?", userID); err != nil {
 		return fmt.Errorf("failed to delete route_traces: %w", err)
+	}
+	if _, err := tx.Exec("DELETE FROM reviews WHERE user_id = ?", userID); err != nil {
+		return fmt.Errorf("failed to delete reviews: %w", err)
 	}
 	if _, err := tx.Exec("DELETE FROM sessions WHERE user_id = ?", userID); err != nil {
 		return fmt.Errorf("failed to delete sessions: %w", err)
@@ -2576,6 +2595,113 @@ func scanRouteTraces(rows *sql.Rows) ([]*model.RouteTrace, error) {
 		return nil, fmt.Errorf("error iterating route traces: %w", err)
 	}
 	return traces, nil
+}
+
+// ==================== Reviews (human-in-the-loop) ====================
+
+// PutReviewRequest upserts a review request keyed by ID. The full request is
+// stored as JSON in the data column; request_id/user_id/status/decided_at are
+// projected into columns for indexing and pending-list queries.
+func (s *SQLiteStore) PutReviewRequest(r *model.ReviewRequest) error {
+	if r == nil {
+		return fmt.Errorf("review request cannot be nil")
+	}
+	if r.ID == "" {
+		return fmt.Errorf("review request must have an ID")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	createdAt := r.CreatedAt.Unix()
+	if createdAt <= 0 {
+		createdAt = time.Now().Unix()
+		r.CreatedAt = time.Unix(createdAt, 0)
+	}
+	var decidedAt int64
+	if !r.DecidedAt.IsZero() {
+		decidedAt = r.DecidedAt.Unix()
+	}
+
+	data, err := json.Marshal(r)
+	if err != nil {
+		return fmt.Errorf("failed to marshal review request: %w", err)
+	}
+
+	_, err = s.execWrite(
+		`INSERT OR REPLACE INTO reviews (request_id, session_id, user_id, status, data, created_at, decided_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		r.ID, r.SessionID, r.UserID, string(r.Status), string(data), createdAt, decidedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to store review request: %w", err)
+	}
+	return nil
+}
+
+// GetReviewRequest returns the review request by id, or (nil, nil) when absent.
+func (s *SQLiteStore) GetReviewRequest(id string) (*model.ReviewRequest, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var data string
+	err := s.db.QueryRow(`SELECT data FROM reviews WHERE request_id = ?`, id).Scan(&data)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to query review request: %w", err)
+	}
+	r := &model.ReviewRequest{}
+	if err := json.Unmarshal([]byte(data), r); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal review request: %w", err)
+	}
+	return r, nil
+}
+
+// ListPendingReviews returns pending review requests newest first. userID == ""
+// returns pending requests across all users.
+func (s *SQLiteStore) ListPendingReviews(userID string) ([]*model.ReviewRequest, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var rows *sql.Rows
+	var err error
+	if userID == "" {
+		rows, err = s.db.Query(
+			`SELECT data FROM reviews WHERE status = ? ORDER BY created_at DESC, request_id DESC`,
+			string(model.ReviewPending),
+		)
+	} else {
+		rows, err = s.db.Query(
+			`SELECT data FROM reviews WHERE user_id = ? AND status = ? ORDER BY created_at DESC, request_id DESC`,
+			userID, string(model.ReviewPending),
+		)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to query pending reviews: %w", err)
+	}
+	defer rows.Close()
+	return scanReviewRequests(rows)
+}
+
+func scanReviewRequests(rows *sql.Rows) ([]*model.ReviewRequest, error) {
+	var reqs []*model.ReviewRequest
+	for rows.Next() {
+		var data string
+		if err := rows.Scan(&data); err != nil {
+			return nil, fmt.Errorf("failed to scan review request: %w", err)
+		}
+		r := &model.ReviewRequest{}
+		if err := json.Unmarshal([]byte(data), r); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal review request: %w", err)
+		}
+		reqs = append(reqs, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating review requests: %w", err)
+	}
+	return reqs, nil
 }
 
 // Ensure SQLiteStore implements model.SessionStore and debuger.DebugStore

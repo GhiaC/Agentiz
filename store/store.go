@@ -76,6 +76,16 @@ type Store interface {
 	// The read side lives on debuger.DebugStore (GetRouteTrace* / GetAllRouteTraces).
 	PutRouteTrace(trace *model.RouteTrace) error
 
+	// --- Human-in-the-loop reviews (review.Store; see review/ + chapter 10) ---
+
+	// PutReviewRequest upserts a human review request keyed by its ID.
+	PutReviewRequest(r *model.ReviewRequest) error
+	// GetReviewRequest returns the request by id, or (nil, nil) when absent.
+	GetReviewRequest(id string) (*model.ReviewRequest, error)
+	// ListPendingReviews returns pending requests newest first; userID == ""
+	// returns pending requests across all users.
+	ListPendingReviews(userID string) ([]*model.ReviewRequest, error)
+
 	// --- Visited-node tracking (user-scoped, in-memory, not persisted) ---
 
 	AddVisitedNode(userID string, nodeDigest *model.NodeDigest)

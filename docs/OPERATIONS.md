@@ -78,6 +78,18 @@ Import the dashboards in [grafana/](grafana/) (`agentize-dashboard.json` and
 `agentize-summarization-dashboard.json`); the former includes a **Storage &
 Audit** row covering store latency, summary age, audit actions, and deletions.
 
+## Human-in-the-loop reviews
+
+When a step or action needs a human "approve / reject" before proceeding, raise a
+durable `ReviewRequest` (see [REVIEWS.md](REVIEWS.md)). Pending reviews are listed,
+approved, and rejected at **`/agentize/debug/reviews`** (admin-gated; resolutions
+are audit-logged as `agentize_audit_actions_total{action="resolve_review"}`), and
+the same `Resolve` call backs a Telegram bot or any HTTP frontend. A planning
+`human_review` step with an async reviewer **suspends** the plan (status
+`waiting`, persisted) rather than parking a goroutine, and resumes when the review
+is resolved — surviving a process restart. Watch `agentize_reviews_pending` for a
+growing backlog of unresolved approvals.
+
 ## Scaling
 
 - **SQLite** is single-node (WAL + retry). It suits one process; for horizontal

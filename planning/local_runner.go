@@ -82,9 +82,15 @@ type LocalRunner struct {
 	store          PlanStore
 	observer       Observer
 	reviewer       ReviewFunc
+	reviewManager  ReviewManager
 	logger         *log.Logger
 	onPersistError PersistErrorFunc
 	cancels        *cancelRegistry
+	// resumeLocks serializes concurrent Resume calls on the SAME plan id so two
+	// reviews resolving at once cannot each load a stale copy, reconcile a
+	// different waiting step, and lose one another's update on persist. A pointer
+	// so the per-run shallow copy (cp := *lr) shares it (and stays copylock-safe).
+	resumeLocks *sync.Map // planID -> *sync.Mutex
 }
 
 // Ensure LocalRunner can still be constructed with *engine.Engine and *model.FunctionRegistry.
@@ -117,6 +123,17 @@ func WithLocalReviewer(fn ReviewFunc) LocalRunnerOption {
 	return func(lr *LocalRunner) { lr.reviewer = fn }
 }
 
+// WithLocalReviewManager wires an async review manager for DURABLE
+// suspend/resume of human_review steps. When set, a human_review step raises a
+// review, marks itself + the plan waiting, persists, and returns WITHOUT parking
+// a goroutine; the plan resumes when the review is resolved (wire
+// ResumeOnReview to the manager). Takes precedence over WithLocalReviewer for
+// human_review steps. Requires a store (WithLocalStore) so the suspended plan is
+// durable across restarts.
+func WithLocalReviewManager(rm ReviewManager) LocalRunnerOption {
+	return func(lr *LocalRunner) { lr.reviewManager = rm }
+}
+
 // WithLocalLogger sets the logger for plan/step transitions and store failures
 // (default: log.Log).
 func WithLocalLogger(l *log.Logger) LocalRunnerOption {
@@ -145,10 +162,11 @@ func WithLocalLLMClient(client model.LLMClient, modelName string) LocalRunnerOpt
 // NewLocalRunner returns a new LocalRunner. eng and funcs can be *engine.Engine and *model.FunctionRegistry.
 func NewLocalRunner(eng LLMCaller, funcs ToolExecutor, opts ...LocalRunnerOption) *LocalRunner {
 	lr := &LocalRunner{
-		engine:    eng,
-		functions: funcs,
-		logger:    log.Log,
-		cancels:   newCancelRegistry(),
+		engine:      eng,
+		functions:   funcs,
+		logger:      log.Log,
+		cancels:     newCancelRegistry(),
+		resumeLocks: &sync.Map{},
 	}
 	for _, opt := range opts {
 		opt(lr)
@@ -311,6 +329,12 @@ func (lr *LocalRunner) Run(ctx context.Context, plan *Plan, opts ...RunOption) (
 			}
 			result, err := rl.RunStep(ctx, plan, step)
 			if err != nil {
+				// A human_review step with an async reviewer suspended itself: it
+				// is already marked StepWaiting with its review id. Persist the
+				// waiting plan and stop — it resumes when the review resolves.
+				if errors.Is(err, ErrStepWaiting) {
+					return rl.waitPlan(ctx, plan, start), ErrPlanWaiting
+				}
 				// A step aborted because the plan context ended (Cancel or
 				// plan-level timeout) is a cancelled plan, not a failed one.
 				if ctx.Err() != nil {
@@ -361,6 +385,17 @@ func (lr *LocalRunner) completePlan(ctx context.Context, plan *Plan, output stri
 		lr.observer.OnPlanCompleted(plan, result)
 	}
 	return result
+}
+
+// waitPlan marks the plan suspended (PlanWaiting), persists it once, and returns
+// a partial result. The waiting step has already recorded its review id. The
+// plan resumes via Resume when the review is resolved.
+func (lr *LocalRunner) waitPlan(ctx context.Context, plan *Plan, start time.Time) *PlanResult {
+	plan.Status = PlanWaiting
+	plan.UpdatedAt = time.Now()
+	lr.persist(ctx, plan)
+	lr.logger.Infof("planning: plan %s suspended awaiting review", plan.ID)
+	return &PlanResult{PlanID: plan.ID, Steps: plan.Steps, Duration: time.Since(start)}
 }
 
 // RunStep executes a single step based on its type.
@@ -416,7 +451,8 @@ func (lr *LocalRunner) RunStep(ctx context.Context, plan *Plan, step *Step) (*St
 	var err error
 	for attempt := 0; attempt < attempts; attempt++ {
 		result, err = lr.dispatchWithDeadline(stepCtx, plan, step)
-		if err == nil || stepCtx.Err() != nil || attempt == attempts-1 {
+		// A step suspended awaiting review is not a failure — never retry it.
+		if err == nil || stepCtx.Err() != nil || errors.Is(err, ErrStepWaiting) || attempt == attempts-1 {
 			break
 		}
 		lr.logger.Warnf("planning: plan %s step %s attempt %d/%d failed, retrying: %v",
@@ -655,6 +691,12 @@ func (lr *LocalRunner) runHumanReviewStep(ctx context.Context, plan *Plan, step 
 		meta["missing_inputs"] = missing
 	}
 
+	// Async path (durable): raise a review, suspend, and return. Takes precedence
+	// over the synchronous reviewer.
+	if lr.reviewManager != nil {
+		return lr.runHumanReviewStepAsync(ctx, plan, step, content, meta)
+	}
+
 	if lr.reviewer == nil {
 		meta["review"] = "auto-approved (no reviewer configured)"
 		return &StepResult{Output: content, Metadata: meta}, nil
@@ -669,6 +711,49 @@ func (lr *LocalRunner) runHumanReviewStep(ctx context.Context, plan *Plan, step 
 	meta["review"] = "approved"
 	meta["note"] = note
 	return &StepResult{Output: content, Metadata: meta}, nil
+}
+
+// runHumanReviewStepAsync raises a durable review for the step, records the
+// review id on the step, marks the step waiting, and returns ErrStepWaiting so
+// the Run loop suspends the plan without parking a goroutine. Resume reconciles
+// the step with the review's decision once it is resolved.
+func (lr *LocalRunner) runHumanReviewStepAsync(ctx context.Context, plan *Plan, step *Step, content string, meta map[string]any) (*StepResult, error) {
+	req := &model.ReviewRequest{
+		UserID:    plan.UserID,
+		SessionID: plan.SessionID,
+		Kind:      "plan_step",
+		RefID:     plan.ID + "/" + step.ID,
+		Title:     reviewTitle(step),
+		Content:   content,
+		Status:    model.ReviewPending,
+		Metadata:  map[string]any{"plan_id": plan.ID, "step_id": step.ID},
+	}
+	reviewID, err := lr.reviewManager.Request(ctx, req)
+	if err != nil {
+		return nil, fmt.Errorf("human review request failed: %w", err)
+	}
+	if meta == nil {
+		meta = map[string]any{}
+	}
+	meta["review_id"] = reviewID
+	meta["review"] = "awaiting_decision"
+	// Record the suspended state directly on the step pointer; the Run loop's
+	// waitPlan persists the plan (and thus this step) once.
+	step.Status = StepWaiting
+	step.Result = &StepResult{Output: content, Metadata: meta}
+	lr.logger.Infof("planning: plan %s step %s suspended awaiting review %s", plan.ID, step.ID, reviewID)
+	return nil, ErrStepWaiting
+}
+
+// reviewIDOf returns the review id a suspended step recorded, or "".
+func reviewIDOf(step *Step) string {
+	if step == nil || step.Result == nil || step.Result.Metadata == nil {
+		return ""
+	}
+	if v, ok := step.Result.Metadata["review_id"].(string); ok {
+		return v
+	}
+	return ""
 }
 
 // findStep returns the step with the given ID, or nil.
@@ -849,6 +934,12 @@ func (lr *LocalRunner) runParallelStep(ctx context.Context, plan *Plan, step *St
 		now := time.Now()
 		for i, sub := range ready {
 			if errs[i] != nil {
+				// A parallel block cannot partially suspend: a human_review with an
+				// async reviewer is not supported as a parallel sub-step. Surface a
+				// clear error instead of a confusing "sub-step failed" one.
+				if errors.Is(errs[i], ErrStepWaiting) {
+					return nil, fmt.Errorf("%w: human_review with an async reviewer cannot be a sub-step of parallel %q (use it at the top level)", ErrInvalidStep, step.ID)
+				}
 				sub.Status = StepFailed
 				sub.Error = errs[i].Error()
 				sub.CompletedAt = &now
@@ -944,17 +1035,79 @@ func (lr *LocalRunner) Cancel(ctx context.Context, planID string) error {
 	return store.Update(ctx, plan)
 }
 
-// Resume loads the plan from store and continues execution from the next ready steps.
+// Resume loads the plan from store and continues execution from the next ready
+// steps. Steps suspended awaiting a human review are first reconciled with their
+// review decision: an approved review completes the step (so its dependents
+// unblock), a rejected/expired/canceled review fails the step (honoring the
+// existing failure policy), and a still-pending review keeps the plan suspended.
 func (lr *LocalRunner) Resume(ctx context.Context, planID string) (*PlanResult, error) {
 	store := lr.store
 	if store == nil {
 		return nil, ErrNoPlanStore
 	}
+
+	// Serialize resumes of the same plan: two reviews resolving concurrently each
+	// spawn a Resume (ResumeOnReview), and an unserialized load→reconcile→persist
+	// would let the second overwrite the first's completed step. The lock makes
+	// the second resume observe the first's persisted result.
+	if lr.resumeLocks != nil {
+		muVal, _ := lr.resumeLocks.LoadOrStore(planID, &sync.Mutex{})
+		pmu := muVal.(*sync.Mutex)
+		pmu.Lock()
+		defer pmu.Unlock()
+	}
+
 	plan, err := store.Get(ctx, planID)
 	if err != nil {
 		return nil, err
 	}
 	lr.logger.Infof("planning: plan %s resuming", planID)
+
+	start := time.Now()
+	stillWaiting := false
+	for _, step := range plan.Steps {
+		if step == nil || step.Status != StepWaiting {
+			continue
+		}
+		reviewID := reviewIDOf(step)
+		if reviewID == "" || lr.reviewManager == nil {
+			// No way to reconcile this suspension; leave it waiting.
+			stillWaiting = true
+			continue
+		}
+		rv, gerr := lr.reviewManager.Get(ctx, reviewID)
+		if gerr != nil {
+			return nil, fmt.Errorf("resume plan %s: load review %s: %w", planID, reviewID, gerr)
+		}
+		switch {
+		case rv == nil || rv.Status == model.ReviewPending:
+			stillWaiting = true
+		case rv.Status == model.ReviewApproved:
+			now := time.Now()
+			step.Status = StepCompleted
+			step.CompletedAt = &now
+			if step.Result == nil {
+				step.Result = &StepResult{}
+			}
+			if step.Result.Metadata == nil {
+				step.Result.Metadata = map[string]any{}
+			}
+			step.Result.Metadata["review"] = "approved"
+			step.Result.Metadata["note"] = rv.Note
+			lr.logger.Infof("planning: plan %s step %s review %s approved, resuming", planID, step.ID, reviewID)
+			if lr.observer != nil {
+				lr.observer.OnStepCompleted(plan, step, step.Result)
+			}
+		default: // rejected / expired / canceled
+			plan.Status = PlanRunning // let failStep apply the coherent failure transition
+			return nil, lr.failStep(ctx, plan, step, fmt.Errorf("human review %s for step %q: %s", rv.Status, step.ID, rv.Note))
+		}
+	}
+	if stillWaiting {
+		// Not every suspended step is resolved yet; keep the plan waiting.
+		return lr.waitPlan(ctx, plan, start), ErrPlanWaiting
+	}
+
 	plan.Status = PlanRunning
 	plan.UpdatedAt = time.Now()
 	lr.persist(ctx, plan)
