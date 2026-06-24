@@ -47,6 +47,7 @@ func TestUserDetailPage_CoreSystemPromptCard(t *testing.T) {
 		t.Fatalf("seed core session: %v", err)
 	}
 
+	t.Setenv("AGENTIZE_DEBUG_UNSAFE", "1") // no creds in test: register dashboard in dev mode
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
 	ag.RegisterRoutes(router)

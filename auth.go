@@ -84,6 +84,17 @@ func (ag *Agentize) isAdminRequest(c *gin.Context) bool {
 	return err == nil && ag.verifyAdminToken(cookie)
 }
 
+// requestIsHTTPS reports whether the request reached the server over TLS, either
+// directly or via a TLS-terminating proxy (X-Forwarded-Proto: https). The admin
+// session cookie is marked Secure when true, so the session token is never sent
+// over plain HTTP in production while local HTTP development keeps working.
+func requestIsHTTPS(c *gin.Context) bool {
+	if c.Request.TLS != nil {
+		return true
+	}
+	return strings.EqualFold(c.GetHeader("X-Forwarded-Proto"), "https")
+}
+
 // requireAdmin wraps a handler with the admin session check. Browsers are
 // redirected to the login page; API-ish requests get a plain 401.
 func (ag *Agentize) requireAdmin(h gin.HandlerFunc) gin.HandlerFunc {
@@ -140,7 +151,9 @@ func (ag *Agentize) handleLoginSubmit(c *gin.Context) {
 
 	expiry := time.Now().Add(adminSessionTTL).Unix()
 	c.SetSameSite(http.SameSiteLaxMode)
-	c.SetCookie(adminCookieName, ag.signAdminToken(expiry), int(adminSessionTTL.Seconds()), "/agentize", "", false, true)
+	// Secure when served over HTTPS (directly or behind a TLS-terminating proxy);
+	// HttpOnly always, so the token is never exposed to JavaScript.
+	c.SetCookie(adminCookieName, ag.signAdminToken(expiry), int(adminSessionTTL.Seconds()), "/agentize", "", requestIsHTTPS(c), true)
 	log.Log.Infof("[Agentize] 🔐 Admin login | IP: %s", c.ClientIP())
 	c.Redirect(http.StatusFound, safeNextTarget(next))
 }
@@ -148,7 +161,7 @@ func (ag *Agentize) handleLoginSubmit(c *gin.Context) {
 // handleLogout clears the admin session cookie.
 func (ag *Agentize) handleLogout(c *gin.Context) {
 	c.SetSameSite(http.SameSiteLaxMode)
-	c.SetCookie(adminCookieName, "", -1, "/agentize", "", false, true)
+	c.SetCookie(adminCookieName, "", -1, "/agentize", "", requestIsHTTPS(c), true)
 	c.Redirect(http.StatusFound, adminLoginPath)
 }
 

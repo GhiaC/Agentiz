@@ -51,9 +51,10 @@ func RenderReviews(reviews []*model.ReviewRequest) (string, error) {
 
 // reviewDecisionForms renders the approve/reject forms for one review. Both POST
 // to /agentize/debug/reviews/:id/resolve, differing only by the decision value,
-// so the dashboard drives approval through the same Resolve path as any UI.
+// so the dashboard drives approval through the same Resolve path as any UI. The
+// ?confirm=<id> typed-confirmation guards against cross-site POST forgery.
 func reviewDecisionForms(r *model.ReviewRequest) string {
-	action := "/agentize/debug/reviews/" + url.PathEscape(r.ID) + "/resolve"
+	action := "/agentize/debug/reviews/" + url.PathEscape(r.ID) + "/resolve?confirm=" + url.QueryEscape(r.ID)
 	form := func(decision, label, btnClass string) string {
 		return fmt.Sprintf(
 			`<form method="POST" action="%s" style="display:inline-block;margin-right:4px">`+

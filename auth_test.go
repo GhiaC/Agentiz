@@ -36,6 +36,76 @@ func TestRequireAdmin_DisabledAllowsAccess(t *testing.T) {
 	}
 }
 
+// TestRegisterRoutes_SafeByDefault: with no credentials and no AGENTIZE_DEBUG_UNSAFE,
+// the dashboard routes are NOT registered at all (the conversations/delete surface
+// is not exposed open by default), while /agentize/health stays available.
+func TestRegisterRoutes_SafeByDefault(t *testing.T) {
+	t.Setenv("AGENTIZE_ADMIN_USERNAME", "")
+	t.Setenv("AGENTIZE_ADMIN_PASSWORD", "")
+	t.Setenv("AGENTIZE_DEBUG_UNSAFE", "")
+
+	ag := &Agentize{}
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	ag.RegisterRoutes(router)
+
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest("GET", "/agentize/debug", nil))
+	if w.Code != http.StatusNotFound {
+		t.Errorf("dashboard must not be registered without creds/UNSAFE, got %d", w.Code)
+	}
+	wh := httptest.NewRecorder()
+	router.ServeHTTP(wh, httptest.NewRequest("GET", "/agentize/health", nil))
+	if wh.Code == http.StatusNotFound {
+		t.Errorf("/agentize/health must remain registered, got %d", wh.Code)
+	}
+}
+
+// TestRegisterRoutes_WithCredsRegistersGated: with credentials, the dashboard IS
+// registered but gated — an unauthenticated browser is redirected to login.
+func TestRegisterRoutes_WithCredsRegistersGated(t *testing.T) {
+	t.Setenv("AGENTIZE_DEBUG_UNSAFE", "")
+	ag := &Agentize{adminUsername: "admin", adminPassword: "pw"}
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	ag.RegisterRoutes(router)
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/agentize/debug", nil)
+	req.Header.Set("Accept", "text/html")
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusFound {
+		t.Errorf("with creds, /agentize/debug should redirect to login (302), got %d", w.Code)
+	}
+}
+
+// TestLogin_CookieSecureFollowsHTTPS: the session cookie is Secure over HTTPS
+// (incl. behind a TLS-terminating proxy) and not Secure over plain HTTP, so the
+// token never travels in cleartext in production while local dev still works.
+func TestLogin_CookieSecureFollowsHTTPS(t *testing.T) {
+	ag := &Agentize{adminUsername: "admin", adminPassword: "s3cret"}
+	router := newAuthTestRouter(ag)
+
+	login := func(https bool) string {
+		form := url.Values{"username": {"admin"}, "password": {"s3cret"}}
+		req := httptest.NewRequest("POST", "/agentize/login", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		if https {
+			req.Header.Set("X-Forwarded-Proto", "https")
+		}
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		return w.Header().Get("Set-Cookie")
+	}
+
+	if sc := login(true); !strings.Contains(sc, "Secure") || !strings.Contains(sc, "HttpOnly") {
+		t.Errorf("over HTTPS the cookie must be Secure + HttpOnly, got %q", sc)
+	}
+	if sc := login(false); strings.Contains(sc, "Secure") {
+		t.Errorf("over plain HTTP the cookie must NOT be Secure (local dev), got %q", sc)
+	}
+}
+
 func TestRequireAdmin_RedirectsBrowserToLogin(t *testing.T) {
 	ag := &Agentize{adminUsername: "admin", adminPassword: "s3cret"}
 	router := newAuthTestRouter(ag)

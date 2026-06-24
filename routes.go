@@ -31,14 +31,30 @@ import (
 func (ag *Agentize) RegisterRoutes(router *gin.Engine) {
 	ag.initAdminAuth()
 	ag.startMetricsServerFromEnv()
+
+	// The health check is always available (no admin session needed).
+	router.GET("/agentize/health", ag.handleHealth)
+
+	// Safe by default: the dashboard can read conversations and delete user data,
+	// so when NO admin credentials are configured it is registered ONLY if the
+	// operator explicitly opts into the unauthenticated mode for local dev
+	// (AGENTIZE_DEBUG_UNSAFE=1). In production, set AGENTIZE_ADMIN_USERNAME/PASSWORD
+	// (or call SetAdminCredentials) — then the pages register behind the login.
+	if !ag.adminAuthEnabled() && strings.TrimSpace(os.Getenv("AGENTIZE_DEBUG_UNSAFE")) != "1" {
+		log.Log.Warnf("[Agentize] 🔒 /agentize admin pages NOT registered — set AGENTIZE_ADMIN_USERNAME/PASSWORD (or SetAdminCredentials) to protect them, or AGENTIZE_DEBUG_UNSAFE=1 to expose them unauthenticated for local dev")
+		return
+	}
+	if !ag.adminAuthEnabled() {
+		log.Log.Warnf("[Agentize] ⚠️  AGENTIZE_DEBUG_UNSAFE=1 — /agentize admin pages are served UNAUTHENTICATED (intended for local dev only)")
+	}
+
 	if ag.rawFileLimiter == nil {
 		// Throttle raw user-file downloads to 10/min per IP (burst 10), guarding
 		// against bulk exfiltration by fileID enumeration even when authenticated.
 		ag.rawFileLimiter = newIPRateLimiter(10, 10)
 	}
 
-	// Always-open endpoints (no admin session required).
-	router.GET("/agentize/health", ag.handleHealth)
+	// Login endpoints (no admin session required, but only meaningful when auth is on).
 	router.GET(adminLoginPath, ag.handleLoginPage)
 	router.POST(adminLoginPath, ag.handleLoginSubmit)
 	router.GET("/agentize/logout", ag.handleLogout)
@@ -303,12 +319,23 @@ func (ag *Agentize) handleDebugReviewResolve(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "reviewID parameter is required"})
 		return
 	}
+	// Typed-confirmation guard (CSRF defense-in-depth on top of SameSite=Lax):
+	// the caller must echo the review id in ?confirm=, which a forged cross-site
+	// POST cannot supply (review ids are random). Matches the delete-data endpoint.
+	if c.Query("confirm") != reviewID {
+		log.Log.Warnf("[Agentize] [AUDIT] resolve-review REJECTED (confirmation mismatch) | review=%s ip=%s", reviewID, c.ClientIP())
+		metrics.AuditAction("resolve_review", "rejected")
+		c.JSON(400, gin.H{"error": "confirmation required: re-submit with ?confirm=<reviewID> matching the review"})
+		return
+	}
 	decision := c.PostForm("decision")
 	note := c.PostForm("note")
-	if decision == "" {
-		log.Log.Warnf("[Agentize] [AUDIT] resolve-review REJECTED (no decision) | review=%s ip=%s", reviewID, c.ClientIP())
+	// The dashboard only offers approve/reject; reject anything else so a tampered
+	// or forged form cannot drive an arbitrary decision.
+	if decision != "approve" && decision != "reject" {
+		log.Log.Warnf("[Agentize] [AUDIT] resolve-review REJECTED (bad decision %q) | review=%s ip=%s", decision, reviewID, c.ClientIP())
 		metrics.AuditAction("resolve_review", "rejected")
-		c.JSON(400, gin.H{"error": "decision is required"})
+		c.JSON(400, gin.H{"error": "decision must be \"approve\" or \"reject\""})
 		return
 	}
 

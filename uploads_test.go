@@ -104,6 +104,7 @@ func TestUserFileRecordingAndDashboard(t *testing.T) {
 	}
 
 	// The raw file-serve endpoint must return the stored bytes.
+	t.Setenv("AGENTIZE_DEBUG_UNSAFE", "1") // no creds in test: register dashboard in dev mode
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
 	ag.RegisterRoutes(router)

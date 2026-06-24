@@ -32,6 +32,9 @@ func TestDebugReviews_ListAndResolve(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create agentize: %v", err)
 	}
+	// No admin credentials in this test: opt into the unauthenticated dev mode so
+	// the dashboard routes register (safe-by-default otherwise skips them).
+	t.Setenv("AGENTIZE_DEBUG_UNSAFE", "1")
 
 	// Raise a review through the host API.
 	req := model.NewReviewRequest("plan_step", "plan-1/step-2")
@@ -57,9 +60,10 @@ func TestDebugReviews_ListAndResolve(t *testing.T) {
 		t.Fatalf("reviews page missing review %s or approve form", reviewID)
 	}
 
-	// POST the approve form — the dashboard's resolution path.
+	// POST the approve form — the dashboard's resolution path. The ?confirm=<id>
+	// typed-confirmation guard must be supplied (CSRF defense-in-depth).
 	post := httptest.NewRequest(http.MethodPost,
-		"/agentize/debug/reviews/"+reviewID+"/resolve",
+		"/agentize/debug/reviews/"+reviewID+"/resolve?confirm="+reviewID,
 		strings.NewReader("decision=approve&note=ship"))
 	post.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	rec2 := httptest.NewRecorder()
@@ -79,5 +83,51 @@ func TestDebugReviews_ListAndResolve(t *testing.T) {
 	// And it drops out of the pending list.
 	if pend, _ := ag.ListPendingReviews(context.Background(), ""); len(pend) != 0 {
 		t.Errorf("resolved review should not remain pending, got %d", len(pend))
+	}
+}
+
+// TestDebugReviews_ResolveGuards verifies the CSRF/typed-confirmation and
+// decision-whitelist guards on the resolve POST: a missing ?confirm or a
+// non-approve/reject decision is rejected and leaves the review pending.
+func TestDebugReviews_ResolveGuards(t *testing.T) {
+	knowledge := createTestKnowledgeTree(t)
+	defer os.RemoveAll(knowledge)
+	dbStore, err := store.NewDBStoreWithPath(filepath.Join(t.TempDir(), "s.db"))
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	ag, err := NewWithOptions(knowledge, &Options{SessionStore: dbStore, FileStoreDir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("agentize: %v", err)
+	}
+	t.Setenv("AGENTIZE_DEBUG_UNSAFE", "1")
+
+	req := model.NewReviewRequest("plan_step", "p/s")
+	req.UserID = "u1"
+	id, _ := ag.RequestReview(context.Background(), req)
+
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	ag.RegisterRoutes(router)
+
+	post := func(url, body string) int {
+		r := httptest.NewRequest(http.MethodPost, url, strings.NewReader(body))
+		r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, r)
+		return w.Code
+	}
+
+	// Missing ?confirm → 400 (CSRF guard).
+	if code := post("/agentize/debug/reviews/"+id+"/resolve", "decision=approve"); code != 400 {
+		t.Errorf("resolve without confirm should be 400, got %d", code)
+	}
+	// Bad decision (with confirm) → 400 (whitelist).
+	if code := post("/agentize/debug/reviews/"+id+"/resolve?confirm="+id, "decision=delete-everything"); code != 400 {
+		t.Errorf("bad decision should be 400, got %d", code)
+	}
+	// The review must still be pending after both rejected attempts.
+	if got, _ := ag.GetReviewStore().GetReviewRequest(id); got == nil || got.IsResolved() {
+		t.Errorf("review must stay pending after rejected resolves, got %+v", got)
 	}
 }

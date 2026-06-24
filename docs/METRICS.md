@@ -141,7 +141,19 @@ timed.
 
 Emitted alongside an `[AUDIT]` log line (user + client IP + outcome). `rejected`
 means the destructive POST was refused for failing the `?confirm=<userID>` typed
-confirmation. See `routes.go` (`handleDebugUserDeleteData`).
+confirmation. See `routes.go` (`handleDebugUserDeleteData`). Dashboard review
+resolutions also emit `audit_actions_total{action="resolve_review"}`.
+
+### Human-in-the-loop reviews
+
+| Metric | Type | Labels |
+|--------|------|--------|
+| `reviews_total` | counter | `kind` (plan_step/tool_call/payment/custom), `decision` (approved/rejected/expired/canceled) |
+| `reviews_pending` | gauge | — number of unresolved reviews |
+
+`reviews_total` counts every resolved review regardless of which frontend made the
+decision; `reviews_pending` is refreshed on request/resolve and on the dashboard
+list. See [REVIEWS.md](REVIEWS.md).
 
 ### User files (file manager)
 | Metric | Type | Labels |
