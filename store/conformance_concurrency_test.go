@@ -64,6 +64,10 @@ func testConcurrentDeleteUserDataAndPut(t *testing.T, st Store) {
 				}
 				m := model.NewUserMessage(s.SessionID+"-m0001", 1, "user-race", s.SessionID, "hi", model.ContentTypeText)
 				_ = st.PutMessage(m)
+				// A tool call too: its parent table is cleaned by user_id, not by a
+				// pre-fetched session list, so a session created mid-delete cannot
+				// leave its tool calls orphaned (the S6 backend-parity fix).
+				_ = st.PutToolCall(newToolCall(s, s.SessionID+"-t0001", "call_"+s.SessionID, "do"))
 			}
 		}(w)
 	}
@@ -87,5 +91,18 @@ func testConcurrentDeleteUserDataAndPut(t *testing.T, st Store) {
 	}
 	if msgs, _ := st.GetMessagesByUser("user-race"); len(msgs) != 0 {
 		t.Errorf("messages remain after final DeleteUserData: %d", len(msgs))
+	}
+	// No child rows may dangle once the user is wiped. The final wipe runs with
+	// an empty session list (all sessions already gone), so tool calls created
+	// for a session born during the race are reachable only via their user_id —
+	// which is exactly what the S6 fix deletes by. Verify catches any orphan.
+	if m, ok := st.(Maintainer); ok {
+		issues, err := m.Verify()
+		if err != nil {
+			t.Fatalf("Verify after wipe: %v", err)
+		}
+		for _, is := range issues {
+			t.Errorf("orphan after DeleteUserData: %s id=%s (%s)", is.Type, is.ID, is.Detail)
+		}
 	}
 }

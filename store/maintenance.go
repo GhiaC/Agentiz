@@ -12,6 +12,12 @@ import (
 	"github.com/ghiac/agentize/metrics"
 )
 
+// auditDeletionHook, when non-nil, is invoked by auditDeletion in addition to
+// the log line and metric. It is a test seam (the Prometheus counter is
+// unexported and log scraping is brittle) so the conformance suite can assert
+// every delete path audits on every backend. Production leaves it nil.
+var auditDeletionHook func(entity, id, userID string)
+
 // auditDeletion records every destructive store operation for compliance and
 // forensics: a structured log line plus the agentize_store_deletions_total
 // metric. entity is the kind of record ("session", "user_data", "user_file"),
@@ -19,6 +25,9 @@ import (
 func auditDeletion(entity, id, userID string) {
 	log.Log.Infof("store: audit: deleted %s id=%s user=%s at=%s", entity, id, userID, time.Now().Format(time.RFC3339))
 	metrics.RecordStoreDeletion(entity)
+	if auditDeletionHook != nil {
+		auditDeletionHook(entity, id, userID)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -53,8 +62,9 @@ func (s *SQLiteStore) Backup(w io.Writer) error {
 }
 
 // Verify scans for orphaned child rows (messages, tool calls, opened files,
-// user files, route traces whose session no longer exists). Implements
-// Maintainer. Intended for the debug dashboard and operational checks.
+// user files, route traces, summarization logs whose session/user no longer
+// exists). Implements Maintainer. Intended for the debug dashboard and
+// operational checks.
 func (s *SQLiteStore) Verify() ([]Issue, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -79,6 +89,9 @@ func (s *SQLiteStore) Verify() ([]Issue, error) {
 		{"orphaned_route_trace",
 			`SELECT trace_id FROM route_traces WHERE session_id NOT IN (SELECT session_id FROM sessions)`,
 			"route trace references a session that no longer exists"},
+		{"orphaned_summarization_log",
+			`SELECT log_id FROM summarization_logs WHERE session_id NOT IN (SELECT session_id FROM sessions)`,
+			"summarization log references a session that no longer exists"},
 	}
 
 	var issues []Issue

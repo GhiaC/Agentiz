@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -231,5 +232,125 @@ func testMaintainer(t *testing.T, st Store) {
 		// Documented MongoDB behavior: use mongodump.
 	default:
 		t.Errorf("Backup: unexpected error %v", err)
+	}
+}
+
+// testVerifyDetectsOrphans deletes a session row (Delete does not cascade) and
+// asserts Verify reports each session-scoped child it orphaned — including
+// summarization logs, which the orphan scan previously omitted on both backends.
+func testVerifyDetectsOrphans(t *testing.T, st Store) {
+	m, ok := st.(Maintainer)
+	if !ok {
+		t.Fatalf("backend %T does not implement Maintainer", st)
+	}
+	s := newSession("user-1", model.AgentTypeLow)
+	mustPutSession(t, st, s)
+	putNMessages(t, st, s, 1)
+	if err := st.PutToolCall(newToolCall(s, s.SessionID+"-t0001", "call_x", "do")); err != nil {
+		t.Fatalf("PutToolCall: %v", err)
+	}
+	if err := st.PutSummarizationLog(model.NewSummarizationLog(s)); err != nil {
+		t.Fatalf("PutSummarizationLog: %v", err)
+	}
+
+	if err := st.Delete(s.SessionID); err != nil {
+		t.Fatalf("Delete session: %v", err)
+	}
+
+	issues, err := m.Verify()
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	found := map[string]bool{}
+	for _, is := range issues {
+		found[is.Type] = true
+	}
+	for _, want := range []string{"orphaned_message", "orphaned_tool_call", "orphaned_summarization_log"} {
+		if !found[want] {
+			t.Errorf("Verify did not detect %s (issues: %+v)", want, issues)
+		}
+	}
+}
+
+// testMessageSeqRestore guards the MessageSeq-restoration path (SQLite MAX,
+// Mongo sort+limit FindOne — S16): on reload, a session's MessageSeq must be
+// raised to the highest stored seq_id so a restart never reuses a message ID.
+func testMessageSeqRestore(t *testing.T, st Store) {
+	// DBStore serves the warm-cached session object (whose MessageSeq is the
+	// in-process source of truth and is incremented as messages are added). The
+	// store-side restoration is a cold-load reconciliation that DBStore performs
+	// only on a cache miss (delegating to the raw SQLiteStore). This test writes
+	// messages out of band, so it exercises the raw backends — SQLiteStore and
+	// MongoDBStore — which is exactly where getMaxSeqIDForSession lives.
+	if _, cached := st.(*DBStore); cached {
+		t.Skip("DBStore serves the warm-cached session; restoration is a cold-load behavior of the raw backends")
+	}
+	// Regular session via Get.
+	s := newSession("user-1", model.AgentTypeLow)
+	mustPutSession(t, st, s)
+	putNMessages(t, st, s, 3) // seq_ids 1..3
+	got, err := st.Get(s.SessionID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.MessageSeq != 3 {
+		t.Errorf("regular session MessageSeq = %d, want 3 (restored from max seq_id)", got.MessageSeq)
+	}
+
+	// Core session via GetCoreSession (a separate restoration call site).
+	cs := newSession("user-2", model.AgentTypeCore)
+	mustPutSession(t, st, cs)
+	putNMessages(t, st, cs, 4) // seq_ids 1..4
+	gotCore, err := st.GetCoreSession("user-2")
+	if err != nil {
+		t.Fatalf("GetCoreSession: %v", err)
+	}
+	if gotCore.MessageSeq != 4 {
+		t.Errorf("core session MessageSeq = %d, want 4", gotCore.MessageSeq)
+	}
+}
+
+// testDeletionAudit asserts every delete path records an audit entry (S20) on
+// every backend, via the auditDeletionHook test seam (the Prometheus counter is
+// unexported and log scraping is brittle).
+func testDeletionAudit(t *testing.T, st Store) {
+	var mu sync.Mutex
+	var got []string
+	auditDeletionHook = func(entity, _, _ string) {
+		mu.Lock()
+		got = append(got, entity)
+		mu.Unlock()
+	}
+	defer func() { auditDeletionHook = nil }()
+
+	s := newSession("user-1", model.AgentTypeLow)
+	mustPutSession(t, st, s)
+	if err := st.Delete(s.SessionID); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	uf := &model.UserFile{FileID: "uf-1", UserID: "user-1", SessionID: s.SessionID, StorageKey: "user-1/uf-1", Name: "f", CreatedAt: time.Now()}
+	if err := st.PutUserFile(uf); err != nil {
+		t.Fatalf("PutUserFile: %v", err)
+	}
+	if err := st.DeleteUserFile("uf-1"); err != nil {
+		t.Fatalf("DeleteUserFile: %v", err)
+	}
+	if err := st.DeleteUserData("user-1"); err != nil {
+		t.Fatalf("DeleteUserData: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	want := map[string]bool{"session": false, "user_file": false, "user_data": false}
+	for _, e := range got {
+		if _, ok := want[e]; ok {
+			want[e] = true
+		}
+	}
+	for e, seen := range want {
+		if !seen {
+			t.Errorf("delete path did not audit %q (got %v)", e, got)
+		}
 	}
 }

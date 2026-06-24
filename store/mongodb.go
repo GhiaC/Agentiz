@@ -683,18 +683,28 @@ func (s *MongoDBStore) DeleteUserData(userID string) error {
 		return fmt.Errorf("failed to delete route_traces: %w", err)
 	}
 
-	// Delete tool_calls and summarization_logs by session_id (these don't have user_id at top level)
+	// Delete tool_calls, summarization_logs and opened_files. These now carry a
+	// top-level user_id (like SQLite), so delete by user_id — which, unlike the
+	// previous session-id-in-list approach, also catches children of a session
+	// created concurrently during the delete (the S6 race). The session_id
+	// branch is kept so documents written before this field existed are still
+	// cleaned up; the $or is a strict superset of the old filter, so it can never
+	// delete less than before.
+	childFilter := bson.M{"$or": []bson.M{{"user_id": userID}}}
 	if len(sessionIDs) > 0 {
-		sessionFilter := bson.M{"session_id": bson.M{"$in": sessionIDs}}
-		if _, err := s.toolCallsCollection.DeleteMany(ctx, sessionFilter); err != nil {
-			return fmt.Errorf("failed to delete tool_calls: %w", err)
-		}
-		if _, err := s.summarizationLogsCollection.DeleteMany(ctx, sessionFilter); err != nil {
-			return fmt.Errorf("failed to delete summarization_logs: %w", err)
-		}
-		if _, err := s.openedFilesCollection.DeleteMany(ctx, sessionFilter); err != nil {
-			return fmt.Errorf("failed to delete opened_files: %w", err)
-		}
+		childFilter = bson.M{"$or": []bson.M{
+			{"user_id": userID},
+			{"session_id": bson.M{"$in": sessionIDs}},
+		}}
+	}
+	if _, err := s.toolCallsCollection.DeleteMany(ctx, childFilter); err != nil {
+		return fmt.Errorf("failed to delete tool_calls: %w", err)
+	}
+	if _, err := s.summarizationLogsCollection.DeleteMany(ctx, childFilter); err != nil {
+		return fmt.Errorf("failed to delete summarization_logs: %w", err)
+	}
+	if _, err := s.openedFilesCollection.DeleteMany(ctx, childFilter); err != nil {
+		return fmt.Errorf("failed to delete opened_files: %w", err)
 	}
 
 	// Delete sessions
@@ -1526,6 +1536,7 @@ func (s *MongoDBStore) GetAllMessages() ([]*model.Message, error) {
 type openedFileDocument struct {
 	ID        string    `bson:"_id"`
 	SessionID string    `bson:"session_id"`
+	UserID    string    `bson:"user_id"` // aligns with SQLite; lets DeleteUserData/Verify filter by user
 	FilePath  string    `bson:"file_path"`
 	Data      string    `bson:"data"` // JSON serialized OpenedFile
 	OpenedAt  time.Time `bson:"opened_at"`
@@ -1550,6 +1561,7 @@ func (s *MongoDBStore) AddOpenedFile(openedFile *model.OpenedFile) error {
 	doc := openedFileDocument{
 		ID:        id,
 		SessionID: openedFile.SessionID,
+		UserID:    openedFile.UserID,
 		FilePath:  openedFile.FilePath,
 		Data:      string(data),
 		OpenedAt:  openedFile.OpenedAt,
@@ -1887,7 +1899,8 @@ type toolCallDocument struct {
 	ToolCallID string    `bson:"tool_call_id"` // LLM's ID (from OpenAI)
 	ToolID     string    `bson:"tool_id"`      // same as _id, kept for backward compatibility
 	SessionID  string    `bson:"session_id"`
-	Data       string    `bson:"data"` // JSON serialized ToolCall
+	UserID     string    `bson:"user_id"` // aligns with SQLite; lets DeleteUserData/Verify filter by user
+	Data       string    `bson:"data"`    // JSON serialized ToolCall
 	CreatedAt  time.Time `bson:"created_at"`
 }
 
@@ -1910,6 +1923,7 @@ func (s *MongoDBStore) PutToolCall(toolCall *model.ToolCall) error {
 		ToolCallID: toolCall.ToolCallID,
 		ToolID:     toolCall.ToolID,
 		SessionID:  toolCall.SessionID,
+		UserID:     toolCall.UserID,
 		Data:       string(data),
 		CreatedAt:  toolCall.CreatedAt,
 	}
@@ -2087,7 +2101,8 @@ func (s *MongoDBStore) UpdateToolCallResponse(toolID string, response string, ex
 type summarizationLogDocument struct {
 	ID        string    `bson:"_id"`
 	SessionID string    `bson:"session_id"`
-	Data      string    `bson:"data"` // JSON serialized SummarizationLog
+	UserID    string    `bson:"user_id"` // aligns with SQLite; lets DeleteUserData/Verify filter by user
+	Data      string    `bson:"data"`    // JSON serialized SummarizationLog
 	CreatedAt time.Time `bson:"created_at"`
 }
 
@@ -2111,6 +2126,7 @@ func (s *MongoDBStore) PutSummarizationLog(log *model.SummarizationLog) error {
 	doc := summarizationLogDocument{
 		ID:        id,
 		SessionID: log.SessionID,
+		UserID:    log.UserID,
 		Data:      string(data),
 		CreatedAt: log.CreatedAt,
 	}
@@ -2309,8 +2325,9 @@ func (s *MongoDBStore) Backup(w io.Writer) error {
 }
 
 // Verify scans for orphaned child documents (messages, tool calls, opened
-// files, route traces whose session is gone; user files whose user is gone).
-// Implements Maintainer. Intended for the debug dashboard and operational checks.
+// files, route traces, summarization logs whose session is gone; user files
+// whose user is gone). Implements Maintainer. Intended for the debug dashboard
+// and operational checks.
 func (s *MongoDBStore) Verify() ([]Issue, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*s.opTimeout)
 	defer cancel()
@@ -2355,6 +2372,7 @@ func (s *MongoDBStore) Verify() ([]Issue, error) {
 		{s.toolCallsCollection, "session_id", sessionIDs, "orphaned_tool_call", "tool call references a session that no longer exists"},
 		{s.openedFilesCollection, "session_id", sessionIDs, "orphaned_opened_file", "opened file references a session that no longer exists"},
 		{s.routeTracesCollection, "session_id", sessionIDs, "orphaned_route_trace", "route trace references a session that no longer exists"},
+		{s.summarizationLogsCollection, "session_id", sessionIDs, "orphaned_summarization_log", "summarization log references a session that no longer exists"},
 		{s.userFilesCollection, "user_id", userIDs, "orphaned_user_file", "user file references a user that no longer exists"},
 	}
 	for _, c := range checks {
