@@ -667,14 +667,20 @@ func (e *Engine) processOneMessageBody(ctx context.Context, sessionID string, us
 		})
 		session.UpdatedAt = time.Now()
 
+		// Generate the user-message ID BEFORE persisting the session, so the
+		// bumped MessageSeq is included in the Put below. Otherwise the next
+		// reload (processChatRequest) re-reads the pre-increment seq and the
+		// assistant message gets the SAME MessageID, whose upsert/INSERT OR
+		// REPLACE then overwrites this user-message row.
+		userMsgID, userSeqID := session.GenerateMessageIDWithSeq()
+		userMsg := model.NewUserMessage(userMsgID, userSeqID, session.UserID, sessionID, userMessage, model.ContentTypeText)
+
 		// Save session
 		if err := e.Sessions.Put(session); err != nil {
 			return "", 0, fmt.Errorf("failed to save session: %w", err)
 		}
 
 		// Save user message to messages table
-		userMsgID, userSeqID := session.GenerateMessageIDWithSeq()
-		userMsg := model.NewUserMessage(userMsgID, userSeqID, session.UserID, sessionID, userMessage, model.ContentTypeText)
 		if err := e.Sessions.PutMessage(userMsg); err != nil {
 			log.Log.Warnf("[Engine] ⚠️  Failed to save user message | Error: %v", err)
 		}
