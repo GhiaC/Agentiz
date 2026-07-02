@@ -591,6 +591,41 @@ func TestChangeSession_Tool(t *testing.T) {
 	}
 }
 
+// TestChangeSession_CrossUserDenied verifies a user cannot switch into another
+// user's session by supplying its id. Session ids are formatted
+// {userID}-{agentType}-s{seq} and thus guessable, so this is a real attack.
+func TestChangeSession_CrossUserDenied(t *testing.T) {
+	ch, mockStore := newTestCoreHandlerWithMockStore(t, []string{"researcher"})
+	ctx := context.Background()
+
+	// Victim creates a session.
+	victim, _ := ch.sessionHandler.CreateSession("victim", model.AgentType("researcher"))
+	if victim == nil {
+		t.Fatal("CreateSession failed")
+	}
+	victim.Title = "Victim private session"
+	_ = mockStore.Put(victim)
+	_, _ = mockStore.GetOrCreateUser("victim")
+	_, _ = mockStore.GetOrCreateUser("attacker")
+
+	// Attacker tries to switch into the victim's session by its id.
+	result, err := ch.changeSessionTool(ctx, "attacker", map[string]interface{}{
+		"agent_name": "researcher",
+		"session_id": victim.SessionID,
+	})
+	if err == nil {
+		t.Fatalf("SECURITY: attacker switched into victim's session, got %q", result)
+	}
+	if strings.Contains(result, "Victim") {
+		t.Fatalf("SECURITY: leaked victim session title: %q", result)
+	}
+
+	// Defense in depth: even a direct setActiveSessionID must refuse the foreign id.
+	if err := ch.setActiveSessionID("attacker", model.AgentType("researcher"), victim.SessionID); err == nil {
+		t.Fatal("SECURITY: setActiveSessionID accepted a foreign session")
+	}
+}
+
 // TestBanUser_Tool verifies ban_user sets user ban state.
 func TestBanUser_Tool(t *testing.T) {
 	ch, mockStore := newTestCoreHandlerWithMockStore(t, []string{"researcher"})

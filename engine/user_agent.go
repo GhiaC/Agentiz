@@ -929,6 +929,13 @@ func (e *Engine) GetTools(session *model.Session) []openai.Tool {
 	if e.Files != nil {
 		tools = append(tools, ManageFilesToolDefinition())
 	}
+
+	// Expose the result-inspection tools whenever a session store is configured.
+	// They let the agent pull back specific parts of oversized tool results that
+	// were buffered on its session (see processToolResult / text_tools.go).
+	if e.Sessions != nil {
+		tools = append(tools, CollectResultToolDefinition(), InspectResultToolDefinition())
+	}
 	return tools
 }
 
@@ -1041,12 +1048,22 @@ func (e *Engine) processToolResult(session *model.Session, result string) string
 	resultID := generateResultID(session.SessionID)
 	session.ToolResults[resultID] = result
 
-	return fmt.Sprintf("Tool result exceeds %d characters (exact: %d characters). To retrieve specific information from this result, use the `collect_result` tool with result_id=\"%s\" and specify what information you need.",
+	return fmt.Sprintf("Tool result exceeds %d characters (exact: %d characters). "+
+		"The full output is buffered privately for you under result_id=\"%s\" (only you can access it). Retrieve what you need with:\n"+
+		"- `inspect_result` (no LLM, fast): action=stats to size it, then head/tail (default 30 lines), slice (start/end line range), grep (regex, with ignore_case/invert/context/max_matches), unique, sort (desc/numeric), or count (matches of a query, or per-line frequency).\n"+
+		"- `collect_result` (LLM extraction): pass a 'query' describing the specific information you need.",
 		maxLen, len(result), resultID)
 }
 
 // CollectResultByID uses a separate LLM to extract specific information from a stored tool result
-// It extracts sessionID from the resultID automatically
+// It extracts sessionID from the resultID automatically.
+//
+// Deprecated (security): this trusts the sessionID embedded in a caller-supplied
+// resultID, so it must NOT be used to dispatch a model's collect_result call —
+// a model could pass a foreign result_id to read another user's buffer. The
+// model-facing tool is registered via RegisterTextTools and enforces per-user
+// ownership through getOwnedToolResult. Retained only for internal/host callers
+// that already trust the resultID.
 func (e *Engine) CollectResultByID(ctx context.Context, resultID string, query string) (string, error) {
 	// Extract sessionID from resultID
 	sessionID, ok := parseResultID(resultID)
@@ -1056,7 +1073,10 @@ func (e *Engine) CollectResultByID(ctx context.Context, resultID string, query s
 	return e.CollectResult(ctx, sessionID, resultID, query)
 }
 
-// CollectResult uses a separate LLM to extract specific information from a stored tool result
+// CollectResult uses a separate LLM to extract specific information from a stored
+// tool result. It trusts the caller-supplied sessionID (caller-controlled, not
+// model-controlled). For the model-facing tool path use collectResultFunction,
+// which enforces per-user ownership via getOwnedToolResult before extraction.
 func (e *Engine) CollectResult(ctx context.Context, sessionID string, resultID string, query string) (string, error) {
 	// Get the stored result
 	fullResult, ok := e.GetToolResult(sessionID, resultID)
@@ -1064,6 +1084,24 @@ func (e *Engine) CollectResult(ctx context.Context, sessionID string, resultID s
 		return "", fmt.Errorf("result with ID '%s' not found in session '%s'", resultID, sessionID)
 	}
 
+	// Get userID from session and add to context for LLM call
+	session, err := e.Sessions.Get(sessionID)
+	if err != nil {
+		return "", fmt.Errorf("failed to get session: %w", err)
+	}
+	if session.UserID != "" {
+		ctx = model.WithUserID(ctx, session.UserID)
+	} else {
+		log.Log.Warnf("[Engine] ⚠️  Session has no UserID | SessionID: %s", sessionID)
+	}
+
+	return e.extractFromResult(ctx, fullResult, query)
+}
+
+// extractFromResult runs the helper-LLM extraction over an already-retrieved
+// (ownership-checked) result. Callers are responsible for access control and
+// for putting the owning userID on ctx (for metering).
+func (e *Engine) extractFromResult(ctx context.Context, fullResult string, query string) (string, error) {
 	// Determine which model to use
 	modelName := e.llmConfig.CollectResultModel
 	if modelName == "" {
@@ -1091,17 +1129,6 @@ Your response must not exceed %d characters.`, maxLen)
 	Query: %s
 
 	Extract the relevant information from the data that answers the query:`, fullResult, query)
-
-	// Get userID from session and add to context for LLM call
-	session, err := e.Sessions.Get(sessionID)
-	if err != nil {
-		return "", fmt.Errorf("failed to get session: %w", err)
-	}
-	if session.UserID != "" {
-		ctx = model.WithUserID(ctx, session.UserID)
-	} else {
-		log.Log.Warnf("[Engine] ⚠️  Session has no UserID | SessionID: %s", sessionID)
-	}
 
 	// Make LLM call (tries backup provider first, then falls back to OpenAI)
 	msgs := []openai.ChatCompletionMessage{
@@ -1560,10 +1587,13 @@ func (e *Engine) executeTool(
 	// Process result (truncate if needed). Pass the live session so an oversized
 	// result is stored on it and persisted by the caller's single Put(session);
 	// see processToolResult for why a clone must not be used here.
+	// collect_result / inspect_result already return bounded output derived from
+	// an existing buffer; re-buffering would just create a truncation loop.
 	var processedResult string
-	if toolCall.Function.Name == "collect_result" {
+	switch toolCall.Function.Name {
+	case "collect_result", "inspect_result":
 		processedResult = result
-	} else {
+	default:
 		processedResult = e.processToolResult(session, result)
 	}
 

@@ -18,7 +18,44 @@ API, security & observability hardening (improvement roadmap
   the live session the loop persists. Affected every tool whose output exceeded
   `MaxToolResultLength`.
 
+### Added
+- **`inspect_result` tool — deterministic inspection of buffered tool output.**
+  When a tool result exceeds `MaxToolResultLength` it is buffered under a
+  `result_id`; `inspect_result` pulls back parts of it without an LLM via
+  `stats`, `head`/`tail` (default 30 lines), `slice` (line range), `grep`
+  (regex with `ignore_case`/`invert`/`context`/`max_matches`), `unique`,
+  `sort` (`desc`/`numeric`), and `count` (matches of a pattern like `grep -c`,
+  or per-line frequency like `sort | uniq -c`). Output is capped
+  (`maxInspectResultChars`) and truncated on a rune boundary. Complements
+  `collect_result` (LLM-backed semantic extraction). Both are now exposed
+  automatically by `GetTools`, registered by `Engine.RegisterTextTools()`, and
+  documented in `engine/user_agent.md` and the truncation notice itself.
+
 ### Security
+- **`change_session` cross-user session takeover fixed.** The core `change_session`
+  tool accepted a model-supplied `session_id`, verified only its agent type, and
+  set it as the caller's active session — with no ownership check. Because
+  session ids are formatted `{userID}-{agentType}-s{seq}` (guessable), an agent
+  acting for one user could switch into another user's session, loading the
+  victim's history into its context and routing the caller's messages into the
+  victim's session. `changeSessionTool` now rejects sessions whose `UserID`
+  differs from the caller (reported as "not found" to avoid existence leaks).
+  Defense in depth: `setActiveSessionID` refuses to persist a foreign session,
+  and `getOrCreateActiveSession` discards a stored active-session pointer that is
+  not owned by the user instead of processing against it.
+- **File ownership check tightened.** `getOwnedFileMeta` previously skipped the
+  ownership comparison entirely when the caller's user id was empty
+  (`userID != "" && meta.UserID != userID`), so a request arriving without a
+  user id could read any file by id. It now requires exact `meta.UserID == userID`
+  (both empty in single-tenant/no-auth setups, so legitimate reads are unaffected).
+- **Per-user isolation of buffered tool output.** `collect_result` and
+  `inspect_result` retrieve results only through `getOwnedToolResult`, which
+  binds access to the caller's own `__user_id__`/`__session_id__` (injected by
+  the engine, not model-controllable) and rejects any `result_id` whose owning
+  session or user does not match. A model can no longer read, search, or
+  summarize another user's buffered output by passing a foreign `result_id`.
+  `CollectResultByID` (which trusts the id-embedded session) is deprecated for
+  model-facing dispatch.
 - **Raw user-file downloads are rate limited** to 10 requests/min per IP
   (burst 10), in addition to the existing admin auth, to blunt bulk exfiltration
   by `fileID` enumeration. `GET /agentize/debug/documents/:fileID/raw`.

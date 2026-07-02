@@ -531,6 +531,16 @@ func (ch *CoreHandler) changeSessionTool(_ context.Context, userID string, args 
 		return "", fmt.Errorf("session not found: %s", sessionID)
 	}
 
+	// SECURITY: the session_id is model-supplied and session IDs are formatted
+	// {userID}-{agentType}-s{seq}, so a foreign id is guessable. A user may only
+	// switch into their OWN sessions — otherwise change_session would load
+	// another user's history into this user's context (and route this user's
+	// messages into the victim's session). Report "not found" to avoid leaking
+	// that the session exists for someone else.
+	if session.UserID != userID {
+		return "", fmt.Errorf("session not found: %s", sessionID)
+	}
+
 	if session.AgentType != agent.Config.AgentType {
 		return "", fmt.Errorf("session %s is not a %s session (it's a %s session)", sessionID, agentName, session.AgentType)
 	}

@@ -32,7 +32,23 @@ root/
 
 - Tools defined in `tools.json` per node
 - All tools from opened nodes are available
-- Use `collect_result` when output exceeds limit (you get `result_id`)
+
+### Large tool outputs
+
+When a tool's output is too large it is **not** returned to you whole — the full
+text is buffered **privately for you** under a `result_id` and you get a short
+notice with that id. The buffer belongs to you alone; you can only ever inspect
+your own results, never another user's. Pull back just what you need with:
+
+- **`inspect_result`** — deterministic, no-LLM, fast/free. Give it the `result_id` and an `action`:
+  - `stats` — line count, char count, first-line preview (call this first to size the output)
+  - `head` / `tail` — first/last N lines (`lines`, default 30)
+  - `slice` — a line range (`start`..`end`, 1-based inclusive) — see only the lines you need
+  - `grep` — lines matching `query` (regex; literal fallback), with `ignore_case`, `invert`, `context` (surrounding lines), and `max_matches`
+  - `unique` — distinct lines (first-occurrence order)
+  - `sort` — sorted lines (`desc` to reverse, `numeric` to sort by a leading number)
+  - `count` — with `query`: how many lines match (like `grep -c`); without `query`: how often each distinct line occurs, most frequent first (like `sort | uniq -c`)
+- **`collect_result`** — LLM-backed extraction: give it the `result_id` and a `query` describing the specific information you want. Prefer `inspect_result` for slicing/searching; use `collect_result` when you need semantic extraction or summarization.
 
 ---
 

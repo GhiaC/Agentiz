@@ -207,6 +207,11 @@ func NewWithOptions(path string, opts *Options) (*Agentize, error) {
 	// Register the file-manager tool (manage_files) so the agent can use files.
 	eng.RegisterManageFilesTool()
 
+	// Register the result-inspection tools (collect_result, inspect_result) so the
+	// agent can pull back parts of oversized tool results. These enforce per-user
+	// ownership of buffered output, so they replace any host-provided variants.
+	eng.RegisterTextTools()
+
 	// Create Agentize instance
 	ag := &Agentize{
 		engine: eng,

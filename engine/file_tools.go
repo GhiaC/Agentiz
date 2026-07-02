@@ -631,7 +631,13 @@ func (e *Engine) getOwnedFileMeta(userID, fileID string) (*model.UserFile, strin
 	if meta == nil {
 		return nil, fmt.Sprintf("File not found: %s", fileID)
 	}
-	if userID != "" && meta.UserID != userID {
+	// Strict ownership: the file's owner must exactly equal the caller. Both are
+	// derived from session.UserID (file owner set at RecordUserFile, caller
+	// injected by executeTool), so a legitimate owner always matches — including
+	// the single-tenant/no-auth case where both are "". A blanket `userID != ""`
+	// escape hatch is intentionally NOT used: it would let a request that arrives
+	// with an empty user id read ANY user's file by id.
+	if meta.UserID != userID {
 		return nil, "Error: this file does not belong to you."
 	}
 	return meta, ""

@@ -182,6 +182,13 @@ func (ch *CoreHandler) setActiveSessionID(userID string, agentType model.AgentTy
 		if err != nil || session == nil {
 			return fmt.Errorf("session not found in database: %s", sessionID)
 		}
+		// SECURITY (defense in depth): never make a session that belongs to a
+		// different user the active session for this user. Callers should already
+		// verify ownership, but this is the last gate before the id is persisted
+		// and later handed to ProcessMessage.
+		if session.UserID != userID {
+			return fmt.Errorf("session not found in database: %s", sessionID)
+		}
 	}
 
 	user, err := ch.getOrCreateUser(userID)
@@ -206,10 +213,14 @@ func (ch *CoreHandler) getOrCreateActiveSession(userID string, agentType model.A
 	sessionID := ch.getActiveSessionID(userID, agentType)
 	if sessionID != "" {
 		session, err := ch.sessionHandler.GetSession(sessionID)
-		if err == nil && session != nil {
+		// SECURITY (defense in depth): only reuse the stored active session if it
+		// still exists AND belongs to this user. A mismatch (e.g. from a stale or
+		// tampered active-session pointer) is discarded and a fresh session is
+		// created rather than processing against another user's session.
+		if err == nil && session != nil && session.UserID == userID {
 			return sessionID, nil
 		}
-		log.Log.Warnf("[CoreHandler] ⚠️  Active session no longer exists, creating new | UserID: %s | AgentType: %s",
+		log.Log.Warnf("[CoreHandler] ⚠️  Active session missing or not owned, creating new | UserID: %s | AgentType: %s",
 			userID, agentType)
 	}
 
