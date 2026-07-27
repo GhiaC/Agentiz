@@ -144,6 +144,7 @@ func TestStoreConformance(t *testing.T) {
 			run("PutMessagesBatch", testPutMessagesBatch)
 			run("Quotas", testQuotas)
 			run("Reviews", testReviews)
+			run("TaskSchedules", testTaskSchedules)
 			run("Maintainer", testMaintainer)
 			run("VerifyDetectsOrphans", testVerifyDetectsOrphans)
 			run("MessageSeqRestore", testMessageSeqRestore)
@@ -637,6 +638,23 @@ func testDeleteUserData(t *testing.T, st Store) {
 	if err := st.PutRouteTrace(tr); err != nil {
 		t.Fatalf("PutRouteTrace: %v", err)
 	}
+	now := time.Now()
+	schedule := &model.TaskSchedule{
+		ScheduleID: "sch-user-del", UserID: "user-del", SessionID: s.SessionID,
+		AgentType: s.AgentType, Name: "delete me", Prompt: "work",
+		IntervalSeconds: 60, Status: model.TaskScheduleActive,
+		NextRunAt: now.Add(time.Minute), CreatedAt: now, UpdatedAt: now,
+	}
+	if err := st.PutTaskSchedule(schedule); err != nil {
+		t.Fatalf("PutTaskSchedule: %v", err)
+	}
+	if err := st.PutTaskScheduleRun(&model.TaskScheduleRun{
+		RunID: "run-user-del", ScheduleID: schedule.ScheduleID,
+		UserID: "user-del", SessionID: s.SessionID,
+		Status: model.TaskRunSucceeded, StartedAt: now, CompletedAt: now,
+	}); err != nil {
+		t.Fatalf("PutTaskScheduleRun: %v", err)
+	}
 
 	if err := st.DeleteUserData("user-del"); err != nil {
 		t.Fatalf("DeleteUserData: %v", err)
@@ -653,6 +671,12 @@ func testDeleteUserData(t *testing.T, st Store) {
 	}
 	if traces, _ := st.GetRouteTracesByUser("user-del"); len(traces) != 0 {
 		t.Errorf("route traces remain after DeleteUserData: %d", len(traces))
+	}
+	if schedules, _ := st.ListTaskSchedules("user-del"); len(schedules) != 0 {
+		t.Errorf("task schedules remain after DeleteUserData: %d", len(schedules))
+	}
+	if runs, _ := st.ListTaskScheduleRuns(schedule.ScheduleID, 10); len(runs) != 0 {
+		t.Errorf("task schedule runs remain after DeleteUserData: %d", len(runs))
 	}
 }
 

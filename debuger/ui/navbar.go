@@ -37,6 +37,7 @@ func DefaultNavItems() []NavItem {
 		{"/agentize/debug/users", "👤", "Users"},
 		{"/agentize/debug/sessions", "📋", "Sessions"},
 		{"/agentize/debug/plans", "📑", "Plans"},
+		{"/agentize/debug/schedules", "⏱️", "Scheduler"},
 		{"/agentize/debug/messages", "💬", "Messages"},
 		{"/agentize/debug/files", "📁", "Files"},
 		{"/agentize/debug/documents", "📄", "Documents"},

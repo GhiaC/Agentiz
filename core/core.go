@@ -152,6 +152,8 @@ type CoreHandler struct {
 	config CoreHandlerConfig
 
 	coreTools *model.FunctionRegistry
+	// Persistent recurring-task scheduler scoped to Core sessions.
+	taskScheduler *engine.TaskScheduler
 
 	userModeration *engine.UserModeration
 
@@ -202,6 +204,7 @@ func NewCoreHandler(
 	}
 
 	ch.registerCoreTools()
+	ch.initializeTaskScheduler()
 
 	return ch
 }
@@ -276,6 +279,9 @@ func (ch *CoreHandler) UseLLMConfig(config engine.LLMConfig) error {
 	if ch.orchestrator != nil {
 		ch.orchestrator.SetLLMClient(ch.llmClient, ch.config.CoreModel)
 	}
+	if ch.taskScheduler != nil {
+		ch.taskScheduler.Start(context.Background())
+	}
 
 	return nil
 }
@@ -310,6 +316,32 @@ func (ch *CoreHandler) ProcessMessageWithContentType(
 	userMu := ch.getUserMutex(userID)
 	userMu.Lock()
 	defer userMu.Unlock()
+	return ch.processMessageLocked(ctx, userID, userMessage, contentType)
+}
+
+// ProcessScheduledMessage waits for the user's foreground Core turn and returns
+// the actual scheduled-task output instead of the normal queued acknowledgement.
+func (ch *CoreHandler) ProcessScheduledMessage(
+	ctx context.Context,
+	userID string,
+	userMessage string,
+) (string, error) {
+	userMu := ch.getUserMutex(userID)
+	userMu.Lock()
+	defer userMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	return ch.processMessageLocked(ctx, userID, userMessage, model.ContentTypeText)
+}
+
+// processMessageLocked processes one Core turn. Caller holds the user mutex.
+func (ch *CoreHandler) processMessageLocked(
+	ctx context.Context,
+	userID string,
+	userMessage string,
+	contentType model.ContentType,
+) (string, error) {
 	ch.userProgress.SetInProgress(userID, true)
 	defer ch.userProgress.SetInProgress(userID, false)
 

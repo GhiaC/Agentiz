@@ -419,6 +419,33 @@ var sqliteMigrations = []sqliteMigration{
 			`CREATE INDEX IF NOT EXISTS idx_reviews_created_at ON reviews(created_at)`,
 		)
 	}},
+	{12, "task schedules and run history", func(tx *sql.Tx) error {
+		return execAll(tx, `
+		CREATE TABLE IF NOT EXISTS task_schedules (
+			schedule_id TEXT PRIMARY KEY,
+			user_id TEXT NOT NULL,
+			session_id TEXT NOT NULL,
+			status TEXT NOT NULL,
+			next_run_at INTEGER NOT NULL,
+			data TEXT NOT NULL,
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL
+		)`,
+			`CREATE INDEX IF NOT EXISTS idx_task_schedules_user_id ON task_schedules(user_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_task_schedules_status_next ON task_schedules(status, next_run_at)`,
+			`CREATE INDEX IF NOT EXISTS idx_task_schedules_created_at ON task_schedules(created_at)`,
+			`
+		CREATE TABLE IF NOT EXISTS task_schedule_runs (
+			run_id TEXT PRIMARY KEY,
+			schedule_id TEXT NOT NULL,
+			status TEXT NOT NULL,
+			data TEXT NOT NULL,
+			started_at INTEGER NOT NULL,
+			completed_at INTEGER DEFAULT 0
+		)`,
+			`CREATE INDEX IF NOT EXISTS idx_task_schedule_runs_schedule_started ON task_schedule_runs(schedule_id, started_at DESC)`,
+		)
+	}},
 }
 
 // runMigrations applies every migration newer than the recorded schema version.
@@ -692,6 +719,15 @@ func (s *SQLiteStore) DeleteUserData(userID string) error {
 	}
 	if _, err := tx.Exec("DELETE FROM reviews WHERE user_id = ?", userID); err != nil {
 		return fmt.Errorf("failed to delete reviews: %w", err)
+	}
+	if _, err := tx.Exec(
+		"DELETE FROM task_schedule_runs WHERE schedule_id IN (SELECT schedule_id FROM task_schedules WHERE user_id = ?)",
+		userID,
+	); err != nil {
+		return fmt.Errorf("failed to delete task_schedule_runs: %w", err)
+	}
+	if _, err := tx.Exec("DELETE FROM task_schedules WHERE user_id = ?", userID); err != nil {
+		return fmt.Errorf("failed to delete task_schedules: %w", err)
 	}
 	if _, err := tx.Exec("DELETE FROM sessions WHERE user_id = ?", userID); err != nil {
 		return fmt.Errorf("failed to delete sessions: %w", err)
@@ -2702,6 +2738,182 @@ func scanReviewRequests(rows *sql.Rows) ([]*model.ReviewRequest, error) {
 		return nil, fmt.Errorf("error iterating review requests: %w", err)
 	}
 	return reqs, nil
+}
+
+// PutTaskSchedule upserts a persistent scheduled task.
+func (s *SQLiteStore) PutTaskSchedule(schedule *model.TaskSchedule) error {
+	if err := schedule.Validate(); err != nil {
+		return err
+	}
+	data, err := json.Marshal(schedule)
+	if err != nil {
+		return fmt.Errorf("failed to marshal task schedule: %w", err)
+	}
+	_, err = s.execWrite(
+		`INSERT INTO task_schedules
+			(schedule_id, user_id, session_id, status, next_run_at, data, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(schedule_id) DO UPDATE SET
+			user_id=excluded.user_id,
+			session_id=excluded.session_id,
+			status=excluded.status,
+			next_run_at=excluded.next_run_at,
+			data=excluded.data,
+			updated_at=excluded.updated_at`,
+		schedule.ScheduleID, schedule.UserID, schedule.SessionID, string(schedule.Status),
+		schedule.NextRunAt.Unix(), string(data), schedule.CreatedAt.Unix(), schedule.UpdatedAt.Unix(),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to store task schedule: %w", err)
+	}
+	return nil
+}
+
+// GetTaskSchedule returns a schedule by id, or (nil, nil) when absent.
+func (s *SQLiteStore) GetTaskSchedule(scheduleID string) (*model.TaskSchedule, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var data string
+	err := s.db.QueryRow(`SELECT data FROM task_schedules WHERE schedule_id = ?`, scheduleID).Scan(&data)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to query task schedule: %w", err)
+	}
+	schedule := &model.TaskSchedule{}
+	if err := json.Unmarshal([]byte(data), schedule); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal task schedule: %w", err)
+	}
+	return schedule, nil
+}
+
+// ListTaskSchedules returns schedules newest first. Empty userID lists all.
+func (s *SQLiteStore) ListTaskSchedules(userID string) ([]*model.TaskSchedule, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var rows *sql.Rows
+	var err error
+	if userID == "" {
+		rows, err = s.db.Query(`SELECT data FROM task_schedules ORDER BY created_at DESC, schedule_id DESC`)
+	} else {
+		rows, err = s.db.Query(
+			`SELECT data FROM task_schedules WHERE user_id = ? ORDER BY created_at DESC, schedule_id DESC`,
+			userID,
+		)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to list task schedules: %w", err)
+	}
+	defer rows.Close()
+
+	var schedules []*model.TaskSchedule
+	for rows.Next() {
+		var data string
+		if err := rows.Scan(&data); err != nil {
+			return nil, fmt.Errorf("failed to scan task schedule: %w", err)
+		}
+		schedule := &model.TaskSchedule{}
+		if err := json.Unmarshal([]byte(data), schedule); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal task schedule: %w", err)
+		}
+		schedules = append(schedules, schedule)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating task schedules: %w", err)
+	}
+	return schedules, nil
+}
+
+// DeleteTaskSchedule removes the schedule and its run history atomically.
+func (s *SQLiteStore) DeleteTaskSchedule(scheduleID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin delete task schedule: %w", err)
+	}
+	if _, err := tx.Exec(`DELETE FROM task_schedule_runs WHERE schedule_id = ?`, scheduleID); err != nil {
+		tx.Rollback()
+		return fmt.Errorf("delete task schedule runs: %w", err)
+	}
+	if _, err := tx.Exec(`DELETE FROM task_schedules WHERE schedule_id = ?`, scheduleID); err != nil {
+		tx.Rollback()
+		return fmt.Errorf("delete task schedule: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit delete task schedule: %w", err)
+	}
+	return nil
+}
+
+// PutTaskScheduleRun upserts one run-history record.
+func (s *SQLiteStore) PutTaskScheduleRun(run *model.TaskScheduleRun) error {
+	if run == nil || strings.TrimSpace(run.RunID) == "" || strings.TrimSpace(run.ScheduleID) == "" {
+		return fmt.Errorf("run_id and schedule_id are required")
+	}
+	data, err := json.Marshal(run)
+	if err != nil {
+		return fmt.Errorf("failed to marshal task schedule run: %w", err)
+	}
+	var completedAt int64
+	if !run.CompletedAt.IsZero() {
+		completedAt = run.CompletedAt.Unix()
+	}
+	_, err = s.execWrite(
+		`INSERT INTO task_schedule_runs (run_id, schedule_id, status, data, started_at, completed_at)
+		 VALUES (?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(run_id) DO UPDATE SET
+			status=excluded.status,
+			data=excluded.data,
+			completed_at=excluded.completed_at`,
+		run.RunID, run.ScheduleID, string(run.Status), string(data), run.StartedAt.Unix(), completedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to store task schedule run: %w", err)
+	}
+	return nil
+}
+
+// ListTaskScheduleRuns returns newest runs first.
+func (s *SQLiteStore) ListTaskScheduleRuns(scheduleID string, limit int) ([]*model.TaskScheduleRun, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	rows, err := s.db.Query(
+		`SELECT data FROM task_schedule_runs WHERE schedule_id = ? ORDER BY started_at DESC, run_id DESC LIMIT ?`,
+		scheduleID, limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list task schedule runs: %w", err)
+	}
+	defer rows.Close()
+
+	var runs []*model.TaskScheduleRun
+	for rows.Next() {
+		var data string
+		if err := rows.Scan(&data); err != nil {
+			return nil, fmt.Errorf("failed to scan task schedule run: %w", err)
+		}
+		run := &model.TaskScheduleRun{}
+		if err := json.Unmarshal([]byte(data), run); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal task schedule run: %w", err)
+		}
+		runs = append(runs, run)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating task schedule runs: %w", err)
+	}
+	return runs, nil
 }
 
 // Ensure SQLiteStore implements model.SessionStore and debuger.DebugStore

@@ -85,6 +85,10 @@ func (am *AgentManager) Register(config AgentConfig, eng *engine.Engine) error {
 		Config: config,
 		Engine: eng,
 	}
+	// A shared store may back several agent Engines. Scope each recurring-task
+	// worker to its own session type so one persisted schedule is never executed
+	// once by every agent.
+	eng.SetTaskSchedulerAgentTypes(config.AgentType)
 
 	if am.sessionHandler != nil {
 		am.sessionHandler.RegisterAgentDisplayName(config.AgentType, config.DisplayName)

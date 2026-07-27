@@ -152,6 +152,15 @@ func RenderDashboard(handler *debuger.DebugHandler, showPlansLink bool, sysInfo 
 	)
 	content += `</div>`
 
+	// Scheduler link
+	content += `<div class="col-md-6 col-lg-3">`
+	content += components.LinkCard(
+		"Task Scheduler",
+		"Create and control persistent recurring agent tasks",
+		"⏱️", "/agentize/debug/schedules",
+	)
+	content += `</div>`
+
 	if showPlansLink {
 		content += `<div class="col-md-6 col-lg-3">`
 		content += components.LinkCard(

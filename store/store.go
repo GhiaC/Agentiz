@@ -86,6 +86,22 @@ type Store interface {
 	// returns pending requests across all users.
 	ListPendingReviews(userID string) ([]*model.ReviewRequest, error)
 
+	// --- Persistent task schedules ---
+
+	// PutTaskSchedule upserts a schedule keyed by ScheduleID.
+	PutTaskSchedule(schedule *model.TaskSchedule) error
+	// GetTaskSchedule returns the schedule by id, or (nil, nil) when absent.
+	GetTaskSchedule(scheduleID string) (*model.TaskSchedule, error)
+	// ListTaskSchedules returns schedules newest-first. An empty userID lists all
+	// schedules (admin/worker use); a non-empty userID enforces owner scoping.
+	ListTaskSchedules(userID string) ([]*model.TaskSchedule, error)
+	// DeleteTaskSchedule removes the schedule and all of its run history.
+	DeleteTaskSchedule(scheduleID string) error
+	// PutTaskScheduleRun upserts one run-history row.
+	PutTaskScheduleRun(run *model.TaskScheduleRun) error
+	// ListTaskScheduleRuns returns newest runs first. limit <= 0 uses a safe default.
+	ListTaskScheduleRuns(scheduleID string, limit int) ([]*model.TaskScheduleRun, error)
+
 	// --- Visited-node tracking (user-scoped, in-memory, not persisted) ---
 
 	AddVisitedNode(userID string, nodeDigest *model.NodeDigest)

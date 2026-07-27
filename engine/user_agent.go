@@ -83,6 +83,9 @@ type Engine struct {
 	// Scheduler for session summarization
 	scheduler   *SessionScheduler
 	schedulerMu sync.RWMutex
+	// Persistent scheduler for general recurring agent tasks.
+	taskScheduler   *TaskScheduler
+	taskSchedulerMu sync.RWMutex
 
 	// Per-session mutex for serializing message processing
 	// Ensures only one message is processed at a time per session to prevent
@@ -191,6 +194,9 @@ func (e *Engine) UseFunctionRegistry(registry *model.FunctionRegistry) {
 		registry = model.NewFunctionRegistry()
 	}
 	e.Functions = registry
+	e.RegisterManageFilesTool()
+	e.RegisterTextTools()
+	e.RegisterTaskSchedulerTool()
 }
 
 // UseLLMConfig configures the LLM client for the engine
@@ -208,6 +214,10 @@ func (e *Engine) UseLLMConfig(config LLMConfig) error {
 	client := openai.NewClientWithConfig(openaiConfig)
 	e.llmClient = client
 	e.llmConfig = config
+	e.InitializeTaskScheduler()
+	if e.taskScheduler != nil {
+		e.taskScheduler.Start(context.Background())
+	}
 
 	// Initialize backup chain from configured providers
 	// Note: BackupDisabled only affects Engine's direct LLM calls (callLLM)
@@ -598,6 +608,40 @@ func (e *Engine) ProcessMessage(
 	sessionMu.Lock()
 	defer sessionMu.Unlock()
 
+	return e.processMessageLocked(ctx, sessionID, userMessage)
+}
+
+// ProcessScheduledMessage runs a background scheduled prompt on the owning
+// session and waits for any foreground turn instead of returning the normal
+// "queued" acknowledgement. This guarantees the scheduler captures the actual
+// task output and can pass that output to its conclusion model.
+func (e *Engine) ProcessScheduledMessage(
+	ctx context.Context,
+	sessionID string,
+	userMessage string,
+) (string, int, error) {
+	e.dbReadyMu.Lock()
+	if e.sessionProgress == nil {
+		e.sessionProgress = NewProgressGuard()
+	}
+	e.dbReadyMu.Unlock()
+
+	sessionMu := e.getSessionMutex(sessionID)
+	sessionMu.Lock()
+	defer sessionMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return "", 0, err
+	}
+	return e.processMessageLocked(ctx, sessionID, userMessage)
+}
+
+// processMessageLocked processes one message and drains the foreground queue.
+// Caller must hold the per-session mutex.
+func (e *Engine) processMessageLocked(
+	ctx context.Context,
+	sessionID string,
+	userMessage string,
+) (string, int, error) {
 	e.sessionProgress.SetInProgress(sessionID, true)
 	defer e.sessionProgress.SetInProgress(sessionID, false)
 
@@ -935,6 +979,11 @@ func (e *Engine) GetTools(session *model.Session) []openai.Tool {
 	// were buffered on its session (see processToolResult / text_tools.go).
 	if e.Sessions != nil {
 		tools = append(tools, CollectResultToolDefinition(), InspectResultToolDefinition())
+	}
+	// Persistent recurring tasks are a built-in capability, so the LLM receives
+	// this schema without requiring a repository tools.json entry.
+	if e.GetTaskScheduler() != nil {
+		tools = append(tools, TaskSchedulerToolDefinition())
 	}
 	return tools
 }

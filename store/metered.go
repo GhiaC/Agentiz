@@ -176,6 +176,36 @@ func (m *meteredStore) ListPendingReviews(userID string) ([]*model.ReviewRequest
 	return m.Store.ListPendingReviews(userID)
 }
 
+func (m *meteredStore) PutTaskSchedule(schedule *model.TaskSchedule) error {
+	defer m.observe("PutTaskSchedule", time.Now())
+	return m.Store.PutTaskSchedule(schedule)
+}
+
+func (m *meteredStore) GetTaskSchedule(scheduleID string) (*model.TaskSchedule, error) {
+	defer m.observe("GetTaskSchedule", time.Now())
+	return m.Store.GetTaskSchedule(scheduleID)
+}
+
+func (m *meteredStore) ListTaskSchedules(userID string) ([]*model.TaskSchedule, error) {
+	defer m.observe("ListTaskSchedules", time.Now())
+	return m.Store.ListTaskSchedules(userID)
+}
+
+func (m *meteredStore) DeleteTaskSchedule(scheduleID string) error {
+	defer m.observe("DeleteTaskSchedule", time.Now())
+	return m.Store.DeleteTaskSchedule(scheduleID)
+}
+
+func (m *meteredStore) PutTaskScheduleRun(run *model.TaskScheduleRun) error {
+	defer m.observe("PutTaskScheduleRun", time.Now())
+	return m.Store.PutTaskScheduleRun(run)
+}
+
+func (m *meteredStore) ListTaskScheduleRuns(scheduleID string, limit int) ([]*model.TaskScheduleRun, error) {
+	defer m.observe("ListTaskScheduleRuns", time.Now())
+	return m.Store.ListTaskScheduleRuns(scheduleID, limit)
+}
+
 // --- Debug reads + aggregates (debuger.DebugStore) ---
 
 func (m *meteredStore) GetAllSessions() (map[string][]*model.Session, error) {

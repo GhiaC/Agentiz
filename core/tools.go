@@ -186,6 +186,10 @@ func (ch *CoreHandler) getCoreToolsForLLM() []openai.Tool {
 		})
 	}
 
+	if ch.taskScheduler != nil {
+		tools = append(tools, engine.TaskSchedulerToolDefinition())
+	}
+
 	return tools
 }
 
@@ -408,6 +412,13 @@ func (ch *CoreHandler) runCoreToolImpl(
 		return ch.getPlanStatusTool(ctx, args)
 	case "cancel_plan":
 		return ch.cancelPlanTool(ctx, args)
+	case "manage_schedules":
+		if ch.taskScheduler == nil {
+			return "", fmt.Errorf("task scheduler is not configured")
+		}
+		args["__user_id__"] = userID
+		args["__session_id__"] = sessionID
+		return ch.taskScheduler.ExecuteTool(args)
 
 	default:
 		return "", fmt.Errorf("unknown tool: %s", toolName)

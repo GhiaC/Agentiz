@@ -92,6 +92,12 @@ func (s *SQLiteStore) Verify() ([]Issue, error) {
 		{"orphaned_summarization_log",
 			`SELECT log_id FROM summarization_logs WHERE session_id NOT IN (SELECT session_id FROM sessions)`,
 			"summarization log references a session that no longer exists"},
+		{"orphaned_task_schedule",
+			`SELECT schedule_id FROM task_schedules WHERE session_id NOT IN (SELECT session_id FROM sessions)`,
+			"task schedule references a session that no longer exists"},
+		{"orphaned_task_schedule_run",
+			`SELECT run_id FROM task_schedule_runs WHERE schedule_id NOT IN (SELECT schedule_id FROM task_schedules)`,
+			"task schedule run references a schedule that no longer exists"},
 	}
 
 	var issues []Issue

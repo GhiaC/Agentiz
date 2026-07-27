@@ -212,6 +212,10 @@ func NewWithOptions(path string, opts *Options) (*Agentize, error) {
 	// ownership of buffered output, so they replace any host-provided variants.
 	eng.RegisterTextTools()
 
+	// Create the persistent recurring-task scheduler and expose manage_schedules
+	// as a built-in LLM tool. Its worker starts after UseLLMConfig.
+	eng.InitializeTaskScheduler()
+
 	// Create Agentize instance
 	ag := &Agentize{
 		engine: eng,
@@ -437,6 +441,32 @@ func (ag *Agentize) ListPendingReviews(_ context.Context, userID string) ([]*mod
 // GetEngine returns the internal engine
 func (ag *Agentize) GetEngine() *engine.Engine {
 	return ag.engine
+}
+
+// GetTaskScheduler returns the persistent general-purpose task scheduler.
+func (ag *Agentize) GetTaskScheduler() *engine.TaskScheduler {
+	if ag == nil || ag.engine == nil {
+		return nil
+	}
+	return ag.engine.GetTaskScheduler()
+}
+
+// CreateTaskSchedule creates a recurring task through the public Go API.
+func (ag *Agentize) CreateTaskSchedule(input engine.CreateTaskScheduleInput) (*model.TaskSchedule, error) {
+	scheduler := ag.GetTaskScheduler()
+	if scheduler == nil {
+		return nil, fmt.Errorf("task scheduler is not configured")
+	}
+	return scheduler.Create(input)
+}
+
+// ListTaskSchedules lists schedules for a user. Empty userID is the admin view.
+func (ag *Agentize) ListTaskSchedules(userID string) ([]*model.TaskSchedule, error) {
+	scheduler := ag.GetTaskScheduler()
+	if scheduler == nil {
+		return nil, fmt.Errorf("task scheduler is not configured")
+	}
+	return scheduler.List(userID)
 }
 
 // RecordUserFile stores a file the user sent (or that was generated for them)
@@ -746,6 +776,9 @@ func (ag *Agentize) WaitForShutdown() {
 	log.Log.Infof("[Agentize] 📡 Received signal: %v, initiating graceful shutdown...", sig)
 
 	ag.StopScheduler()
+	if ag.engine != nil {
+		ag.engine.StopTaskScheduler()
+	}
 	ag.ShutdownPlanStore(context.Background())
 
 	log.Log.Infof("[Agentize] ✅ Graceful shutdown completed")

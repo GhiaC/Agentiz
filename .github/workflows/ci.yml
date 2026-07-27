@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: build & test (race)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: build
+        run: go build ./...
+
+      - name: test (race + coverage)
+        # Docker is available on ubuntu-latest, so the MongoDB store conformance
+        # tests run here too. They self-skip when Docker is unavailable, so this
+        # step never hard-fails just because a container could not start.
+        run: go test -race -coverprofile=coverage.out ./...
+
+      - name: coverage total
+        run: go tool cover -func=coverage.out | tail -1
+
+  lint:
+    name: format & docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::These files are not gofmt-clean:"
+            echo "$unformatted"
+            exit 1
+          fi
+          echo "all files are gofmt-clean"
+
+      - name: shell script syntax
+        run: |
+          bash -n scripts/test.sh
+          bash -n scripts/sync-to-darkoob.sh
+          bash -n scripts/check-doc-anchors.sh
+
+      - name: shellcheck (informational)
+        continue-on-error: true
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          shellcheck scripts/check-doc-anchors.sh || true
+          shellcheck scripts/sync-to-darkoob.sh || true
+
+      - name: doc anchor check (report-only)
+        run: bash scripts/check-doc-anchors.sh

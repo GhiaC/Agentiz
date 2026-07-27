@@ -2,16 +2,19 @@ package agentize
 
 import (
 	"fmt"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/ghiac/agentize/core"
 	"github.com/ghiac/agentize/debuger"
 	"github.com/ghiac/agentize/debuger/pages"
 	"github.com/ghiac/agentize/documents"
+	"github.com/ghiac/agentize/engine"
 	"github.com/ghiac/agentize/log"
 	"github.com/ghiac/agentize/metrics"
 	"github.com/ghiac/agentize/model"
@@ -19,7 +22,8 @@ import (
 )
 
 // RegisterRoutes registers HTTP routes on the given gin.Engine
-// Routes: /agentize, /agentize/graph, /agentize/docs, /agentize/health, /agentize/debug/*
+// Routes: /agentize, /agentize/graph, /agentize/docs, /agentize/health,
+// /agentize/debug/* (including the task scheduler at /agentize/debug/schedules).
 //
 // When admin credentials are configured (SetAdminCredentials or the
 // AGENTIZE_ADMIN_USERNAME / AGENTIZE_ADMIN_PASSWORD env vars), every route
@@ -71,6 +75,10 @@ func (ag *Agentize) RegisterRoutes(router *gin.Engine) {
 	router.GET("/agentize/debug/sessions/:sessionID", p(ag.handleDebugSessionDetail))
 	router.GET("/agentize/debug/plans", p(ag.handleDebugPlans))
 	router.GET("/agentize/debug/plans/:planID", p(ag.handleDebugPlanDetail))
+	router.GET("/agentize/debug/schedules", p(ag.handleDebugSchedules))
+	router.POST("/agentize/debug/schedules", p(ag.handleDebugScheduleCreate))
+	router.GET("/agentize/debug/schedules/:scheduleID", p(ag.handleDebugScheduleDetail))
+	router.POST("/agentize/debug/schedules/:scheduleID/:action", p(ag.handleDebugScheduleAction))
 	router.GET("/agentize/debug/messages", p(ag.handleDebugMessages))
 	router.GET("/agentize/debug/files", p(ag.handleDebugFiles))
 	router.GET("/agentize/debug/documents", p(ag.handleDebugDocuments))
@@ -248,6 +256,123 @@ func (ag *Agentize) handleDebug(c *gin.Context) {
 
 	c.Header("Content-Type", "text/html; charset=utf-8")
 	c.String(200, html)
+}
+
+// handleDebugSchedules renders the persistent recurring-task scheduler.
+func (ag *Agentize) handleDebugSchedules(c *gin.Context) {
+	scheduler := ag.GetTaskScheduler()
+	if scheduler == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "task scheduler is not configured"})
+		return
+	}
+	schedules, err := scheduler.List("")
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	html := pages.RenderTaskSchedules(
+		schedules, scheduler.IsRunning(), c.Query("notice"), c.Query("error"),
+	)
+	c.Header("Content-Type", "text/html; charset=utf-8")
+	c.String(http.StatusOK, html)
+}
+
+// handleDebugScheduleCreate creates a schedule from the admin page.
+func (ag *Agentize) handleDebugScheduleCreate(c *gin.Context) {
+	scheduler := ag.GetTaskScheduler()
+	if scheduler == nil {
+		redirectSchedulePage(c, "", fmt.Errorf("task scheduler is not configured"))
+		return
+	}
+	seconds, err := strconv.ParseInt(strings.TrimSpace(c.PostForm("interval_seconds")), 10, 64)
+	if err != nil {
+		redirectSchedulePage(c, "", fmt.Errorf("interval must be a whole number of seconds"))
+		return
+	}
+	schedule, err := scheduler.Create(engine.CreateTaskScheduleInput{
+		UserID:           strings.TrimSpace(c.PostForm("user_id")),
+		SessionID:        strings.TrimSpace(c.PostForm("session_id")),
+		Name:             strings.TrimSpace(c.PostForm("name")),
+		Prompt:           strings.TrimSpace(c.PostForm("prompt")),
+		Interval:         time.Duration(seconds) * time.Second,
+		ConclusionModel:  strings.TrimSpace(c.PostForm("conclusion_model")),
+		ConclusionPrompt: strings.TrimSpace(c.PostForm("conclusion_prompt")),
+	})
+	if err != nil {
+		redirectSchedulePage(c, "", err)
+		return
+	}
+	redirectSchedulePage(c, "Created schedule "+schedule.Name, nil)
+}
+
+// handleDebugScheduleDetail shows configuration and bounded run history.
+func (ag *Agentize) handleDebugScheduleDetail(c *gin.Context) {
+	scheduler := ag.GetTaskScheduler()
+	if scheduler == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "task scheduler is not configured"})
+		return
+	}
+	schedule, err := scheduler.Get(c.Param("scheduleID"), "")
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if schedule == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "schedule not found"})
+		return
+	}
+	runs, err := scheduler.Runs(schedule.ScheduleID, "", 100)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	html := pages.RenderTaskScheduleDetail(schedule, runs)
+	c.Header("Content-Type", "text/html; charset=utf-8")
+	c.String(http.StatusOK, html)
+}
+
+// handleDebugScheduleAction applies one lifecycle action from the admin page.
+func (ag *Agentize) handleDebugScheduleAction(c *gin.Context) {
+	scheduler := ag.GetTaskScheduler()
+	if scheduler == nil {
+		redirectSchedulePage(c, "", fmt.Errorf("task scheduler is not configured"))
+		return
+	}
+	id := c.Param("scheduleID")
+	action := c.Param("action")
+	var err error
+	switch action {
+	case "stop":
+		_, err = scheduler.Pause(id, "")
+	case "resume":
+		_, err = scheduler.Resume(id, "")
+	case "run-now":
+		_, err = scheduler.RunNow(id, "")
+	case "delete":
+		err = scheduler.Delete(id, "")
+	default:
+		err = fmt.Errorf("unsupported schedule action %q", action)
+	}
+	if err != nil {
+		redirectSchedulePage(c, "", err)
+		return
+	}
+	redirectSchedulePage(c, "Schedule action completed", nil)
+}
+
+func redirectSchedulePage(c *gin.Context, notice string, err error) {
+	values := url.Values{}
+	if notice != "" {
+		values.Set("notice", notice)
+	}
+	if err != nil {
+		values.Set("error", err.Error())
+	}
+	target := "/agentize/debug/schedules"
+	if encoded := values.Encode(); encoded != "" {
+		target += "?" + encoded
+	}
+	c.Redirect(http.StatusSeeOther, target)
 }
 
 // handleDebugUsers handles users list page requests

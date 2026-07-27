@@ -499,6 +499,36 @@ func (s *DBStore) ListPendingReviews(userID string) ([]*model.ReviewRequest, err
 	return s.sqliteStore.ListPendingReviews(userID)
 }
 
+// PutTaskSchedule stores a task schedule in SQLite.
+func (s *DBStore) PutTaskSchedule(schedule *model.TaskSchedule) error {
+	return s.sqliteStore.PutTaskSchedule(schedule)
+}
+
+// GetTaskSchedule returns a task schedule by id.
+func (s *DBStore) GetTaskSchedule(scheduleID string) (*model.TaskSchedule, error) {
+	return s.sqliteStore.GetTaskSchedule(scheduleID)
+}
+
+// ListTaskSchedules returns task schedules newest first.
+func (s *DBStore) ListTaskSchedules(userID string) ([]*model.TaskSchedule, error) {
+	return s.sqliteStore.ListTaskSchedules(userID)
+}
+
+// DeleteTaskSchedule removes a schedule and its run history.
+func (s *DBStore) DeleteTaskSchedule(scheduleID string) error {
+	return s.sqliteStore.DeleteTaskSchedule(scheduleID)
+}
+
+// PutTaskScheduleRun stores one execution record.
+func (s *DBStore) PutTaskScheduleRun(run *model.TaskScheduleRun) error {
+	return s.sqliteStore.PutTaskScheduleRun(run)
+}
+
+// ListTaskScheduleRuns returns newest execution records first.
+func (s *DBStore) ListTaskScheduleRuns(scheduleID string, limit int) ([]*model.TaskScheduleRun, error) {
+	return s.sqliteStore.ListTaskScheduleRuns(scheduleID, limit)
+}
+
 // PutToolCall stores a tool call (delegates to SQLiteStore)
 func (s *DBStore) PutToolCall(toolCall *model.ToolCall) error {
 	return s.sqliteStore.PutToolCall(toolCall)

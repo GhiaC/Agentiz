@@ -37,6 +37,8 @@ type MongoDBStore struct {
 	summarizationLogsCollection *mongo.Collection
 	routeTracesCollection       *mongo.Collection
 	reviewsCollection           *mongo.Collection
+	taskSchedulesCollection     *mongo.Collection
+	taskScheduleRunsCollection  *mongo.Collection
 
 	// UserNodes tracks visited nodes for each user (user-level, not session-level)
 	userNodes sync.Map
@@ -163,6 +165,8 @@ func NewMongoDBStore(config MongoDBStoreConfig) (*MongoDBStore, error) {
 		summarizationLogsCollection: database.Collection("summarization_logs"),
 		routeTracesCollection:       database.Collection("route_traces"),
 		reviewsCollection:           database.Collection("reviews"),
+		taskSchedulesCollection:     database.Collection("task_schedules"),
+		taskScheduleRunsCollection:  database.Collection("task_schedule_runs"),
 		opTimeout:                   config.OpTimeout,
 	}
 
@@ -436,6 +440,35 @@ func (s *MongoDBStore) initIndexes(ctx context.Context) error {
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create reviews status+created_at index: %w", err)
+	}
+
+	// Task scheduler: worker due scan and user-facing list.
+	_, err = s.taskSchedulesCollection.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{
+			{Key: "status", Value: 1},
+			{Key: "next_run_at", Value: 1},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create task_schedules status+next_run_at index: %w", err)
+	}
+	_, err = s.taskSchedulesCollection.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{
+			{Key: "user_id", Value: 1},
+			{Key: "created_at", Value: -1},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create task_schedules user_id+created_at index: %w", err)
+	}
+	_, err = s.taskScheduleRunsCollection.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{
+			{Key: "schedule_id", Value: 1},
+			{Key: "started_at", Value: -1},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create task_schedule_runs schedule_id+started_at index: %w", err)
 	}
 
 	return nil
@@ -715,6 +748,21 @@ func (s *MongoDBStore) DeleteUserData(userID string) error {
 	// Delete reviews by user_id
 	if _, err := s.reviewsCollection.DeleteMany(ctx, userFilter); err != nil {
 		return fmt.Errorf("failed to delete reviews: %w", err)
+	}
+
+	// Delete schedules and their history. Run documents are keyed by schedule,
+	// so collect the owner's schedule ids before removing the parent rows.
+	scheduleIDs, err := s.taskSchedulesCollection.Distinct(ctx, "_id", userFilter)
+	if err != nil {
+		return fmt.Errorf("failed to list task_schedules: %w", err)
+	}
+	if len(scheduleIDs) > 0 {
+		if _, err := s.taskScheduleRunsCollection.DeleteMany(ctx, bson.M{"schedule_id": bson.M{"$in": scheduleIDs}}); err != nil {
+			return fmt.Errorf("failed to delete task_schedule_runs: %w", err)
+		}
+	}
+	if _, err := s.taskSchedulesCollection.DeleteMany(ctx, userFilter); err != nil {
+		return fmt.Errorf("failed to delete task_schedules: %w", err)
 	}
 
 	// Delete tool_calls, summarization_logs and opened_files. These now carry a
@@ -2446,6 +2494,173 @@ func (s *MongoDBStore) ListPendingReviews(userID string) ([]*model.ReviewRequest
 	return reqs, cursor.Err()
 }
 
+// ============================================================================
+// Persistent task schedules
+// ============================================================================
+
+type taskScheduleDocument struct {
+	ID        string    `bson:"_id"`
+	UserID    string    `bson:"user_id"`
+	SessionID string    `bson:"session_id"`
+	Status    string    `bson:"status"`
+	NextRunAt time.Time `bson:"next_run_at"`
+	CreatedAt time.Time `bson:"created_at"`
+	UpdatedAt time.Time `bson:"updated_at"`
+	Data      string    `bson:"data"`
+}
+
+type taskScheduleRunDocument struct {
+	ID          string    `bson:"_id"`
+	ScheduleID  string    `bson:"schedule_id"`
+	Status      string    `bson:"status"`
+	StartedAt   time.Time `bson:"started_at"`
+	CompletedAt time.Time `bson:"completed_at,omitempty"`
+	Data        string    `bson:"data"`
+}
+
+func (s *MongoDBStore) PutTaskSchedule(schedule *model.TaskSchedule) error {
+	if err := schedule.Validate(); err != nil {
+		return err
+	}
+	data, err := json.Marshal(schedule)
+	if err != nil {
+		return fmt.Errorf("failed to marshal task schedule: %w", err)
+	}
+	doc := taskScheduleDocument{
+		ID: schedule.ScheduleID, UserID: schedule.UserID, SessionID: schedule.SessionID,
+		Status: string(schedule.Status), NextRunAt: schedule.NextRunAt,
+		CreatedAt: schedule.CreatedAt, UpdatedAt: schedule.UpdatedAt, Data: string(data),
+	}
+	ctx, cancel := s.opCtx()
+	defer cancel()
+	_, err = s.taskSchedulesCollection.ReplaceOne(
+		ctx, bson.M{"_id": schedule.ScheduleID}, doc, options.Replace().SetUpsert(true),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to store task schedule: %w", err)
+	}
+	return nil
+}
+
+func (s *MongoDBStore) GetTaskSchedule(scheduleID string) (*model.TaskSchedule, error) {
+	ctx, cancel := s.opCtx()
+	defer cancel()
+	var doc taskScheduleDocument
+	err := s.taskSchedulesCollection.FindOne(ctx, bson.M{"_id": scheduleID}).Decode(&doc)
+	if err == mongo.ErrNoDocuments {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to query task schedule: %w", err)
+	}
+	schedule := &model.TaskSchedule{}
+	if err := unmarshalJSONOrBSON(doc.Data, schedule); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal task schedule: %w", err)
+	}
+	return schedule, nil
+}
+
+func (s *MongoDBStore) ListTaskSchedules(userID string) ([]*model.TaskSchedule, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*s.opTimeout)
+	defer cancel()
+	filter := bson.M{}
+	if userID != "" {
+		filter["user_id"] = userID
+	}
+	cursor, err := s.taskSchedulesCollection.Find(
+		ctx, filter,
+		options.Find().SetSort(bson.D{{Key: "created_at", Value: -1}, {Key: "_id", Value: -1}}),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list task schedules: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	var schedules []*model.TaskSchedule
+	for cursor.Next(ctx) {
+		var doc taskScheduleDocument
+		if err := cursor.Decode(&doc); err != nil {
+			return nil, fmt.Errorf("failed to decode task schedule: %w", err)
+		}
+		schedule := &model.TaskSchedule{}
+		if err := unmarshalJSONOrBSON(doc.Data, schedule); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal task schedule: %w", err)
+		}
+		schedules = append(schedules, schedule)
+	}
+	return schedules, cursor.Err()
+}
+
+func (s *MongoDBStore) DeleteTaskSchedule(scheduleID string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*s.opTimeout)
+	defer cancel()
+	if _, err := s.taskScheduleRunsCollection.DeleteMany(ctx, bson.M{"schedule_id": scheduleID}); err != nil {
+		return fmt.Errorf("failed to delete task schedule runs: %w", err)
+	}
+	if _, err := s.taskSchedulesCollection.DeleteOne(ctx, bson.M{"_id": scheduleID}); err != nil {
+		return fmt.Errorf("failed to delete task schedule: %w", err)
+	}
+	return nil
+}
+
+func (s *MongoDBStore) PutTaskScheduleRun(run *model.TaskScheduleRun) error {
+	if run == nil || strings.TrimSpace(run.RunID) == "" || strings.TrimSpace(run.ScheduleID) == "" {
+		return fmt.Errorf("run_id and schedule_id are required")
+	}
+	data, err := json.Marshal(run)
+	if err != nil {
+		return fmt.Errorf("failed to marshal task schedule run: %w", err)
+	}
+	doc := taskScheduleRunDocument{
+		ID: run.RunID, ScheduleID: run.ScheduleID, Status: string(run.Status),
+		StartedAt: run.StartedAt, CompletedAt: run.CompletedAt, Data: string(data),
+	}
+	ctx, cancel := s.opCtx()
+	defer cancel()
+	_, err = s.taskScheduleRunsCollection.ReplaceOne(
+		ctx, bson.M{"_id": run.RunID}, doc, options.Replace().SetUpsert(true),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to store task schedule run: %w", err)
+	}
+	return nil
+}
+
+func (s *MongoDBStore) ListTaskScheduleRuns(scheduleID string, limit int) ([]*model.TaskScheduleRun, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*s.opTimeout)
+	defer cancel()
+	cursor, err := s.taskScheduleRunsCollection.Find(
+		ctx, bson.M{"schedule_id": scheduleID},
+		options.Find().
+			SetSort(bson.D{{Key: "started_at", Value: -1}, {Key: "_id", Value: -1}}).
+			SetLimit(int64(limit)),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list task schedule runs: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	var runs []*model.TaskScheduleRun
+	for cursor.Next(ctx) {
+		var doc taskScheduleRunDocument
+		if err := cursor.Decode(&doc); err != nil {
+			return nil, fmt.Errorf("failed to decode task schedule run: %w", err)
+		}
+		run := &model.TaskScheduleRun{}
+		if err := unmarshalJSONOrBSON(doc.Data, run); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal task schedule run: %w", err)
+		}
+		runs = append(runs, run)
+	}
+	return runs, cursor.Err()
+}
+
 // Ensure MongoDBStore implements model.SessionStore and debuger.DebugStore
 var (
 	_ model.SessionStore = (*MongoDBStore)(nil)
@@ -2478,6 +2693,10 @@ func (s *MongoDBStore) Verify() ([]Issue, error) {
 	userIDs, err := s.usersCollection.Distinct(ctx, "_id", bson.M{})
 	if err != nil {
 		return nil, fmt.Errorf("store: verify: list users: %w", err)
+	}
+	scheduleIDs, err := s.taskSchedulesCollection.Distinct(ctx, "_id", bson.M{})
+	if err != nil {
+		return nil, fmt.Errorf("store: verify: list task schedules: %w", err)
 	}
 
 	var issues []Issue
@@ -2513,6 +2732,8 @@ func (s *MongoDBStore) Verify() ([]Issue, error) {
 		{s.routeTracesCollection, "session_id", sessionIDs, "orphaned_route_trace", "route trace references a session that no longer exists"},
 		{s.summarizationLogsCollection, "session_id", sessionIDs, "orphaned_summarization_log", "summarization log references a session that no longer exists"},
 		{s.userFilesCollection, "user_id", userIDs, "orphaned_user_file", "user file references a user that no longer exists"},
+		{s.taskSchedulesCollection, "session_id", sessionIDs, "orphaned_task_schedule", "task schedule references a session that no longer exists"},
+		{s.taskScheduleRunsCollection, "schedule_id", scheduleIDs, "orphaned_task_schedule_run", "task schedule run references a schedule that no longer exists"},
 	}
 	for _, c := range checks {
 		if err := orphanScan(c.coll, c.field, c.parents, c.issueType, c.detail); err != nil {
