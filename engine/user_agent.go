@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ghiac/agentize/browseruse"
 	"github.com/ghiac/agentize/config"
 	"github.com/ghiac/agentize/filestore"
 	"github.com/ghiac/agentize/fsrepo"
@@ -74,6 +75,9 @@ type Engine struct {
 	// ImageEditor, when set, performs real image edits for the manage_files
 	// edit_image action. Pluggable so the app can wire any image model.
 	ImageEditor ImageEditorFunc
+	// BrowserUse, when set, enables autonomous browser jobs through an isolated
+	// browser-use sidecar.
+	BrowserUse browseruse.Service
 	// LLM client and configuration
 	llmClient *openai.Client
 	llmConfig LLMConfig
@@ -208,6 +212,7 @@ func (e *Engine) UseFunctionRegistry(registry *model.FunctionRegistry) {
 	e.RegisterManageFilesTool()
 	e.RegisterTextTools()
 	e.RegisterTaskSchedulerTool()
+	e.RegisterBrowserUseTool()
 }
 
 // UseLLMConfig configures the LLM client for the engine
@@ -995,6 +1000,10 @@ func (e *Engine) GetTools(session *model.Session) []openai.Tool {
 	// this schema without requiring a repository tools.json entry.
 	if e.GetTaskScheduler() != nil {
 		tools = append(tools, TaskSchedulerToolDefinition())
+	}
+	// browser-use is optional and only exposed when a sidecar client is wired.
+	if e.BrowserUse != nil {
+		tools = append(tools, BrowserUseToolDefinition())
 	}
 	return tools
 }

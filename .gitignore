@@ -35,3 +35,6 @@ bin/
 
 # runtime data
 data/
+
+# Local browser-use sidecar secrets
+browseruse/sidecar/.env

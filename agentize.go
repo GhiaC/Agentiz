@@ -9,6 +9,7 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/ghiac/agentize/browseruse"
 	"github.com/ghiac/agentize/debuger"
 	"github.com/ghiac/agentize/debuger/ui"
 	"github.com/ghiac/agentize/engine"
@@ -108,6 +109,9 @@ type Options struct {
 	// ImageEditor, when set, enables the manage_files edit_image action by
 	// wiring an image-capable model/API. Can also be set later via SetImageEditor.
 	ImageEditor engine.ImageEditorFunc
+	// BrowserUse enables the optional autonomous browser tool. The recommended
+	// implementation is browseruse.Client connected to the Docker sidecar.
+	BrowserUse browseruse.Service
 	// DisableToolApprovals opts out of the default human approval gate. By
 	// default every tool call is persisted as a review and waits for an explicit
 	// approve/reject decision before execution.
@@ -191,6 +195,9 @@ func NewWithOptions(path string, opts *Options) (*Agentize, error) {
 	if opts != nil && opts.ImageEditor != nil {
 		eng.ImageEditor = opts.ImageEditor
 	}
+	if opts != nil && opts.BrowserUse != nil {
+		eng.BrowserUse = opts.BrowserUse
+	}
 	eng.Executor = func(toolName string, args map[string]interface{}) (string, error) {
 		if eng.Functions == nil {
 			return "", fmt.Errorf("function registry is not configured")
@@ -215,6 +222,7 @@ func NewWithOptions(path string, opts *Options) (*Agentize, error) {
 	// Create the persistent recurring-task scheduler and expose manage_schedules
 	// as a built-in LLM tool. Its worker starts after UseLLMConfig.
 	eng.InitializeTaskScheduler()
+	eng.RegisterBrowserUseTool()
 
 	// Create Agentize instance
 	ag := &Agentize{
@@ -531,6 +539,12 @@ func (ag *Agentize) UseLLMConfig(config engine.LLMConfig) error {
 // UseFunctionRegistry configures the function registry for tool execution
 func (ag *Agentize) UseFunctionRegistry(registry *model.FunctionRegistry) {
 	ag.engine.UseFunctionRegistry(registry)
+}
+
+// UseBrowserUse enables or replaces the optional browser-use sidecar at
+// runtime. Passing nil hides the tool from subsequent LLM requests.
+func (ag *Agentize) UseBrowserUse(service browseruse.Service) {
+	ag.engine.SetBrowserUse(service)
 }
 
 // InitializeSummaries generates concise summaries for all nodes that don't have one
