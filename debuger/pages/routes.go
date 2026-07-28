@@ -199,7 +199,6 @@ var routeNodeCategories = []dagChartCategory{
 	{"Tool call", "#6f42c1"},
 	{"Agent dispatch", "#198754"},
 	{"Escalation", "#fd7e14"},
-	{"Plan", "#20c997"},
 	{"Response", "#d63384"},
 }
 
@@ -215,10 +214,8 @@ func routeNodeCategoryIndex(t model.RouteNodeType) int {
 		return 3
 	case model.RouteNodeEscalation:
 		return 4
-	case model.RouteNodePlan:
-		return 5
 	case model.RouteNodeResponse:
-		return 6
+		return 5
 	default:
 		return 0
 	}
@@ -236,8 +233,6 @@ func routeNodeEmoji(t model.RouteNodeType) string {
 		return "🤖"
 	case model.RouteNodeEscalation:
 		return "⏫"
-	case model.RouteNodePlan:
-		return "📑"
 	case model.RouteNodeResponse:
 		return "💬"
 	default:

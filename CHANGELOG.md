@@ -9,6 +9,16 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 API, security & observability hardening (improvement roadmap
 [chapter 04](docs/improvements/04-api-security-observability.md)).
 
+### Breaking changes
+
+- Removed the planning DAG subsystem and its public surface:
+  `planning/`, `execute_plan`, `get_plan_status`, `cancel_plan`,
+  `UsePlanning`, `ProcessMessageWithPlanning`, the Plans dashboard, and planning
+  metrics.
+- Agentize-created engines now require an explicit human approval before every
+  tool execution by default. Set `Options.DisableToolApprovals` only when a
+  trusted host supplies an equivalent gate.
+
 ### Fixed
 - **`collect_result` no longer fails with "result not found in session".**
   Oversized tool results were stored on a freshly-fetched session clone inside
@@ -19,6 +29,21 @@ API, security & observability hardening (improvement roadmap
   `MaxToolResultLength`.
 
 ### Added
+- **Deterministic Core workflows.** `execute_workflow` accepts an exact Core-tool
+  DAG, calls no planner LLM, persists every task transition in `workflow_runs`,
+  and requests approval for each immediate task. The admin dashboard exposes
+  workflow list/detail pages.
+- **Scheduled workflow state machines.** `create_workflow_schedule` approves the
+  complete fixed DAG once; later scheduled runs execute without a planner LLM
+  or per-task approval and cannot dispatch or switch agents.
+- **Dedicated schedule memory.** Every prompt/workflow schedule now provisions
+  its own titled/tagged session. Prompt schedules bind to one fixed worker;
+  `max_runs=1` provides one-shot execution.
+- **Durable per-tool approval gate.** `engine.ToolApprovalManager` raises a
+  generic `tool_call` review with the exact tool and arguments, waits for the
+  shared resolution path, and invokes the executor only after approval.
+  Rejections and approval errors fail closed. `CoreHandler.SetToolApprovalManager`
+  propagates the gate to Core tools and all current/future worker agents.
 - **`inspect_result` tool — deterministic inspection of buffered tool output.**
   When a tool result exceeds `MaxToolResultLength` it is buffered under a
   `result_id`; `inspect_result` pulls back parts of it without an LLM via

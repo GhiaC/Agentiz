@@ -93,7 +93,7 @@ func TestUserFileRecordingAndDashboard(t *testing.T) {
 	}
 
 	// The dashboard must render the System Info panel reporting the DB backend.
-	dashHTML, err := pages.RenderDashboardWithPlanning(handler, false, &info)
+	dashHTML, err := pages.RenderDashboard(handler, &info)
 	if err != nil {
 		t.Fatalf("RenderDashboard failed: %v", err)
 	}

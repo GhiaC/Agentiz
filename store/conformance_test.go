@@ -145,6 +145,7 @@ func TestStoreConformance(t *testing.T) {
 			run("Quotas", testQuotas)
 			run("Reviews", testReviews)
 			run("TaskSchedules", testTaskSchedules)
+			run("Workflows", testWorkflows)
 			run("Maintainer", testMaintainer)
 			run("VerifyDetectsOrphans", testVerifyDetectsOrphans)
 			run("MessageSeqRestore", testMessageSeqRestore)
@@ -655,6 +656,17 @@ func testDeleteUserData(t *testing.T, st Store) {
 	}); err != nil {
 		t.Fatalf("PutTaskScheduleRun: %v", err)
 	}
+	workflow := &model.WorkflowRun{
+		WorkflowID: "wf-user-del", UserID: "user-del", SessionID: s.SessionID,
+		Name: "delete me", Status: model.WorkflowPending,
+		Tasks: []*model.WorkflowTask{
+			{ID: "one", Name: "One", Tool: "update_status", Arguments: map[string]any{"message": "hi"}, Status: model.WorkflowTaskPending},
+		},
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if err := st.PutWorkflowRun(workflow); err != nil {
+		t.Fatalf("PutWorkflowRun: %v", err)
+	}
 
 	if err := st.DeleteUserData("user-del"); err != nil {
 		t.Fatalf("DeleteUserData: %v", err)
@@ -677,6 +689,9 @@ func testDeleteUserData(t *testing.T, st Store) {
 	}
 	if runs, _ := st.ListTaskScheduleRuns(schedule.ScheduleID, 10); len(runs) != 0 {
 		t.Errorf("task schedule runs remain after DeleteUserData: %d", len(runs))
+	}
+	if workflows, _ := st.ListWorkflowRuns("user-del", 10); len(workflows) != 0 {
+		t.Errorf("workflow runs remain after DeleteUserData: %d", len(workflows))
 	}
 }
 

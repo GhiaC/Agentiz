@@ -39,6 +39,7 @@ type MongoDBStore struct {
 	reviewsCollection           *mongo.Collection
 	taskSchedulesCollection     *mongo.Collection
 	taskScheduleRunsCollection  *mongo.Collection
+	workflowRunsCollection      *mongo.Collection
 
 	// UserNodes tracks visited nodes for each user (user-level, not session-level)
 	userNodes sync.Map
@@ -167,6 +168,7 @@ func NewMongoDBStore(config MongoDBStoreConfig) (*MongoDBStore, error) {
 		reviewsCollection:           database.Collection("reviews"),
 		taskSchedulesCollection:     database.Collection("task_schedules"),
 		taskScheduleRunsCollection:  database.Collection("task_schedule_runs"),
+		workflowRunsCollection:      database.Collection("workflow_runs"),
 		opTimeout:                   config.OpTimeout,
 	}
 
@@ -471,6 +473,35 @@ func (s *MongoDBStore) initIndexes(ctx context.Context) error {
 		return fmt.Errorf("failed to create task_schedule_runs schedule_id+started_at index: %w", err)
 	}
 
+	// Durable Core workflow list and operational scans.
+	_, err = s.workflowRunsCollection.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{
+			{Key: "user_id", Value: 1},
+			{Key: "created_at", Value: -1},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create workflow_runs user_id+created_at index: %w", err)
+	}
+	_, err = s.workflowRunsCollection.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{
+			{Key: "session_id", Value: 1},
+			{Key: "created_at", Value: -1},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create workflow_runs session_id+created_at index: %w", err)
+	}
+	_, err = s.workflowRunsCollection.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{
+			{Key: "status", Value: 1},
+			{Key: "updated_at", Value: -1},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create workflow_runs status+updated_at index: %w", err)
+	}
+
 	return nil
 }
 
@@ -743,6 +774,11 @@ func (s *MongoDBStore) DeleteUserData(userID string) error {
 	// Delete route_traces by user_id
 	if _, err := s.routeTracesCollection.DeleteMany(ctx, userFilter); err != nil {
 		return fmt.Errorf("failed to delete route_traces: %w", err)
+	}
+
+	// Delete durable workflows by user_id.
+	if _, err := s.workflowRunsCollection.DeleteMany(ctx, userFilter); err != nil {
+		return fmt.Errorf("failed to delete workflow_runs: %w", err)
 	}
 
 	// Delete reviews by user_id
@@ -2661,6 +2697,101 @@ func (s *MongoDBStore) ListTaskScheduleRuns(scheduleID string, limit int) ([]*mo
 	return runs, cursor.Err()
 }
 
+// ============================================================================
+// Durable Core workflows
+// ============================================================================
+
+type workflowRunDocument struct {
+	ID        string    `bson:"_id"`
+	UserID    string    `bson:"user_id"`
+	SessionID string    `bson:"session_id"`
+	Status    string    `bson:"status"`
+	CreatedAt time.Time `bson:"created_at"`
+	UpdatedAt time.Time `bson:"updated_at"`
+	Data      string    `bson:"data"`
+}
+
+func (s *MongoDBStore) PutWorkflowRun(workflow *model.WorkflowRun) error {
+	if _, err := workflow.Validate(); err != nil {
+		return err
+	}
+	data, err := json.Marshal(workflow)
+	if err != nil {
+		return fmt.Errorf("failed to marshal workflow run: %w", err)
+	}
+	doc := workflowRunDocument{
+		ID: workflow.WorkflowID, UserID: workflow.UserID, SessionID: workflow.SessionID,
+		Status: string(workflow.Status), CreatedAt: workflow.CreatedAt,
+		UpdatedAt: workflow.UpdatedAt, Data: string(data),
+	}
+	ctx, cancel := s.opCtx()
+	defer cancel()
+	_, err = s.workflowRunsCollection.ReplaceOne(
+		ctx, bson.M{"_id": workflow.WorkflowID}, doc, options.Replace().SetUpsert(true),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to store workflow run: %w", err)
+	}
+	return nil
+}
+
+func (s *MongoDBStore) GetWorkflowRun(workflowID string) (*model.WorkflowRun, error) {
+	ctx, cancel := s.opCtx()
+	defer cancel()
+	var doc workflowRunDocument
+	err := s.workflowRunsCollection.FindOne(ctx, bson.M{"_id": workflowID}).Decode(&doc)
+	if err == mongo.ErrNoDocuments {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to query workflow run: %w", err)
+	}
+	workflow := &model.WorkflowRun{}
+	if err := unmarshalJSONOrBSON(doc.Data, workflow); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal workflow run: %w", err)
+	}
+	return workflow, nil
+}
+
+func (s *MongoDBStore) ListWorkflowRuns(userID string, limit int) ([]*model.WorkflowRun, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	filter := bson.M{}
+	if userID != "" {
+		filter["user_id"] = userID
+	}
+	ctx, cancel := s.opCtx()
+	defer cancel()
+	cursor, err := s.workflowRunsCollection.Find(
+		ctx, filter,
+		options.Find().
+			SetSort(bson.D{{Key: "created_at", Value: -1}, {Key: "_id", Value: -1}}).
+			SetLimit(int64(limit)),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list workflow runs: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	var workflows []*model.WorkflowRun
+	for cursor.Next(ctx) {
+		var doc workflowRunDocument
+		if err := cursor.Decode(&doc); err != nil {
+			return nil, fmt.Errorf("failed to decode workflow run: %w", err)
+		}
+		workflow := &model.WorkflowRun{}
+		if err := unmarshalJSONOrBSON(doc.Data, workflow); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal workflow run: %w", err)
+		}
+		workflows = append(workflows, workflow)
+	}
+	return workflows, cursor.Err()
+}
+
 // Ensure MongoDBStore implements model.SessionStore and debuger.DebugStore
 var (
 	_ model.SessionStore = (*MongoDBStore)(nil)
@@ -2730,6 +2861,7 @@ func (s *MongoDBStore) Verify() ([]Issue, error) {
 		{s.toolCallsCollection, "session_id", sessionIDs, "orphaned_tool_call", "tool call references a session that no longer exists"},
 		{s.openedFilesCollection, "session_id", sessionIDs, "orphaned_opened_file", "opened file references a session that no longer exists"},
 		{s.routeTracesCollection, "session_id", sessionIDs, "orphaned_route_trace", "route trace references a session that no longer exists"},
+		{s.workflowRunsCollection, "session_id", sessionIDs, "orphaned_workflow_run", "workflow references a session that no longer exists"},
 		{s.summarizationLogsCollection, "session_id", sessionIDs, "orphaned_summarization_log", "summarization log references a session that no longer exists"},
 		{s.userFilesCollection, "user_id", userIDs, "orphaned_user_file", "user file references a user that no longer exists"},
 		{s.taskSchedulesCollection, "session_id", sessionIDs, "orphaned_task_schedule", "task schedule references a session that no longer exists"},

@@ -15,6 +15,8 @@ const (
 	StatusAnalyzing     StatusPhase = "analyzing"      // checking nonsense, building prompts
 	StatusRouting       StatusPhase = "routing"        // Core deciding high/low agent
 	StatusThinking      StatusPhase = "thinking"       // waiting for LLM response
+	StatusToolApproval  StatusPhase = "tool_approval"  // waiting for a human approve/reject decision
+	StatusToolRejected  StatusPhase = "tool_rejected"  // human/policy rejected the tool before execution
 	StatusToolExecuting StatusPhase = "tool_executing" // executing a tool
 	StatusToolDone      StatusPhase = "tool_done"      // tool finished
 	StatusAgentCalling  StatusPhase = "agent_calling"  // delegating to user agent

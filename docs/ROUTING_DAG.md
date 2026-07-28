@@ -19,7 +19,6 @@ The trace is **persisted to the database** (SQLite and MongoDB, at parity) and
 👤 User message
    └─ 🧠 Decision 1            (one Core LLM turn; model, tokens, finish reason)
         ├─ 🔧 Tool call         (web_search, update_status, create_session, …)
-        ├─ 📑 Plan              (execute_plan → planning layer)
         └─ 🧠 Decision 2
              └─ 🤖 Agent dispatch   (call_agent_<name>; the routing decision)
                   └─ ⏫ Escalation   (ESCALATE: → higher-tier agent)
@@ -35,7 +34,6 @@ Node types (`model.RouteNodeType`):
 | `tool_call` | a non-routing Core tool (`web_search`, `update_status`, sessions, `ban_user`, …) |
 | `agent_dispatch` | a forward to a worker agent via `call_agent_<name>` — the Core's routing decision |
 | `escalation` | a forward to a higher cost tier after an `ESCALATE:` reply |
-| `plan` | an `execute_plan` invocation handed to the planning layer |
 | `response` | the terminal answer to the user |
 
 Each node carries a status (`ok` / `error` / `blocked` / `skipped`), and
@@ -45,7 +43,7 @@ dispatch/escalation nodes carry the agent name plus per-agent timing.
 
 - Decisions form a **spine**: `user → decision1 → decision2 → …` (each LLM turn feeds
   the previous turn's tool results back in).
-- Tool / dispatch / plan nodes **branch off** the decision that invoked them.
+- Tool / dispatch nodes **branch off** the decision that invoked them.
 - An escalation hangs off the dispatch it escalated from.
 - The response hangs off the final decision — or, when the Core dispatched, off the
   **agent node** whose answer it returned verbatim. That edge ("returns") is the

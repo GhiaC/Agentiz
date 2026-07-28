@@ -14,7 +14,6 @@ import (
 	"github.com/ghiac/agentize/log"
 	"github.com/ghiac/agentize/metrics"
 	"github.com/ghiac/agentize/model"
-	"github.com/ghiac/agentize/planning"
 	"github.com/sashabaranov/go-openai"
 )
 
@@ -161,8 +160,9 @@ type CoreHandler struct {
 
 	Callback engine.Callback
 
-	// orchestrator is the planning orchestrator; when set, execute_plan tool and Planning prompt are available.
-	orchestrator *planning.Orchestrator
+	// toolApprovalManager, when set, gates every Core and worker-agent tool call
+	// on an explicit human approval.
+	toolApprovalManager engine.ToolApprovalManager
 
 	// fileRecorder, when set, records files the user sends (e.g. images) as
 	// user files. Wire it to Agentize.RecordUserFile via SetFileRecorder.
@@ -235,17 +235,12 @@ func (ch *CoreHandler) SetCallback(cb engine.Callback) {
 	ch.agents.SetCallback(cb)
 }
 
-// UsePlanning enables the planning layer in Core. When set, the Core agent gets execute_plan (and optionally get_plan_status, cancel_plan)
-// plus the Planning decision-making prompt so it can run and control multi-step tasks.
-func (ch *CoreHandler) UsePlanning(o *planning.Orchestrator) {
-	ch.orchestrator = o
-	if ch.llmClient != nil {
-		o.SetLLMClient(ch.llmClient, ch.config.CoreModel)
-	}
-	coreToolNoOp := func(map[string]interface{}) (string, error) { return "", nil }
-	ch.coreTools.MustRegister("execute_plan", "Execute plan", coreToolNoOp)
-	ch.coreTools.MustRegister("get_plan_status", "Get plan status", coreToolNoOp)
-	ch.coreTools.MustRegister("cancel_plan", "Cancel plan", coreToolNoOp)
+// SetToolApprovalManager enables approval gating for every Core tool and
+// propagates the same gate to all current and future worker agents. Passing nil
+// disables the gate.
+func (ch *CoreHandler) SetToolApprovalManager(manager engine.ToolApprovalManager) {
+	ch.toolApprovalManager = manager
+	ch.agents.SetToolApprovalManager(manager)
 }
 
 // UseLLMConfig configures the LLM client for the Core's orchestration.
@@ -276,9 +271,6 @@ func (ch *CoreHandler) UseLLMConfig(config engine.LLMConfig) error {
 		ch.saveUser,
 	)
 
-	if ch.orchestrator != nil {
-		ch.orchestrator.SetLLMClient(ch.llmClient, ch.config.CoreModel)
-	}
 	if ch.taskScheduler != nil {
 		ch.taskScheduler.Start(context.Background())
 	}

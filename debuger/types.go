@@ -37,8 +37,14 @@ type DebugStore interface {
 	GetRouteTracesByUser(userID string) ([]*model.RouteTrace, error)
 	GetAllRouteTraces() ([]*model.RouteTrace, error)
 
+	// Durable Core workflows. Get-by-id returns (nil, nil) when absent; list
+	// queries return newest-first and an empty userID lists all workflows.
+	GetWorkflowRun(workflowID string) (*model.WorkflowRun, error)
+	ListWorkflowRuns(userID string, limit int) ([]*model.WorkflowRun, error)
+
 	// DeleteUserData deletes all sessions, messages, tool calls, summarization logs,
-	// route traces, and opened files for a user. Resets user's ActiveSessionIDs and SessionSeqs.
+	// route traces, workflows, and opened files for a user. Resets user's
+	// ActiveSessionIDs and SessionSeqs.
 	DeleteUserData(userID string) error
 }
 

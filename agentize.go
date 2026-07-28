@@ -19,7 +19,6 @@ import (
 	"github.com/ghiac/agentize/log"
 	"github.com/ghiac/agentize/metrics"
 	"github.com/ghiac/agentize/model"
-	"github.com/ghiac/agentize/planning"
 	"github.com/ghiac/agentize/review"
 	"github.com/ghiac/agentize/store"
 	"github.com/ghiac/agentize/visualize"
@@ -76,9 +75,6 @@ type Agentize struct {
 	// Optional: hook called after DeleteUserData (sessions/messages) so app can delete quota/consumption etc.
 	userDeleteDataHook func(userID string) error
 
-	// Optional: planning orchestrator (nil = planning disabled)
-	orchestrator *planning.Orchestrator
-
 	// Human-in-the-loop reviews. The manager is created lazily (the store always
 	// supports reviews); a metrics ResolveListener is registered on creation.
 	reviewManager *review.Manager
@@ -112,6 +108,10 @@ type Options struct {
 	// ImageEditor, when set, enables the manage_files edit_image action by
 	// wiring an image-capable model/API. Can also be set later via SetImageEditor.
 	ImageEditor engine.ImageEditorFunc
+	// DisableToolApprovals opts out of the default human approval gate. By
+	// default every tool call is persisted as a review and waits for an explicit
+	// approve/reject decision before execution.
+	DisableToolApprovals bool
 }
 
 // New creates a new Agentize instance by loading the entire knowledge tree from the given path
@@ -220,6 +220,9 @@ func NewWithOptions(path string, opts *Options) (*Agentize, error) {
 	ag := &Agentize{
 		engine: eng,
 		nodes:  make(map[string]*model.Node),
+	}
+	if opts == nil || !opts.DisableToolApprovals {
+		eng.SetToolApprovalManager(ag.ReviewManager())
 	}
 
 	// Load all nodes recursively (for visualization cache)
@@ -371,12 +374,7 @@ func (ag *Agentize) GetReviewStore() review.Store {
 }
 
 // ReviewManager returns the lazily-created review manager — the one object every
-// frontend talks to. Use it to wire resume-on-review for planning, e.g.:
-//
-//	ag.ReviewManager().OnResolve(planning.ResumeOnReview(runner, nil))
-//
-// so a decision from any UI (the debug dashboard form, a Telegram button, an API
-// call) resumes the suspended plan through the single Resolve entry point.
+// frontend and tool-approval gate talks to.
 func (ag *Agentize) ReviewManager() *review.Manager {
 	ag.reviewMu.Lock()
 	defer ag.reviewMu.Unlock()
@@ -400,7 +398,7 @@ func (ag *Agentize) SetReviewNotifier(n review.Notifier) {
 }
 
 // RequestReview creates a pending review, persists it, fires the notifier, and
-// returns its id. Generic and not planning-specific (Kind/RefID describe the
+// returns its id. Generic (Kind/RefID describe the
 // subject) so any host code can gate any action on a human decision.
 func (ag *Agentize) RequestReview(ctx context.Context, r *model.ReviewRequest) (string, error) {
 	id, err := ag.ReviewManager().Request(ctx, r)
@@ -634,55 +632,6 @@ func appendUploadedFilesNote(userMessage string, files []*model.UserFile) string
 	return b.String()
 }
 
-// UsePlanning enables the planning layer with the given planner and runner.
-// The Plans debug pages are always registered; when planning is enabled they show plan data.
-func (ag *Agentize) UsePlanning(planner planning.Planner, runner planning.Runner, opts ...planning.OrchestratorOption) {
-	ag.orchestrator = planning.NewOrchestrator(planner, runner, opts...)
-}
-
-// GetOrchestrator returns the planning orchestrator, or nil if planning is not enabled.
-func (ag *Agentize) GetOrchestrator() *planning.Orchestrator {
-	return ag.orchestrator
-}
-
-// GetPlanStore returns the plan store when planning is enabled, otherwise nil.
-func (ag *Agentize) GetPlanStore() planning.PlanStore {
-	if ag.orchestrator == nil {
-		return nil
-	}
-	return ag.orchestrator.GetStore()
-}
-
-// EnsurePlanningSeed runs initial plan seeding when the store is empty and config allows.
-// Call once at startup after UsePlanning so the Plans dashboard has template data to display.
-func (ag *Agentize) EnsurePlanningSeed(ctx context.Context) error {
-	if ag.orchestrator == nil {
-		return nil
-	}
-	return ag.orchestrator.EnsureSeed(ctx)
-}
-
-// ProcessMessageWithPlanning uses the planning orchestrator when enabled; otherwise falls back to ProcessMessage.
-func (ag *Agentize) ProcessMessageWithPlanning(ctx context.Context, sessionID string, userMessage string) (string, int, error) {
-	if ag.orchestrator == nil {
-		return ag.ProcessMessage(ctx, sessionID, userMessage)
-	}
-	sess, err := ag.engine.Sessions.Get(sessionID)
-	if err != nil {
-		return "", 0, err
-	}
-	input := planning.PlanInput{
-		UserID:    sess.UserID,
-		SessionID: sessionID,
-		Message:   userMessage,
-	}
-	result, err := ag.orchestrator.Execute(ctx, input)
-	if err != nil {
-		return "", 0, err
-	}
-	return result.Output, result.TotalTokens, nil
-}
-
 // CreateSession initializes a fresh session anchored at the root node
 func (ag *Agentize) CreateSession(userID string) (*model.Session, error) {
 	return ag.engine.CreateSession(userID)
@@ -779,23 +728,5 @@ func (ag *Agentize) WaitForShutdown() {
 	if ag.engine != nil {
 		ag.engine.StopTaskScheduler()
 	}
-	ag.ShutdownPlanStore(context.Background())
-
 	log.Log.Infof("[Agentize] ✅ Graceful shutdown completed")
-}
-
-// ShutdownPlanStore flushes and closes the plan store if it implements PlanStoreWithShutdown (e.g. MemoryStore with Persister).
-// Call on graceful shutdown so in-memory plans are persisted.
-func (ag *Agentize) ShutdownPlanStore(ctx context.Context) {
-	store := ag.GetPlanStore()
-	if store == nil {
-		return
-	}
-	if s, ok := store.(planning.PlanStoreWithShutdown); ok {
-		if err := s.Shutdown(ctx); err != nil {
-			log.Log.Warnf("[Agentize] ⚠️ Plan store shutdown: %v", err)
-		} else {
-			log.Log.Infof("[Agentize] 📦 Plan store shutdown (flush complete)")
-		}
-	}
 }

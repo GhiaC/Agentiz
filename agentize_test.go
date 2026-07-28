@@ -57,6 +57,22 @@ func TestNewWithOptions(t *testing.T) {
 	if ag == nil {
 		t.Error("Expected Agentize instance, got nil")
 	}
+	if ag.GetEngine().ToolApprovalManager == nil {
+		t.Fatal("tool approvals must be enabled by default")
+	}
+}
+
+func TestNewWithOptionsCanDisableToolApprovals(t *testing.T) {
+	tmpDir := createTestKnowledgeTree(t)
+	defer os.RemoveAll(tmpDir)
+
+	ag, err := NewWithOptions(tmpDir, &Options{DisableToolApprovals: true})
+	if err != nil {
+		t.Fatalf("NewWithOptions: %v", err)
+	}
+	if ag.GetEngine().ToolApprovalManager != nil {
+		t.Fatal("tool approvals were not disabled explicitly")
+	}
 }
 
 func TestGetNode(t *testing.T) {

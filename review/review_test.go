@@ -61,7 +61,7 @@ func TestManager_RequestNormalizesAndNotifies(t *testing.T) {
 		return nil
 	})
 
-	id, err := m.Request(context.Background(), &model.ReviewRequest{Kind: "plan_step", RefID: "p/s", UserID: "u1"})
+	id, err := m.Request(context.Background(), &model.ReviewRequest{Kind: "tool_call", RefID: "s1-t1", UserID: "u1"})
 	if err != nil || id == "" {
 		t.Fatalf("Request: err=%v id=%q", err, id)
 	}
@@ -75,7 +75,7 @@ func TestManager_RequestNormalizesAndNotifies(t *testing.T) {
 
 func TestManager_AwaitWokenByResolve(t *testing.T) {
 	m := review.New(newFakeStore(), nil)
-	id, _ := m.Request(context.Background(), &model.ReviewRequest{Kind: "plan_step", RefID: "p/s", UserID: "u1"})
+	id, _ := m.Request(context.Background(), &model.ReviewRequest{Kind: "tool_call", RefID: "s1-t1", UserID: "u1"})
 
 	done := make(chan *model.ReviewRequest, 1)
 	go func() {
@@ -144,7 +144,7 @@ func TestManager_OnResolveListenerFires(t *testing.T) {
 	m := review.New(newFakeStore(), nil)
 	var got *model.ReviewRequest
 	m.OnResolve(func(_ context.Context, r *model.ReviewRequest) { got = r })
-	id, _ := m.Request(context.Background(), &model.ReviewRequest{Kind: "plan_step", RefID: "plan-7/step-1", UserID: "u1"})
+	id, _ := m.Request(context.Background(), &model.ReviewRequest{Kind: "tool_call", RefID: "s1-t1", UserID: "u1"})
 	if _, err := m.Resolve(context.Background(), id, "approve", "", "admin"); err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}

@@ -2,7 +2,7 @@
 //
 // It is meticulous by design: every metered activity — message processing (Core
 // and per-agent), LLM calls (by purpose), tool calls, agent routing/escalation,
-// backup-LLM fallbacks, the session-summarization scheduler, planning, knowledge
+// backup-LLM fallbacks, the session-summarization scheduler, knowledge
 // file opens and moderation — is recorded here. All collectors live on a
 // dedicated registry (see registry below) together with the Go runtime/process
 // collectors, so the exposed handler reports a known, bounded set of series
@@ -336,7 +336,7 @@ func SchedulerSummary(status string, dur time.Duration) {
 }
 
 // ---------------------------------------------------------------------------
-// Knowledge, moderation, planning
+// Knowledge and moderation
 // ---------------------------------------------------------------------------
 
 var (
@@ -354,16 +354,6 @@ var (
 		Namespace: namespace, Subsystem: "moderation", Name: "bans_total",
 		Help: "User bans applied by reason (nonsense|offensive|manual).",
 	}, []string{"reason"})
-
-	planRuns = factory.NewCounterVec(prometheus.CounterOpts{
-		Namespace: namespace, Subsystem: "planning", Name: "runs_total",
-		Help: "Plan executions by status (ok|error).",
-	}, []string{"status"})
-
-	planSteps = factory.NewCounterVec(prometheus.CounterOpts{
-		Namespace: namespace, Subsystem: "planning", Name: "steps_total",
-		Help: "Plan steps executed by status (ok|error).",
-	}, []string{"status"})
 )
 
 // KnowledgeOpen records a knowledge file open.
@@ -379,12 +369,6 @@ func Ban(reason string) {
 	}
 	bans.WithLabelValues(reason).Inc()
 }
-
-// PlanRun records a plan execution outcome.
-func PlanRun(status string) { planRuns.WithLabelValues(status).Inc() }
-
-// PlanStep records a plan step outcome.
-func PlanStep(status string) { planSteps.WithLabelValues(status).Inc() }
 
 // ---------------------------------------------------------------------------
 // User files (file manager)
@@ -492,7 +476,7 @@ func RecordStoreDeletion(entity string) {
 var (
 	reviewsTotal = factory.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace, Subsystem: "reviews", Name: "total",
-		Help: "Human-in-the-loop review decisions by kind (plan_step|tool_call|payment|custom) and decision (approved|rejected|expired|canceled).",
+		Help: "Human-in-the-loop review decisions by kind (tool_call|payment|custom) and decision (approved|rejected|expired|canceled).",
 	}, []string{"kind", "decision"})
 
 	reviewsPending = factory.NewGauge(prometheus.GaugeOpts{

@@ -102,6 +102,12 @@ type Store interface {
 	// ListTaskScheduleRuns returns newest runs first. limit <= 0 uses a safe default.
 	ListTaskScheduleRuns(scheduleID string, limit int) ([]*model.TaskScheduleRun, error)
 
+	// --- Durable deterministic Core workflows ---
+
+	// PutWorkflowRun upserts a workflow and its complete task DAG.
+	// Read methods live on debuger.DebugStore.
+	PutWorkflowRun(workflow *model.WorkflowRun) error
+
 	// --- Visited-node tracking (user-scoped, in-memory, not persisted) ---
 
 	AddVisitedNode(userID string, nodeDigest *model.NodeDigest)

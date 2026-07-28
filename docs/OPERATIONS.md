@@ -43,7 +43,6 @@ Drain in this order so nothing is lost mid-write:
 
 ```go
 ag.StopScheduler()                 // stop the background summarizer
-ag.ShutdownPlanStore(ctx)          // flush the plan store (if planning is enabled)
 _ = store.Close()                  // close the DB handle / Mongo client you opened
 ```
 
@@ -80,15 +79,28 @@ Audit** row covering store latency, summary age, audit actions, and deletions.
 
 ## Human-in-the-loop reviews
 
-When a step or action needs a human "approve / reject" before proceeding, raise a
-durable `ReviewRequest` (see [REVIEWS.md](REVIEWS.md)). Pending reviews are listed,
+Every tool invocation is gated by a durable "approve / reject" request when a
+`ToolApprovalManager` is configured. Agentize-created engines enable this by
+default; Core + worker deployments should call
+`ch.SetToolApprovalManager(ag.ReviewManager())`. The execution goroutine waits
+without invoking the tool and resumes only after approval. Rejection and
+approval-system errors fail closed. Hosts can also raise a durable
+`ReviewRequest` (see [REVIEWS.md](REVIEWS.md)). Pending reviews are listed,
 approved, and rejected at **`/agentize/debug/reviews`** (admin-gated; resolutions
 are audit-logged as `agentize_audit_actions_total{action="resolve_review"}`), and
-the same `Resolve` call backs a Telegram bot or any HTTP frontend. A planning
-`human_review` step with an async reviewer **suspends** the plan (status
-`waiting`, persisted) rather than parking a goroutine, and resumes when the review
-is resolved — surviving a process restart. Watch `agentize_reviews_pending` for a
-growing backlog of unresolved approvals.
+the same `Resolve` call backs a Telegram bot or any HTTP frontend. Watch
+`agentize_reviews_pending` for a growing backlog of unresolved approvals.
+
+Deterministic workflow runs are visible at `/agentize/debug/workflows`; their
+schedule links and task outputs are persisted in `workflow_runs`. Immediate
+workflows can wait on per-task reviews. A scheduled workflow is approved once
+at creation and then executes its unchanged DAG without per-run approvals.
+Schedule detail pages link to each workflow run and to the schedule's dedicated
+memory session.
+
+The workflow runner is process-local. State transitions are durable, but an
+activity interrupted by a process crash is not automatically replayed; inspect
+stale `running` workflows before manually retrying side-effecting work.
 
 ## Scaling
 

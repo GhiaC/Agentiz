@@ -62,6 +62,10 @@ your own results, never another user's. Pull back just what you need with:
 6. **Errors** — Analyze, suggest fixes
 7. **Stop after 3 fails** — Report to user
 
+Every tool invocation may pause for explicit human approval. Call tools
+incrementally as the task progresses, never claim execution before receiving a
+tool result, and respect a rejected tool instead of retrying it unchanged.
+
 ---
 
 ## Clarification Guidelines

@@ -282,7 +282,7 @@ func testReviews(t *testing.T, st Store) {
 		t.Fatalf("GetReviewRequest(absent) = %v, %v; want nil, nil", got, err)
 	}
 
-	r := model.NewReviewRequest("plan_step", "plan-1/step-2")
+	r := model.NewReviewRequest("tool_call", "session-1-t2")
 	r.UserID = "user-1"
 	r.SessionID = "sess-1"
 	r.Title = "Approve deploy"
@@ -295,7 +295,7 @@ func testReviews(t *testing.T, st Store) {
 	if err != nil || got == nil {
 		t.Fatalf("GetReviewRequest: %v, %v", got, err)
 	}
-	if got.Kind != "plan_step" || got.RefID != "plan-1/step-2" || got.Status != model.ReviewPending || got.Title != "Approve deploy" {
+	if got.Kind != "tool_call" || got.RefID != "session-1-t2" || got.Status != model.ReviewPending || got.Title != "Approve deploy" {
 		t.Errorf("round-trip mismatch: %+v", got)
 	}
 

@@ -19,7 +19,8 @@ func TaskSchedulerToolDefinition() openai.Tool {
 		Function: &openai.FunctionDefinition{
 			Name: "manage_schedules",
 			Description: "Create and manage persistent recurring tasks owned by the current user/session. " +
-				"A schedule repeatedly sends its prompt through this agent. Optionally set conclusion_model " +
+				"Each schedule gets a dedicated session, so its history and memory are isolated and retained. " +
+				"A schedule repeatedly sends its prompt through one fixed agent. Optionally set conclusion_model " +
 				"to send each raw output to a cheaper model for a compact conclusion. " +
 				"Actions: create, list, get, stop, resume, run_now, delete.",
 			Parameters: map[string]interface{}{
@@ -37,6 +38,10 @@ func TaskSchedulerToolDefinition() openai.Tool {
 						"type":        "string",
 						"description": "Short schedule name; required for create.",
 					},
+					"agent_name": map[string]interface{}{
+						"type":        "string",
+						"description": "Core only: fixed worker agent that owns the schedule's dedicated session; required when Core creates a prompt schedule.",
+					},
 					"prompt": map[string]interface{}{
 						"type":        "string",
 						"description": "Task to execute on every iteration; required for create.",
@@ -46,6 +51,11 @@ func TaskSchedulerToolDefinition() openai.Tool {
 						"minimum":     1,
 						"maximum":     31536000,
 						"description": "Delay between completed runs, in seconds; required for create.",
+					},
+					"max_runs": map[string]interface{}{
+						"type":        "integer",
+						"minimum":     0,
+						"description": "Optional execution limit. 0 or omitted repeats forever; 1 creates a one-shot schedule.",
 					},
 					"conclusion_model": map[string]interface{}{
 						"type":        "string",
@@ -84,6 +94,23 @@ func (e *Engine) RegisterTaskSchedulerTool() {
 // ExecuteTool applies a manage_schedules action with trusted identity injected
 // under __user_id__ and __session_id__ by the Engine/Core runtimes.
 func (s *TaskScheduler) ExecuteTool(args map[string]interface{}) (string, error) {
+	return s.executeTool(args, "")
+}
+
+// ExecuteToolForAgent is the trusted Core entry point for binding a newly
+// created prompt schedule to one fixed worker-agent type. The model cannot set
+// agentType itself; Core resolves agent_name through AgentManager first.
+func (s *TaskScheduler) ExecuteToolForAgent(
+	args map[string]interface{},
+	agentType model.AgentType,
+) (string, error) {
+	return s.executeTool(args, agentType)
+}
+
+func (s *TaskScheduler) executeTool(
+	args map[string]interface{},
+	agentType model.AgentType,
+) (string, error) {
 	if s == nil {
 		return "", fmt.Errorf("task scheduler is not configured")
 	}
@@ -109,9 +136,15 @@ func (s *TaskScheduler) ExecuteTool(args map[string]interface{}) (string, error)
 		if err != nil {
 			return "", err
 		}
+		maxRuns, err := taskScheduleOptionalInteger(args, "max_runs")
+		if err != nil {
+			return "", err
+		}
 		schedule, err := s.Create(CreateTaskScheduleInput{
-			UserID: userID, SessionID: sessionID, Name: name, Prompt: prompt,
+			UserID: userID, SessionID: sessionID, AgentType: agentType,
+			Name: name, Prompt: prompt,
 			Interval:         time.Duration(seconds) * time.Second,
+			MaxRuns:          maxRuns,
 			ConclusionModel:  taskScheduleOptionalString(args, "conclusion_model"),
 			ConclusionPrompt: taskScheduleOptionalString(args, "conclusion_prompt"),
 		})
@@ -253,11 +286,51 @@ func taskScheduleInteger(args map[string]interface{}, key string) (int64, error)
 	return value, nil
 }
 
+func taskScheduleOptionalInteger(args map[string]interface{}, key string) (int64, error) {
+	if _, exists := args[key]; !exists {
+		return 0, nil
+	}
+	return taskScheduleIntegerRange(args, key, 0, 1_000_000)
+}
+
+func taskScheduleIntegerRange(args map[string]interface{}, key string, minValue, maxValue int64) (int64, error) {
+	var value int64
+	switch raw := args[key].(type) {
+	case int:
+		value = int64(raw)
+	case int64:
+		value = raw
+	case float64:
+		if math.Trunc(raw) != raw {
+			return 0, fmt.Errorf("%s must be an integer", key)
+		}
+		value = int64(raw)
+	case json.Number:
+		parsed, err := raw.Int64()
+		if err != nil {
+			return 0, fmt.Errorf("%s must be an integer", key)
+		}
+		value = parsed
+	default:
+		return 0, fmt.Errorf("%s must be an integer", key)
+	}
+	if value < minValue || value > maxValue {
+		return 0, fmt.Errorf("%s must be between %d and %d", key, minValue, maxValue)
+	}
+	return value, nil
+}
+
 func taskScheduleSummary(schedule *model.TaskSchedule) map[string]interface{} {
+	kind := "prompt"
+	if len(schedule.WorkflowTasks) > 0 {
+		kind = "workflow"
+	}
 	return map[string]interface{}{
 		"schedule_id": schedule.ScheduleID, "name": schedule.Name, "status": schedule.Status,
+		"kind": kind, "agent_type": schedule.AgentType, "session_id": schedule.SessionID,
 		"interval_seconds": schedule.IntervalSeconds, "next_run_at": schedule.NextRunAt,
-		"run_count": schedule.RunCount, "last_run_status": schedule.LastRunStatus,
+		"max_runs": schedule.MaxRuns, "run_count": schedule.RunCount,
+		"last_run_status": schedule.LastRunStatus, "last_workflow_id": schedule.LastWorkflowID,
 		"last_conclusion":  truncateTaskScheduleText(schedule.LastConclusion, 1000),
 		"last_error":       truncateTaskScheduleText(schedule.LastError, 1000),
 		"conclusion_model": schedule.ConclusionModel,

@@ -29,13 +29,12 @@ func TestDumpRouteDAGHTML(t *testing.T) {
 		t.Fatalf("handler: %v", err)
 	}
 
-	// A trace that exercises every node type: decision -> (tool + plan), a second
-	// decision that dispatches and then escalates, ending in the agent's answer.
+	// A trace that exercises every node type: decision -> tool, a second decision
+	// that dispatches and then escalates, ending in the agent's answer.
 	sess := model.NewSessionWithType("user-42", model.AgentTypeCore)
 	b := model.NewRouteTraceBuilder(sess, "مقایسه قیمت طلا و دلار را برام تحلیل کن و یک جدول بده")
 	b.Decision("Decision 1", "openai/gpt-5-nano", 320, 540, model.RouteStatusOK, "finish_reason=tool_calls · tool_calls=2")
 	b.Tool(model.RouteNodeToolCall, "web_search", "جستجوی وب", `{"query":"gold vs usd price"}`, model.RouteStatusOK, 880)
-	b.Tool(model.RouteNodePlan, "execute_plan", "Execute plan", `{"message":"compare then tabulate"}`, model.RouteStatusOK, 1500)
 	b.Decision("Decision 2", "openai/gpt-5-nano", 410, 600, model.RouteStatusOK, "finish_reason=tool_calls · tool_calls=1")
 	b.Dispatch("low", "هوش سطح پایین", "compare gold and usd", model.RouteStatusOK, 1300)
 	b.Escalate("high", "هوش سطح بالا", "compare gold and usd (escalated)", model.RouteStatusOK, 2600)

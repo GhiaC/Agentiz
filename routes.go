@@ -73,12 +73,12 @@ func (ag *Agentize) RegisterRoutes(router *gin.Engine) {
 	router.POST("/agentize/debug/users/:userID/delete-data", p(ag.handleDebugUserDeleteData))
 	router.GET("/agentize/debug/sessions", p(ag.handleDebugSessions))
 	router.GET("/agentize/debug/sessions/:sessionID", p(ag.handleDebugSessionDetail))
-	router.GET("/agentize/debug/plans", p(ag.handleDebugPlans))
-	router.GET("/agentize/debug/plans/:planID", p(ag.handleDebugPlanDetail))
 	router.GET("/agentize/debug/schedules", p(ag.handleDebugSchedules))
 	router.POST("/agentize/debug/schedules", p(ag.handleDebugScheduleCreate))
 	router.GET("/agentize/debug/schedules/:scheduleID", p(ag.handleDebugScheduleDetail))
 	router.POST("/agentize/debug/schedules/:scheduleID/:action", p(ag.handleDebugScheduleAction))
+	router.GET("/agentize/debug/workflows", p(ag.handleDebugWorkflows))
+	router.GET("/agentize/debug/workflows/:workflowID", p(ag.handleDebugWorkflowDetail))
 	router.GET("/agentize/debug/messages", p(ag.handleDebugMessages))
 	router.GET("/agentize/debug/files", p(ag.handleDebugFiles))
 	router.GET("/agentize/debug/documents", p(ag.handleDebugDocuments))
@@ -248,7 +248,7 @@ func (ag *Agentize) handleDebug(c *gin.Context) {
 	}
 
 	sysInfo := ag.SystemInfo()
-	html, err := pages.RenderDashboardWithPlanning(handler, ag.GetPlanStore() != nil, &sysInfo)
+	html, err := pages.RenderDashboard(handler, &sysInfo)
 	if err != nil {
 		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to generate debug page: %v", err)})
 		return
@@ -289,12 +289,21 @@ func (ag *Agentize) handleDebugScheduleCreate(c *gin.Context) {
 		redirectSchedulePage(c, "", fmt.Errorf("interval must be a whole number of seconds"))
 		return
 	}
+	maxRuns := int64(0)
+	if raw := strings.TrimSpace(c.PostForm("max_runs")); raw != "" {
+		maxRuns, err = strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			redirectSchedulePage(c, "", fmt.Errorf("max runs must be a whole number"))
+			return
+		}
+	}
 	schedule, err := scheduler.Create(engine.CreateTaskScheduleInput{
 		UserID:           strings.TrimSpace(c.PostForm("user_id")),
 		SessionID:        strings.TrimSpace(c.PostForm("session_id")),
 		Name:             strings.TrimSpace(c.PostForm("name")),
 		Prompt:           strings.TrimSpace(c.PostForm("prompt")),
 		Interval:         time.Duration(seconds) * time.Second,
+		MaxRuns:          maxRuns,
 		ConclusionModel:  strings.TrimSpace(c.PostForm("conclusion_model")),
 		ConclusionPrompt: strings.TrimSpace(c.PostForm("conclusion_prompt")),
 	})
@@ -373,6 +382,47 @@ func redirectSchedulePage(c *gin.Context, notice string, err error) {
 		target += "?" + encoded
 	}
 	c.Redirect(http.StatusSeeOther, target)
+}
+
+// handleDebugWorkflows renders durable deterministic workflow runs.
+func (ag *Agentize) handleDebugWorkflows(c *gin.Context) {
+	handler, err := ag.createDebugHandler()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	html, err := pages.RenderWorkflows(handler, getPageParam(c))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.Header("Content-Type", "text/html; charset=utf-8")
+	c.String(http.StatusOK, html)
+}
+
+// handleDebugWorkflowDetail renders one persisted workflow DAG.
+func (ag *Agentize) handleDebugWorkflowDetail(c *gin.Context) {
+	workflowID := strings.TrimSpace(c.Param("workflowID"))
+	if workflowID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "workflowID parameter is required"})
+		return
+	}
+	handler, err := ag.createDebugHandler()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	html, err := pages.RenderWorkflowDetail(handler, workflowID)
+	if err != nil {
+		if strings.Contains(err.Error(), "workflow not found") {
+			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.Header("Content-Type", "text/html; charset=utf-8")
+	c.String(http.StatusOK, html)
 }
 
 // handleDebugUsers handles users list page requests
@@ -569,34 +619,6 @@ func (ag *Agentize) handleDebugSessionDetail(c *gin.Context) {
 		return
 	}
 
-	c.Header("Content-Type", "text/html; charset=utf-8")
-	c.String(200, html)
-}
-
-// handleDebugPlans handles plans list page requests (planning execution plans)
-func (ag *Agentize) handleDebugPlans(c *gin.Context) {
-	page := getPageParam(c)
-	html, err := pages.RenderPlans(ag.GetPlanStore(), page)
-	if err != nil {
-		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to generate plans page: %v", err)})
-		return
-	}
-	c.Header("Content-Type", "text/html; charset=utf-8")
-	c.String(200, html)
-}
-
-// handleDebugPlanDetail handles plan detail page requests
-func (ag *Agentize) handleDebugPlanDetail(c *gin.Context) {
-	planID := c.Param("planID")
-	if planID == "" {
-		c.JSON(400, gin.H{"error": "planID parameter is required"})
-		return
-	}
-	html, err := pages.RenderPlanDetail(ag.GetPlanStore(), planID)
-	if err != nil {
-		c.JSON(500, gin.H{"error": fmt.Sprintf("Failed to generate plan detail page: %v", err)})
-		return
-	}
 	c.Header("Content-Type", "text/html; charset=utf-8")
 	c.String(200, html)
 }

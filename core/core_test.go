@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -12,10 +13,25 @@ import (
 	"github.com/ghiac/agentize/engine"
 	"github.com/ghiac/agentize/fsrepo"
 	"github.com/ghiac/agentize/model"
-	"github.com/ghiac/agentize/planning"
 	"github.com/ghiac/agentize/store"
 	"github.com/sashabaranov/go-openai"
 )
+
+type rejectingToolApprovalManager struct {
+	requested *model.ReviewRequest
+}
+
+func (m *rejectingToolApprovalManager) Request(_ context.Context, r *model.ReviewRequest) (string, error) {
+	r.ID = "rev_core_reject"
+	m.requested = r
+	return r.ID, nil
+}
+
+func (m *rejectingToolApprovalManager) Await(_ context.Context, _ string) (*model.ReviewRequest, error) {
+	m.requested.Status = model.ReviewRejected
+	m.requested.Decision = "reject"
+	return m.requested, nil
+}
 
 // newTestEngine returns a minimal Engine with only Functions set (no Repo/Sessions).
 // Used so core tests do not depend on agentmanager's unexported newTestEngine.
@@ -347,7 +363,7 @@ func TestRunCoreTool_RequiredArgsValidated(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			call := openai.ToolCall{Function: openai.FunctionCall{Name: tc.tool, Arguments: tc.args}}
-			_, err := ch.runCoreToolImpl(ctx, "user1", "sess1", "msg1", call)
+			_, err := ch.runCoreToolImpl(ctx, "user1", "sess1", nil, "msg1", call)
 			if err == nil || !strings.Contains(err.Error(), tc.substr) {
 				t.Errorf("expected error containing %q, got %v", tc.substr, err)
 			}
@@ -524,22 +540,6 @@ func TestProcessMessage_MultipleAgentCalls_OnlyFirstDispatched(t *testing.T) {
 	}
 }
 
-// TestExecutePlan_Disabled verifies that execute_plan returns an error when planning is not enabled.
-func TestExecutePlan_Disabled(t *testing.T) {
-	ch, _ := newTestCoreHandler(t, []string{"researcher"})
-	ctx := context.Background()
-	result, err := ch.executePlanTool(ctx, "user1", "sess1", "msg1", map[string]interface{}{"message": "do something"})
-	if err == nil {
-		t.Fatal("expected error when planning not enabled")
-	}
-	if result != "" {
-		t.Errorf("expected empty result, got %q", result)
-	}
-	if !strings.Contains(err.Error(), "planning") && !strings.Contains(err.Error(), "enabled") {
-		t.Errorf("expected planning not enabled error, got %q", err.Error())
-	}
-}
-
 // TestCreateSession_Tool verifies create_session creates a session and sets it active.
 func TestCreateSession_Tool(t *testing.T) {
 	ch, mockStore := newTestCoreHandlerWithMockStore(t, []string{"researcher"})
@@ -650,247 +650,45 @@ func TestBanUser_Tool(t *testing.T) {
 	}
 }
 
-// TestExecutePlan_Success verifies execute_plan returns result when orchestrator is set with mock planner/runner.
-func TestExecutePlan_Success(t *testing.T) {
-	ch, _ := newTestCoreHandler(t, []string{"researcher"})
-	fixedPlan := &planning.Plan{
-		ID: "plan-1", UserID: "u1", SessionID: "s1", Input: "task",
-		Steps: []*planning.Step{
-			{ID: "s1", Type: planning.StepLLMCall, Status: planning.StepPending, Config: planning.StepConfig{Prompt: "hi"}},
+func TestCoreToolApprovalRejectsBeforeSideEffect(t *testing.T) {
+	ch, mockStore := newTestCoreHandlerWithMockStore(t, []string{"researcher"})
+	manager := &rejectingToolApprovalManager{}
+	ch.SetToolApprovalManager(manager)
+
+	coreSession := model.NewSessionWithType("user1", model.AgentTypeCore)
+	result := ch.executeCoreTool(
+		context.Background(),
+		"user1",
+		coreSession.SessionID,
+		coreSession,
+		"msg1",
+		openai.ToolCall{
+			ID: "call_ban",
+			Function: openai.FunctionCall{
+				Name:      "ban_user",
+				Arguments: `{"duration_hours":24,"message":"blocked"}`,
+			},
 		},
-		Status: planning.PlanPending, Version: 1,
+	)
+
+	if !strings.Contains(result, "was not executed") {
+		t.Fatalf("result = %q", result)
 	}
-	store := planning.NewMemoryStore()
-	planner := &mockOrchestratorPlanner{plan: fixedPlan}
-	runner := &mockOrchestratorRunner{result: &planning.PlanResult{Output: "plan output"}}
-	orch := planning.NewOrchestrator(planner, runner, planning.WithOrchestratorStore(store))
-	ch.UsePlanning(orch)
-	ctx := context.Background()
-	result, err := ch.executePlanTool(ctx, "user1", "sess1", "msg1", map[string]interface{}{"message": "do task"})
+	if manager.requested == nil || manager.requested.Metadata["tool_name"] != "ban_user" {
+		t.Fatalf("approval request was not created correctly: %+v", manager.requested)
+	}
+	user, err := mockStore.GetOrCreateUser("user1")
 	if err != nil {
-		t.Fatalf("executePlanTool: %v", err)
+		t.Fatalf("GetOrCreateUser: %v", err)
 	}
-	if result != "plan output" {
-		t.Errorf("expected result 'plan output', got %q", result)
-	}
-}
-
-type mockOrchestratorPlanner struct {
-	plan *planning.Plan
-}
-
-func (m *mockOrchestratorPlanner) CreatePlan(ctx context.Context, input planning.PlanInput) (*planning.Plan, error) {
-	return m.plan, nil
-}
-
-func (m *mockOrchestratorPlanner) Replan(ctx context.Context, plan *planning.Plan, lastStep *planning.Step) (*planning.Plan, error) {
-	return plan, nil
-}
-
-type mockOrchestratorRunner struct {
-	result *planning.PlanResult
-}
-
-func (m *mockOrchestratorRunner) Run(ctx context.Context, plan *planning.Plan, opts ...planning.RunOption) (*planning.PlanResult, error) {
-	return m.result, nil
-}
-
-func (m *mockOrchestratorRunner) RunStep(ctx context.Context, plan *planning.Plan, step *planning.Step) (*planning.StepResult, error) {
-	return nil, nil
-}
-
-func (m *mockOrchestratorRunner) Cancel(ctx context.Context, planID string) error {
-	return nil
-}
-
-func (m *mockOrchestratorRunner) Resume(ctx context.Context, planID string) (*planning.PlanResult, error) {
-	return nil, nil
-}
-
-// --- getPlanStatusTool / cancelPlanTool tests ---
-
-func TestGetPlanStatusTool_NoOrchestrator(t *testing.T) {
-	ch, _ := newTestCoreHandler(t, []string{"researcher"})
-	_, err := ch.getPlanStatusTool(context.Background(), map[string]interface{}{"plan_id": "plan-1"})
-	if err == nil {
-		t.Fatal("expected error when orchestrator nil")
-	}
-	if !strings.Contains(err.Error(), "planning") {
-		t.Errorf("expected planning-related error, got %q", err.Error())
+	if user.IsCurrentlyBanned() {
+		t.Fatal("rejected ban_user call changed user state")
 	}
 }
 
-func TestGetPlanStatusTool_Success(t *testing.T) {
-	ch, _ := newTestCoreHandler(t, []string{"researcher"})
-	store := planning.NewMemoryStore()
-	plan := &planning.Plan{
-		ID:     "plan-42",
-		Status: planning.PlanCompleted,
-		Steps: []*planning.Step{
-			{ID: "s1", Status: planning.StepCompleted},
-		},
-		Output: "final result",
+func TestToolApprovalRejectedErrorSupportsErrorsIs(t *testing.T) {
+	err := &engine.ToolApprovalRejectedError{ReviewID: "rev_1", Decision: "reject"}
+	if !errors.Is(err, engine.ErrToolApprovalRejected) {
+		t.Fatalf("errors.Is(%v, ErrToolApprovalRejected) = false", err)
 	}
-	_ = store.Save(context.Background(), plan)
-	planner := &mockOrchestratorPlanner{plan: plan}
-	runner := &mockOrchestratorRunner{}
-	orch := planning.NewOrchestrator(planner, runner, planning.WithOrchestratorStore(store))
-	ch.UsePlanning(orch)
-
-	result, err := ch.getPlanStatusTool(context.Background(), map[string]interface{}{"plan_id": "plan-42"})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !strings.Contains(result, "plan-42") {
-		t.Errorf("expected plan-42 in result, got %q", result)
-	}
-	if !strings.Contains(result, "completed") {
-		t.Errorf("expected completed status in result, got %q", result)
-	}
-}
-
-func TestCancelPlanTool_NoOrchestrator(t *testing.T) {
-	ch, _ := newTestCoreHandler(t, []string{"researcher"})
-	_, err := ch.cancelPlanTool(context.Background(), map[string]interface{}{"plan_id": "plan-1"})
-	if err == nil {
-		t.Fatal("expected error when orchestrator nil")
-	}
-}
-
-func TestCancelPlanTool_Success(t *testing.T) {
-	ch, _ := newTestCoreHandler(t, []string{"researcher"})
-	store := planning.NewMemoryStore()
-	plan := &planning.Plan{
-		ID:     "plan-99",
-		Status: planning.PlanRunning,
-		Steps:  []*planning.Step{{ID: "s1", Status: planning.StepRunning}},
-	}
-	_ = store.Save(context.Background(), plan)
-
-	cancelCalled := false
-	runner := &mockCancelRunner{onCancel: func(id string) error {
-		cancelCalled = true
-		if id != "plan-99" {
-			t.Errorf("expected plan-99, got %s", id)
-		}
-		return nil
-	}}
-	planner := &mockOrchestratorPlanner{plan: plan}
-	orch := planning.NewOrchestrator(planner, runner, planning.WithOrchestratorStore(store))
-	ch.UsePlanning(orch)
-
-	result, err := ch.cancelPlanTool(context.Background(), map[string]interface{}{"plan_id": "plan-99"})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !strings.Contains(result, "plan-99") {
-		t.Errorf("expected plan-99 in result, got %q", result)
-	}
-	if !cancelCalled {
-		t.Error("expected Cancel to be called on runner")
-	}
-}
-
-type mockCancelRunner struct {
-	onCancel func(string) error
-}
-
-func (m *mockCancelRunner) Run(_ context.Context, _ *planning.Plan, _ ...planning.RunOption) (*planning.PlanResult, error) {
-	return nil, nil
-}
-func (m *mockCancelRunner) RunStep(_ context.Context, _ *planning.Plan, _ *planning.Step) (*planning.StepResult, error) {
-	return nil, nil
-}
-func (m *mockCancelRunner) Cancel(_ context.Context, planID string) error {
-	if m.onCancel != nil {
-		return m.onCancel(planID)
-	}
-	return nil
-}
-func (m *mockCancelRunner) Resume(_ context.Context, _ string) (*planning.PlanResult, error) {
-	return nil, nil
-}
-
-func TestBuildPlanToolInfos(t *testing.T) {
-	ch, _ := newTestCoreHandler(t, []string{"researcher"})
-	infos := ch.buildPlanToolInfos()
-	if len(infos) == 0 {
-		t.Fatal("expected non-empty tool infos")
-	}
-	nameSet := make(map[string]bool)
-	for _, info := range infos {
-		nameSet[info.Name] = true
-		if info.Description == "" {
-			t.Errorf("tool %q has empty description", info.Name)
-		}
-	}
-	if !nameSet["list_sessions"] {
-		t.Error("expected list_sessions in tool infos")
-	}
-	if !nameSet["call_agent_researcher"] {
-		t.Error("expected call_agent_researcher in tool infos")
-	}
-	if !nameSet["sleep"] {
-		t.Error("expected sleep in tool infos")
-	}
-}
-
-func TestExecutePlanTool_PassesToolsAndExecutor(t *testing.T) {
-	ch, _ := newTestCoreHandlerWithMockStore(t, []string{"researcher"})
-	store := planning.NewMemoryStore()
-
-	var capturedInput planning.PlanInput
-	planner := &capturingPlanner{
-		plan: &planning.Plan{
-			ID: "tmp", UserID: "u1", SessionID: "s1", Input: "test",
-			Steps:   []*planning.Step{{ID: "s1", Type: planning.StepLLMCall, Status: planning.StepPending, Config: planning.StepConfig{Prompt: "hi"}}},
-			Status:  planning.PlanPending,
-			Version: 1,
-		},
-		onCreatePlan: func(input planning.PlanInput) {
-			capturedInput = input
-		},
-	}
-	runner := &mockCancelRunner{}
-	orch := planning.NewOrchestrator(planner, runner, planning.WithOrchestratorStore(store))
-	ch.UsePlanning(orch)
-
-	_, _ = ch.executePlanTool(context.Background(), "u1", "s1", "msg1", map[string]interface{}{
-		"message": "do something",
-	})
-
-	if capturedInput.Context == nil {
-		t.Fatal("expected PlanContext to be set")
-	}
-	if len(capturedInput.Context.AvailableTools) == 0 {
-		t.Error("expected AvailableTools to be populated")
-	}
-	if capturedInput.Context.ToolExecutor == nil {
-		t.Error("expected ToolExecutor to be set")
-	}
-	hasleep := false
-	for _, tool := range capturedInput.Context.AvailableTools {
-		if tool.Name == "sleep" {
-			hasleep = true
-		}
-	}
-	if !hasleep {
-		t.Error("expected 'sleep' in AvailableTools")
-	}
-}
-
-type capturingPlanner struct {
-	plan         *planning.Plan
-	onCreatePlan func(input planning.PlanInput)
-}
-
-func (m *capturingPlanner) CreatePlan(_ context.Context, input planning.PlanInput) (*planning.Plan, error) {
-	if m.onCreatePlan != nil {
-		m.onCreatePlan(input)
-	}
-	return m.plan, nil
-}
-
-func (m *capturingPlanner) Replan(_ context.Context, plan *planning.Plan, _ *planning.Step) (*planning.Plan, error) {
-	return plan, nil
 }

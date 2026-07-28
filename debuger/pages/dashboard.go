@@ -12,10 +12,9 @@ import (
 )
 
 // RenderDashboard generates the dashboard HTML page.
-// When showPlansLink is true, the Quick Links section includes a link to the Plans page.
 // sysInfo, when non-nil, renders a "System Info" panel describing the storage
 // backends (database, file store) and runtime configuration.
-func RenderDashboard(handler *debuger.DebugHandler, showPlansLink bool, sysInfo *debuger.SystemInfo) (string, error) {
+func RenderDashboard(handler *debuger.DebugHandler, sysInfo *debuger.SystemInfo) (string, error) {
 	dp := data.NewDataProvider(handler.GetStore())
 
 	stats, err := dp.GetDashboardStats()
@@ -161,15 +160,14 @@ func RenderDashboard(handler *debuger.DebugHandler, showPlansLink bool, sysInfo 
 	)
 	content += `</div>`
 
-	if showPlansLink {
-		content += `<div class="col-md-6 col-lg-3">`
-		content += components.LinkCard(
-			"View Execution Plans",
-			"Browse all execution plans and their steps",
-			"📋", "/agentize/debug/plans",
-		)
-		content += `</div>`
-	}
+	// Workflows link
+	content += `<div class="col-md-6 col-lg-3">`
+	content += components.LinkCard(
+		"Workflow DAGs",
+		"Inspect durable deterministic workflows, dependencies, and task results",
+		"🔀", "/agentize/debug/workflows",
+	)
+	content += `</div>`
 
 	content += `</div>
             </div>
@@ -179,11 +177,6 @@ func RenderDashboard(handler *debuger.DebugHandler, showPlansLink bool, sysInfo 
 
 	content += ui.ContainerEnd()
 	return ui.Header("Agentize Debug - Dashboard") + ui.NavbarAndBody("/agentize/debug", content) + ui.Footer(), nil
-}
-
-// RenderDashboardWithPlanning is like RenderDashboard with showPlansLink set by the caller.
-func RenderDashboardWithPlanning(handler *debuger.DebugHandler, showPlansLink bool, sysInfo *debuger.SystemInfo) (string, error) {
-	return RenderDashboard(handler, showPlansLink, sysInfo)
 }
 
 // systemInfoCard renders the System Info panel: storage backends and runtime
@@ -217,8 +210,7 @@ func systemInfoCard(info *debuger.SystemInfo) string {
 		components.BadgeWithIcon(info.FileStore.Type, "📦", "secondary")+" "+location(info.FileStore.Location)))
 	b.WriteString(row("Documents", fmt.Sprintf("%d", info.TotalDocuments)))
 	b.WriteString(row("Registered tools", fmt.Sprintf("%d", info.RegisteredTools)))
-	b.WriteString(row("Planning", enabledBadge(info.PlanningEnabled)))
-
+	b.WriteString(row("Tool approvals", enabledBadge(info.ToolApprovals)))
 	b.WriteString(`</tbody></table>`)
 
 	if len(info.More) > 0 {
@@ -248,7 +240,6 @@ func backendColor(backendType string) string {
 	}
 }
 
-// enabledBadge renders an enabled/disabled badge.
 func enabledBadge(enabled bool) string {
 	if enabled {
 		return components.Badge("enabled", "success")

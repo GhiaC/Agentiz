@@ -48,6 +48,7 @@ type RegisteredAgent struct {
 type AgentManager struct {
 	agents         map[string]*RegisteredAgent
 	sessionHandler *model.SessionHandler
+	toolApprovals  engine.ToolApprovalManager
 	mu             sync.RWMutex
 }
 
@@ -89,12 +90,26 @@ func (am *AgentManager) Register(config AgentConfig, eng *engine.Engine) error {
 	// worker to its own session type so one persisted schedule is never executed
 	// once by every agent.
 	eng.SetTaskSchedulerAgentTypes(config.AgentType)
+	eng.SetToolApprovalManager(am.toolApprovals)
 
 	if am.sessionHandler != nil {
 		am.sessionHandler.RegisterAgentDisplayName(config.AgentType, config.DisplayName)
 	}
 
 	return nil
+}
+
+// SetToolApprovalManager applies the same approval gate to all current and
+// future worker agents.
+func (am *AgentManager) SetToolApprovalManager(manager engine.ToolApprovalManager) {
+	am.mu.Lock()
+	defer am.mu.Unlock()
+	am.toolApprovals = manager
+	for _, a := range am.agents {
+		if a.Engine != nil {
+			a.Engine.SetToolApprovalManager(manager)
+		}
+	}
 }
 
 // Get returns a registered agent by name.

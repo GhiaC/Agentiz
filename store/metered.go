@@ -206,6 +206,11 @@ func (m *meteredStore) ListTaskScheduleRuns(scheduleID string, limit int) ([]*mo
 	return m.Store.ListTaskScheduleRuns(scheduleID, limit)
 }
 
+func (m *meteredStore) PutWorkflowRun(workflow *model.WorkflowRun) error {
+	defer m.observe("PutWorkflowRun", time.Now())
+	return m.Store.PutWorkflowRun(workflow)
+}
+
 // --- Debug reads + aggregates (debuger.DebugStore) ---
 
 func (m *meteredStore) GetAllSessions() (map[string][]*model.Session, error) {
@@ -326,6 +331,16 @@ func (m *meteredStore) GetRouteTracesByUser(userID string) ([]*model.RouteTrace,
 func (m *meteredStore) GetAllRouteTraces() ([]*model.RouteTrace, error) {
 	defer m.observe("GetAllRouteTraces", time.Now())
 	return m.Store.GetAllRouteTraces()
+}
+
+func (m *meteredStore) GetWorkflowRun(workflowID string) (*model.WorkflowRun, error) {
+	defer m.observe("GetWorkflowRun", time.Now())
+	return m.Store.GetWorkflowRun(workflowID)
+}
+
+func (m *meteredStore) ListWorkflowRuns(userID string, limit int) ([]*model.WorkflowRun, error) {
+	defer m.observe("ListWorkflowRuns", time.Now())
+	return m.Store.ListWorkflowRuns(userID, limit)
 }
 
 func (m *meteredStore) DeleteUserData(userID string) error {

@@ -127,12 +127,6 @@ sessions, messages, tool-calls (with input/output), users, summarization logs an
 opened files. This is where runtime/usage data already lives — important for the
 improvements below.
 
-> **Plans are the exception:** `/agentize/debug/plans` reads from the planning
-> `PlanStore` (in-memory `MemoryStore` by default), **not** the `DebugStore` — so it is
-> empty after a restart unless a durable `Persister` is wired. The detail page shows the
-> plan's steps with their dependencies (DAG edges), per-step status/duration/tokens, and
-> failure reasons. See [PLANNING.md](../docs/PLANNING.md).
-
 ---
 
 ## 4. Data model: what exists vs. what is shown

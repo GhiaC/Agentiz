@@ -37,21 +37,34 @@ type ScheduledConclusionFunc func(ctx context.Context, schedule *model.TaskSched
 
 // CreateTaskScheduleInput is shared by the LLM tool, admin page, and public API.
 type CreateTaskScheduleInput struct {
-	UserID           string
-	SessionID        string
-	Name             string
-	Prompt           string
-	Interval         time.Duration
+	UserID string
+	// SessionID is the initiating session. Create provisions a separate,
+	// schedule-owned session so recurring history and memory never mix with the
+	// foreground conversation.
+	SessionID string
+	// AgentType optionally overrides the initiating session's agent type. Core
+	// uses it to bind a prompt schedule to one fixed worker agent and to create
+	// deterministic workflow schedules.
+	AgentType     model.AgentType
+	Name          string
+	Prompt        string
+	WorkflowTasks []*model.WorkflowTask
+	Interval      time.Duration
+	// MaxRuns is zero for unlimited recurrence. One creates a one-shot task.
+	MaxRuns          int64
 	ConclusionModel  string
 	ConclusionPrompt string
 }
 
 // TaskScheduler is a persistent loop runner for user-owned tasks.
 type TaskScheduler struct {
-	store     store.Store
-	executor  ScheduledTaskExecutor
-	concluder ScheduledConclusionFunc
-	pollEvery time.Duration
+	store    store.Store
+	executor ScheduledTaskExecutor
+	// workflowExecutor runs a persisted exact DAG. It is configured only on the
+	// Core scheduler and does not invoke a planner LLM.
+	workflowExecutor ScheduledTaskExecutor
+	concluder        ScheduledConclusionFunc
+	pollEvery        time.Duration
 
 	mu       sync.Mutex
 	running  bool
@@ -64,6 +77,17 @@ type TaskScheduler struct {
 	// Serializes short persisted lifecycle transitions. Task execution itself
 	// never holds this lock, so unrelated schedules can still run concurrently.
 	lifecycleMu sync.Mutex
+}
+
+// SetWorkflowExecutor enables deterministic workflow schedules. A scheduler
+// without this callback rejects Create inputs containing WorkflowTasks.
+func (s *TaskScheduler) SetWorkflowExecutor(executor ScheduledTaskExecutor) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.workflowExecutor = executor
+	s.mu.Unlock()
 }
 
 // NewTaskScheduler creates a scheduler. Call Start after the LLM/executor is ready.
@@ -378,7 +402,19 @@ func (s *TaskScheduler) execute(ctx context.Context, scheduleID string) {
 		log.Log.Errorf("[TaskScheduler] failed to create run for %s: %v", scheduleID, err)
 	}
 
-	output, execErr := s.executor(ctx, schedule)
+	executor := s.executor
+	if len(schedule.WorkflowTasks) > 0 {
+		s.mu.Lock()
+		executor = s.workflowExecutor
+		s.mu.Unlock()
+	}
+	var output string
+	var execErr error
+	if executor == nil {
+		execErr = fmt.Errorf("workflow schedule execution is not configured")
+	} else {
+		output, execErr = executor(ctx, schedule)
+	}
 	output = truncateTaskScheduleText(output, maxTaskScheduleTextLength)
 	var conclusion ScheduledConclusion
 	var conclusionErr error
@@ -407,6 +443,8 @@ func (s *TaskScheduler) execute(ctx context.Context, scheduleID string) {
 	run.PromptTokens = conclusion.PromptTokens
 	run.CompletionTokens = conclusion.CompletionTokens
 	current.RunCount++
+	run.WorkflowID = schedule.LastWorkflowID
+	current.LastWorkflowID = schedule.LastWorkflowID
 	current.LastOutput = output
 	current.LastConclusion = conclusion.Text
 	current.UpdatedAt = completedAt
@@ -426,7 +464,13 @@ func (s *TaskScheduler) execute(ctx context.Context, scheduleID string) {
 	}
 	current.LastRunStatus = run.Status
 	current.LastError = run.Error
-	if current.Status == model.TaskScheduleActive {
+	if current.Status == model.TaskScheduleActive &&
+		run.Status != model.TaskRunCancelled &&
+		current.MaxRuns > 0 &&
+		current.RunCount >= current.MaxRuns {
+		current.Status = model.TaskScheduleCompleted
+		current.NextRunAt = completedAt
+	} else if current.Status == model.TaskScheduleActive {
 		if run.Status == model.TaskRunCancelled {
 			// A resume may have raced with cancellation of the previous run.
 			// Preserve resume's "due now" semantics instead of delaying a full interval.
@@ -465,32 +509,86 @@ func (s *TaskScheduler) Create(input CreateTaskScheduleInput) (*model.TaskSchedu
 	if len(input.Prompt) > 128*1024 {
 		return nil, fmt.Errorf("prompt must not exceed 131072 characters")
 	}
+	if input.MaxRuns < 0 {
+		return nil, fmt.Errorf("max_runs cannot be negative")
+	}
+	if input.MaxRuns > 1_000_000 {
+		return nil, fmt.Errorf("max_runs must not exceed 1000000")
+	}
 	if len(input.ConclusionModel) > 256 {
 		return nil, fmt.Errorf("conclusion_model must not exceed 256 characters")
 	}
 	if len(input.ConclusionPrompt) > 8*1024 {
 		return nil, fmt.Errorf("conclusion_prompt must not exceed 8192 characters")
 	}
-	session, err := s.store.Get(input.SessionID)
+	sourceSession, err := s.store.Get(input.SessionID)
 	if err != nil {
 		return nil, fmt.Errorf("session not found: %w", err)
 	}
-	if session.UserID != input.UserID {
+	if sourceSession == nil {
+		return nil, fmt.Errorf("session not found")
+	}
+	if sourceSession.UserID != input.UserID {
 		return nil, fmt.Errorf("session does not belong to user")
 	}
+	targetAgentType := input.AgentType
+	if targetAgentType == "" {
+		targetAgentType = sourceSession.AgentType
+	}
+	hasWorkflow := len(input.WorkflowTasks) > 0
+	if hasWorkflow {
+		s.mu.Lock()
+		workflowExecutor := s.workflowExecutor
+		s.mu.Unlock()
+		if workflowExecutor == nil {
+			return nil, fmt.Errorf("workflow schedules are not supported by this scheduler")
+		}
+		if targetAgentType != model.AgentTypeWorkflow {
+			return nil, fmt.Errorf("workflow schedules must use the dedicated workflow agent type")
+		}
+	} else if strings.TrimSpace(input.Prompt) == "" {
+		return nil, fmt.Errorf("prompt is required")
+	}
+	if !hasWorkflow && targetAgentType == model.AgentTypeWorkflow {
+		return nil, fmt.Errorf("the workflow agent type requires workflow_tasks")
+	}
+	if targetAgentType == model.AgentTypeCore {
+		return nil, fmt.Errorf("a recurring prompt schedule must target a worker agent, not the singleton Core session")
+	}
+
 	now := time.Now()
+	scheduleID := newTaskID("sch")
+	sessionSeq, err := s.store.GetNextSessionSeq(input.UserID, targetAgentType)
+	if err != nil {
+		return nil, fmt.Errorf("allocate schedule session: %w", err)
+	}
+	dedicatedSession := model.NewSessionWithID(
+		input.UserID,
+		model.GenerateSessionID(input.UserID, targetAgentType, sessionSeq),
+		targetAgentType,
+	)
+	dedicatedSession.Title = "Schedule: " + input.Name
+	dedicatedSession.Tags = []string{"schedule", "schedule:" + scheduleID}
+	if err := s.store.Put(dedicatedSession); err != nil {
+		return nil, fmt.Errorf("create dedicated schedule session: %w", err)
+	}
+
 	schedule := &model.TaskSchedule{
-		ScheduleID: newTaskID("sch"), UserID: input.UserID, SessionID: input.SessionID,
-		AgentType: session.AgentType,
-		Name:      input.Name, Prompt: input.Prompt, IntervalSeconds: int64(input.Interval / time.Second),
+		ScheduleID: scheduleID, UserID: input.UserID,
+		SourceSessionID: input.SessionID, SessionID: dedicatedSession.SessionID,
+		AgentType: targetAgentType,
+		Name:      input.Name, Prompt: input.Prompt, WorkflowTasks: input.WorkflowTasks,
+		IntervalSeconds: int64(input.Interval / time.Second), MaxRuns: input.MaxRuns,
 		ConclusionModel: input.ConclusionModel, ConclusionPrompt: input.ConclusionPrompt,
 		Status: model.TaskScheduleActive, NextRunAt: now.Add(input.Interval),
 		CreatedAt: now, UpdatedAt: now,
 	}
 	if err := schedule.Validate(); err != nil {
+		_ = s.store.Delete(dedicatedSession.SessionID)
 		return nil, err
 	}
 	if err := s.store.PutTaskSchedule(schedule); err != nil {
+		_ = s.store.Delete(dedicatedSession.SessionID)
 		return nil, err
 	}
 	s.notify()
@@ -533,6 +631,13 @@ func (s *TaskScheduler) Pause(scheduleID, ownerUserID string) (*model.TaskSchedu
 
 // Resume makes a paused schedule active and due immediately.
 func (s *TaskScheduler) Resume(scheduleID, ownerUserID string) (*model.TaskSchedule, error) {
+	schedule, err := s.Get(scheduleID, ownerUserID)
+	if err != nil {
+		return nil, err
+	}
+	if schedule != nil && schedule.Status == model.TaskScheduleCompleted {
+		return nil, fmt.Errorf("schedule completed its max_runs limit")
+	}
 	return s.changeStatus(scheduleID, ownerUserID, model.TaskScheduleActive)
 }
 
@@ -550,6 +655,10 @@ func (s *TaskScheduler) changeStatus(
 	if schedule == nil {
 		scheduleLock.Unlock()
 		return nil, fmt.Errorf("schedule not found")
+	}
+	if schedule.Status == model.TaskScheduleCompleted {
+		scheduleLock.Unlock()
+		return nil, fmt.Errorf("schedule completed its max_runs limit")
 	}
 	schedule.Status = status
 	schedule.UpdatedAt = time.Now()
@@ -581,7 +690,7 @@ func (s *TaskScheduler) RunNow(scheduleID, ownerUserID string) (*model.TaskSched
 		return nil, fmt.Errorf("schedule not found")
 	}
 	if schedule.Status != model.TaskScheduleActive {
-		return nil, fmt.Errorf("schedule is paused; resume it first")
+		return nil, fmt.Errorf("schedule is not active")
 	}
 	schedule.NextRunAt = time.Now()
 	schedule.UpdatedAt = time.Now()

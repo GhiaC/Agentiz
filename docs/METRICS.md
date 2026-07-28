@@ -2,7 +2,7 @@
 
 Agentize ships **built-in Prometheus instrumentation** covering every metered
 activity: message processing, LLM calls, tool calls, agent routing/escalation,
-backup-LLM fallbacks, the summarization scheduler, planning, knowledge file opens
+backup-LLM fallbacks, the summarization scheduler, knowledge file opens
 and moderation.
 
 ## Exposing the endpoint
@@ -112,16 +112,12 @@ See [ROUTING_DAG.md](./ROUTING_DAG.md) for the trace this comes from and the
 | `scheduler_summary_duration_seconds` | histogram | — |
 | `scheduler_running` | gauge | — |
 
-### Knowledge, moderation, planning
+### Knowledge and moderation
 | Metric | Type | Labels |
 |--------|------|--------|
 | `knowledge_file_opens_total` | counter | `status` |
 | `moderation_checks_total` | counter | `result` (ok/nonsense/banned/error) |
 | `moderation_bans_total` | counter | `reason` (nonsense/offensive/manual) |
-| `planning_runs_total` | counter | `status` (ok/error) — one per `execute_plan` call |
-| `planning_steps_total` | counter | `status` (ok/error) — one per **executed** step (completed→ok, failed→error; pending/skipped not counted) |
-
-See [PLANNING.md](./PLANNING.md) for the planning subsystem these come from.
 
 ### Store (persistence layer)
 | Metric | Type | Labels |
@@ -148,7 +144,7 @@ resolutions also emit `audit_actions_total{action="resolve_review"}`.
 
 | Metric | Type | Labels |
 |--------|------|--------|
-| `reviews_total` | counter | `kind` (plan_step/tool_call/payment/custom), `decision` (approved/rejected/expired/canceled) |
+| `reviews_total` | counter | `kind` (tool_call/payment/custom), `decision` (approved/rejected/expired/canceled) |
 | `reviews_pending` | gauge | — number of unresolved reviews |
 
 `reviews_total` counts every resolved review regardless of which frontend made the
@@ -301,7 +297,6 @@ files).
 | Core tools + agent routing/escalation | `core/tools.go` |
 | Routing-decision DAG (record + persist) | `core/route_trace.go`, `core/core.go` |
 | Vision LLM | `core/vision.go` |
-| Plan execution | `core/planning.go` |
 | Agent message lifecycle + LLM + tools + queue | `engine/user_agent.go` |
 | Backup LLM chain | `engine/backup_chain.go` |
 | Summarization scheduler | `engine/schedules.go` |

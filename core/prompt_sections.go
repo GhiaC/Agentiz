@@ -7,7 +7,6 @@ import (
 	"github.com/ghiac/agentize/log"
 	"github.com/ghiac/agentize/metrics"
 	"github.com/ghiac/agentize/model"
-	"github.com/ghiac/agentize/planning"
 )
 
 // Stable identifiers for the Core's system-prompt sections. They double as the
@@ -23,7 +22,6 @@ const (
 	SectionUserFiles            = "user_files"
 	SectionActiveSessions       = "active_sessions"
 	SectionSessionsList         = "sessions_list"
-	SectionPlanning             = "planning"
 )
 
 // sectionSpec is the un-budgeted description of one prompt section: its identity
@@ -86,11 +84,6 @@ func (ch *CoreHandler) assembleSections(userID string, coreSession *model.Sessio
 		return nil, fmt.Errorf("failed to get sessions prompt: %w", err)
 	}
 	specs = append(specs, sectionSpec{SectionSessionsList, "Sessions List", false, true, sessionsPrompt})
-
-	// Planning: only when an orchestrator is wired, so Core can choose execute_plan.
-	if ch.orchestrator != nil {
-		specs = append(specs, sectionSpec{SectionPlanning, "Planning", false, false, planning.CorePrompt()})
-	}
 
 	limit := ch.config.maxSystemPromptSize()
 	used := 0

@@ -16,9 +16,11 @@ a standalone CLI/server).
 - 💬 **Sessions & summarization** — persistent sessions with a background rolling-window summarizer
 - 🗄️ **Pluggable storage** — SQLite (default) or MongoDB behind one `store.Store` interface
 - 📎 **User files & image editing** — record uploads, `manage_files` tool, optional OpenRouter image edits
-- 🧭 **Planning DAG** — optional plan execution with status/cancel tools
+- ✅ **Human-approved tools** — every tool call can pause for a durable approve/reject decision before execution
+- 🔀 **Deterministic workflows** — durable Core-tool DAGs without a planner LLM, including scheduled state machines
+- ⏱️ **Memory-isolated schedules** — every prompt/workflow schedule owns a dedicated persistent session
 - 📊 **Observability** — ~30 Prometheus metrics + two Grafana dashboards (see [docs/METRICS.md](docs/METRICS.md))
-- 🛠️ **Debug dashboard** — users, sessions, messages, files, tool calls, routing DAGs, summarization logs — behind admin auth
+- 🛠️ **Debug dashboard** — users, sessions, schedules, workflow DAGs, messages, files, tool calls, routing DAGs, and summaries — behind admin auth
 
 ## 🚀 Installation
 
@@ -170,7 +172,7 @@ endpoints require a signed-in admin once credentials are set):
 | `GET /agentize/health` | Liveness (always open) |
 | `GET /agentize/metrics` | Prometheus metrics (dedicated registry) |
 | `GET /agentize` | Index |
-| `GET /agentize/debug/*` | Users, sessions, messages, files, tool calls, routing DAGs, summarization logs |
+| `GET /agentize/debug/*` | Users, sessions, schedules, workflow DAGs, messages, files, tool calls, routing DAGs, summarization logs |
 | `GET /agentize/docs`, `/agentize/graph` | Generated docs + knowledge-graph visualization |
 
 See [docs/SECURITY.md](docs/SECURITY.md) for the threat model and
@@ -188,6 +190,7 @@ import (
 	"github.com/ghiac/agentize/core"
 	"github.com/ghiac/agentize/engine"
 	"github.com/ghiac/agentize/model"
+	"github.com/ghiac/agentize/review"
 )
 
 sessionHandler := model.NewSessionHandler(store, model.DefaultSessionHandlerConfig())
@@ -206,11 +209,13 @@ cfg.CoreLLMConfig = engine.LLMConfig{APIKey: "sk-...", Model: "openai/gpt-5-nano
 ch := core.NewCoreHandler(sessionHandler, agents, cfg)
 _ = ch.UseLLMConfig(cfg.CoreLLMConfig)
 ch.SetCallback(myBillingCallback) // propagates to every worker engine
+approvals := review.New(store, nil) // set a Notifier so your UI can ask the user
+ch.SetToolApprovalManager(approvals) // gates Core + current/future worker tools
 
 reply, err := ch.ProcessMessage(context.Background(), "user-123", "Help me research X")
 ```
 
-The full multi-agent wiring (engine fields, knowledge sets, web search, planning)
+The full multi-agent wiring (engine fields, knowledge sets, web search, approvals)
 is documented in [docs/CORE_AGENT.md](docs/CORE_AGENT.md) and
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
@@ -296,7 +301,9 @@ testcontainers and self-skips when Docker is unavailable.
 |---|---|
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System architecture |
 | [docs/CORE_AGENT.md](docs/CORE_AGENT.md) | Core router + system-prompt assembly |
-| [docs/PLANNING.md](docs/PLANNING.md) | Planning DAG |
+| [docs/REVIEWS.md](docs/REVIEWS.md) | Human approval for tool calls |
+| [docs/WORKFLOWS.md](docs/WORKFLOWS.md) | Deterministic Core workflow DAGs and scheduled state machines |
+| [docs/TASK_SCHEDULER.md](docs/TASK_SCHEDULER.md) | Dedicated-session prompt and workflow schedules |
 | [docs/ROUTING_DAG.md](docs/ROUTING_DAG.md) | Routing-decision traces |
 | [docs/METRICS.md](docs/METRICS.md) | Prometheus metrics + Grafana dashboards |
 | [docs/SECURITY.md](docs/SECURITY.md) | Threat model, debug-route exposure, PII |
@@ -313,7 +320,7 @@ agentize/
 ├── core/         # Core router (multi-agent orchestration)
 ├── agentmanager/ # Worker-agent registry
 ├── engine/       # Per-agent engine (LLM loop, tools, scheduler)
-├── planning/     # Plan execution DAG
+├── review/       # Durable, UI-agnostic human approvals
 ├── store/        # Persistence (SQLite / MongoDB) behind one interface
 ├── filestore/    # Pluggable byte storage for user files
 ├── metrics/      # Prometheus instrumentation

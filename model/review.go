@@ -23,18 +23,17 @@ const (
 )
 
 // ReviewRequest is a generic, UI-agnostic "a human must decide X" record. It is
-// deliberately NOT planning-specific: the subject is described by Kind + RefID,
-// so the same primitive serves plan-step approvals, tool-call gates, payments,
-// or any custom approval, presented and resolved by any frontend (Telegram, the
-// debug dashboard, an HTTP API). See docs/improvements/10-human-in-the-loop.md.
+// generic: the subject is described by Kind + RefID, so the same primitive
+// serves tool-call gates, payments, or any custom approval, presented and
+// resolved by any frontend (Telegram, the debug dashboard, or an HTTP API).
 type ReviewRequest struct {
 	ID        string `json:"id"`         // stable id (crypto/rand), e.g. "rev_<hex>"
 	UserID    string `json:"user_id"`    // who owns / must make the decision
 	SessionID string `json:"session_id"` // optional originating session
 
 	// Subject — what is being approved, kept generic (never plan-specific):
-	Kind    string   `json:"kind"`              // e.g. "plan_step", "tool_call", "payment", "custom"
-	RefID   string   `json:"ref_id"`            // id of the subject (e.g. "<planID>/<stepID>")
+	Kind    string   `json:"kind"`              // e.g. "tool_call", "payment", "custom"
+	RefID   string   `json:"ref_id"`            // id of the subject (e.g. a ToolID)
 	Title   string   `json:"title"`             // short human prompt
 	Content string   `json:"content"`           // detail shown to the approver
 	Options []string `json:"options,omitempty"` // choices; default ["approve","reject"]

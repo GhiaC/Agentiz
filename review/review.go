@@ -1,12 +1,10 @@
 // Package review is a generic, UI-agnostic human-approval primitive. Any code
 // can raise "a human must decide X" (a ReviewRequest) and any frontend — a
 // Telegram bot, the debug dashboard, an HTTP API — can present and resolve it
-// through the single Resolve entry point. It is deliberately not planning-only;
-// the planner is just its first caller.
+// through the single Resolve entry point.
 //
 // Design: depends on model (and a narrow Store interface) only — never on a
-// specific UI, web framework, or the planning package. See
-// docs/improvements/10-human-in-the-loop.md.
+// specific UI or web framework.
 package review
 
 import (
@@ -39,8 +37,8 @@ type Store interface {
 type Notifier func(ctx context.Context, r *model.ReviewRequest) error
 
 // ResolveListener is invoked after a review is resolved (from any UI). The
-// planner registers one to resume a suspended plan; other callers may use it to
-// react to decisions. Listeners run synchronously inside Resolve, so they should
+// Callers may use it to react to decisions. Listeners run synchronously inside
+// Resolve, so they should
 // be cheap or hand off to a goroutine.
 type ResolveListener func(ctx context.Context, r *model.ReviewRequest)
 

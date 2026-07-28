@@ -1,6 +1,7 @@
 package agentmanager
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,16 @@ import (
 	"github.com/ghiac/agentize/model"
 	"github.com/ghiac/agentize/store"
 )
+
+type noopToolApprovalManager struct{}
+
+func (*noopToolApprovalManager) Request(_ context.Context, r *model.ReviewRequest) (string, error) {
+	return r.ID, nil
+}
+
+func (*noopToolApprovalManager) Await(_ context.Context, _ string) (*model.ReviewRequest, error) {
+	return &model.ReviewRequest{Status: model.ReviewApproved}, nil
+}
 
 // newTestEngine returns a minimal Engine with only Functions set.
 // IsDBReady will be false unless Init() is called with a valid repo and store.
@@ -250,6 +261,28 @@ func TestSetCallback(t *testing.T) {
 	}
 	if eng2.Callback != mockCb {
 		t.Error("engine b Callback not set")
+	}
+}
+
+func TestSetToolApprovalManagerPropagatesToCurrentAndFutureAgents(t *testing.T) {
+	am := New(nil)
+	eng1 := newTestEngine()
+	if err := am.Register(AgentConfig{Name: "a", CostTier: CostTierLow}, eng1); err != nil {
+		t.Fatalf("Register a: %v", err)
+	}
+
+	manager := &noopToolApprovalManager{}
+	am.SetToolApprovalManager(manager)
+	if eng1.ToolApprovalManager != manager {
+		t.Fatal("approval manager was not applied to an existing agent")
+	}
+
+	eng2 := newTestEngine()
+	if err := am.Register(AgentConfig{Name: "b", CostTier: CostTierLow}, eng2); err != nil {
+		t.Fatalf("Register b: %v", err)
+	}
+	if eng2.ToolApprovalManager != manager {
+		t.Fatal("approval manager was not applied to a future agent")
 	}
 }
 

@@ -1,6 +1,7 @@
 package pages
 
 import (
+	"encoding/json"
 	"fmt"
 	"html/template"
 	"strings"
@@ -36,7 +37,7 @@ func RenderTaskSchedules(
 	content += ui.CardStart("Task Scheduler", "clock-history")
 	content += fmt.Sprintf(
 		`<div class="d-flex flex-wrap justify-content-between gap-2 align-items-center">
-			<p class="mb-0 text-muted">Persistent recurring agent tasks with optional low-cost model conclusions.</p>
+			<p class="mb-0 text-muted">Persistent tasks with an isolated memory session. Prompt schedules stay on one fixed agent; workflow schedules run an exact DAG.</p>
 			<div>Worker: %s &nbsp; Schedules: <strong>%d</strong></div>
 		</div>`,
 		workerState, len(schedules),
@@ -64,12 +65,17 @@ func renderScheduleCreateForm() string {
 				<input class="form-control" name="user_id" required placeholder="user-123">
 			</div>
 			<div class="col-md-4">
-				<label class="form-label">Session ID</label>
-				<input class="form-control" name="session_id" required placeholder="user-123-low-s0001">
+				<label class="form-label">Source worker session ID</label>
+				<input class="form-control" name="session_id" required placeholder="user-123-researcher-s0001">
+				<div class="form-text">A new dedicated session of the same agent type is created automatically.</div>
 			</div>
 			<div class="col-md-3">
 				<label class="form-label">Interval (seconds)</label>
 				<input class="form-control" type="number" name="interval_seconds" min="1" max="31536000" value="300" required>
+			</div>
+			<div class="col-md-3">
+				<label class="form-label">Max runs <span class="text-muted">(0 = unlimited)</span></label>
+				<input class="form-control" type="number" name="max_runs" min="0" max="1000000" value="0">
 			</div>
 			<div class="col-md-4">
 				<label class="form-label">Conclusion model <span class="text-muted">(optional)</span></label>
@@ -103,6 +109,7 @@ func renderScheduleTable(schedules []*model.TaskSchedule) string {
 	columns := []components.ColumnConfig{
 		{Header: "Schedule"},
 		{Header: "Owner"},
+		{Header: "Kind", Center: true, NoWrap: true},
 		{Header: "Status", Center: true, NoWrap: true},
 		{Header: "Interval", NoWrap: true},
 		{Header: "Next run", NoWrap: true},
@@ -126,6 +133,12 @@ func renderScheduleRow(schedule *model.TaskSchedule) string {
 	statusColor := "success"
 	if schedule.Status == model.TaskSchedulePaused {
 		statusColor = "secondary"
+	} else if schedule.Status == model.TaskScheduleCompleted {
+		statusColor = "info"
+	}
+	kind := "prompt"
+	if len(schedule.WorkflowTasks) > 0 {
+		kind = "workflow"
 	}
 	runStatus := `<span class="text-muted">never</span>`
 	if schedule.LastRunStatus != "" {
@@ -144,13 +157,19 @@ func renderScheduleRow(schedule *model.TaskSchedule) string {
 	if schedule.ConclusionModel != "" {
 		modelName = components.InlineCode(schedule.ConclusionModel)
 	}
+	nextRunTitle := formatScheduleTime(schedule.NextRunAt)
+	nextRunText := formatScheduleRelativeTime(schedule.NextRunAt)
+	if schedule.Status == model.TaskScheduleCompleted {
+		nextRunTitle = "completed"
+		nextRunText = "—"
+	}
 
 	var actions strings.Builder
 	actions.WriteString(`<div class="d-flex gap-1 justify-content-center">`)
 	if schedule.Status == model.TaskScheduleActive {
 		actions.WriteString(scheduleActionForm(schedule.ScheduleID, "run-now", "Run", "outline-primary", false))
 		actions.WriteString(scheduleActionForm(schedule.ScheduleID, "stop", "Stop", "outline-warning", false))
-	} else {
+	} else if schedule.Status == model.TaskSchedulePaused {
 		actions.WriteString(scheduleActionForm(schedule.ScheduleID, "resume", "Resume", "outline-success", false))
 	}
 	actions.WriteString(fmt.Sprintf(
@@ -163,6 +182,7 @@ func renderScheduleRow(schedule *model.TaskSchedule) string {
 	return fmt.Sprintf(`<tr>
 		<td><div class="fw-semibold">%s</div><code class="small">%s</code></td>
 		<td><div>%s</div><div class="small text-muted">%s</div></td>
+		<td class="text-center"><span class="badge text-bg-dark">%s</span></td>
 		<td class="text-center"><span class="badge text-bg-%s">%s</span></td>
 		<td>%s</td>
 		<td title="%s">%s</td>
@@ -172,9 +192,10 @@ func renderScheduleRow(schedule *model.TaskSchedule) string {
 	</tr>`,
 		esc(schedule.Name), esc(schedule.ScheduleID),
 		esc(schedule.UserID), esc(schedule.SessionID),
+		esc(kind),
 		statusColor, esc(string(schedule.Status)),
 		esc(schedule.Interval().String()),
-		esc(formatScheduleTime(schedule.NextRunAt)), esc(formatScheduleRelativeTime(schedule.NextRunAt)),
+		esc(nextRunTitle), esc(nextRunText),
 		runStatus, modelName, actions.String(),
 	)
 }
@@ -205,16 +226,33 @@ func RenderTaskScheduleDetail(schedule *model.TaskSchedule, runs []*model.TaskSc
 	content += scheduleMetaRow("Schedule ID", components.InlineCode(schedule.ScheduleID))
 	content += scheduleMetaRow("Name", esc(schedule.Name))
 	content += scheduleMetaRow("User", esc(schedule.UserID))
-	content += scheduleMetaRow("Session", esc(schedule.SessionID))
+	content += scheduleMetaRow("Dedicated session", components.TruncatedLink(schedule.SessionID, "/agentize/debug/sessions/"+template.URLQueryEscaper(schedule.SessionID), 30))
+	content += scheduleMetaRow("Source session", esc(schedule.SourceSessionID))
+	content += scheduleMetaRow("Agent type", esc(string(schedule.AgentType)))
 	content += scheduleMetaRow("Status", esc(string(schedule.Status)))
 	content += `</tbody></table></div><div class="col-md-6"><table class="table table-sm"><tbody>`
+	kind := "prompt"
+	if len(schedule.WorkflowTasks) > 0 {
+		kind = "workflow"
+	}
+	content += scheduleMetaRow("Kind", esc(kind))
 	content += scheduleMetaRow("Interval", esc(schedule.Interval().String()))
-	content += scheduleMetaRow("Run count", fmt.Sprintf("%d", schedule.RunCount))
+	runCount := fmt.Sprintf("%d", schedule.RunCount)
+	if schedule.MaxRuns > 0 {
+		runCount = fmt.Sprintf("%d / %d", schedule.RunCount, schedule.MaxRuns)
+	}
+	content += scheduleMetaRow("Run count", runCount)
 	content += scheduleMetaRow("Next run", esc(formatScheduleTime(schedule.NextRunAt)))
+	content += scheduleMetaRow("Latest workflow", scheduleWorkflowLink(schedule.LastWorkflowID))
 	content += scheduleMetaRow("Conclusion model", esc(schedule.ConclusionModel))
 	content += scheduleMetaRow("Updated", esc(formatScheduleTime(schedule.UpdatedAt)))
 	content += `</tbody></table></div></div>`
-	content += `<h6>Task prompt</h6><pre class="bg-body-tertiary border rounded p-3 text-wrap">` + esc(schedule.Prompt) + `</pre>`
+	if len(schedule.WorkflowTasks) > 0 {
+		workflowJSON, _ := json.MarshalIndent(schedule.WorkflowTasks, "", "  ")
+		content += `<h6>Fixed workflow DAG</h6><pre class="bg-body-tertiary border rounded p-3 text-wrap">` + esc(string(workflowJSON)) + `</pre>`
+	} else {
+		content += `<h6>Task prompt</h6><pre class="bg-body-tertiary border rounded p-3 text-wrap">` + esc(schedule.Prompt) + `</pre>`
+	}
 	if schedule.ConclusionPrompt != "" {
 		content += `<h6>Conclusion instruction</h6><pre class="bg-body-tertiary border rounded p-3 text-wrap">` + esc(schedule.ConclusionPrompt) + `</pre>`
 	}
@@ -239,7 +277,7 @@ func RenderTaskScheduleDetail(schedule *model.TaskSchedule, runs []*model.TaskSc
 		content += components.InfoAlert("This schedule has not run yet.")
 	} else {
 		content += `<div class="table-responsive"><table class="table table-sm align-middle"><thead><tr>
-			<th>Started</th><th>Status</th><th>Duration</th><th>Tokens</th><th>Result</th>
+			<th>Started</th><th>Status</th><th>Duration</th><th>Workflow</th><th>Tokens</th><th>Result</th>
 		</tr></thead><tbody>`
 		for _, run := range runs {
 			content += renderScheduleRunRow(run)
@@ -278,13 +316,22 @@ func renderScheduleRunRow(run *model.TaskScheduleRun) string {
 		<td class="text-nowrap">%s</td>
 		<td><span class="badge text-bg-%s">%s</span></td>
 		<td class="text-nowrap">%s</td>
+		<td>%s</td>
 		<td class="text-nowrap">%d / %d</td>
 		<td><details><summary>%s</summary><pre class="mt-2 bg-body-tertiary border rounded p-2 text-wrap">%s</pre></details></td>
 	</tr>`,
 		esc(formatScheduleTime(run.StartedAt)), color, esc(string(run.Status)),
-		esc(duration), run.PromptTokens, run.CompletionTokens,
+		esc(duration), scheduleWorkflowLink(run.WorkflowID), run.PromptTokens, run.CompletionTokens,
 		esc(truncateRunes(result, 90)), esc(fullResult),
 	)
+}
+
+func scheduleWorkflowLink(workflowID string) string {
+	if workflowID == "" {
+		return `<span class="text-muted">—</span>`
+	}
+	return fmt.Sprintf(`<a href="/agentize/debug/workflows/%s"><code>%s</code></a>`,
+		template.URLQueryEscaper(workflowID), template.HTMLEscapeString(workflowID))
 }
 
 func scheduleMetaRow(label, value string) string {

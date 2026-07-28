@@ -529,6 +529,21 @@ func (s *DBStore) ListTaskScheduleRuns(scheduleID string, limit int) ([]*model.T
 	return s.sqliteStore.ListTaskScheduleRuns(scheduleID, limit)
 }
 
+// PutWorkflowRun stores a durable Core workflow in SQLite.
+func (s *DBStore) PutWorkflowRun(workflow *model.WorkflowRun) error {
+	return s.sqliteStore.PutWorkflowRun(workflow)
+}
+
+// GetWorkflowRun returns a durable Core workflow by id.
+func (s *DBStore) GetWorkflowRun(workflowID string) (*model.WorkflowRun, error) {
+	return s.sqliteStore.GetWorkflowRun(workflowID)
+}
+
+// ListWorkflowRuns returns workflows newest-first.
+func (s *DBStore) ListWorkflowRuns(userID string, limit int) ([]*model.WorkflowRun, error) {
+	return s.sqliteStore.ListWorkflowRuns(userID, limit)
+}
+
 // PutToolCall stores a tool call (delegates to SQLiteStore)
 func (s *DBStore) PutToolCall(toolCall *model.ToolCall) error {
 	return s.sqliteStore.PutToolCall(toolCall)

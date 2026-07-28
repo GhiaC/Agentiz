@@ -9,6 +9,7 @@ import (
 
 	"github.com/ghiac/agentize/model"
 	"github.com/ghiac/agentize/store"
+	"github.com/sashabaranov/go-openai"
 )
 
 func newTaskSchedulerTestStore(t *testing.T) *store.SQLiteStore {
@@ -180,5 +181,83 @@ func TestTaskSchedulerDeleteCancelsWithoutRecreatingRows(t *testing.T) {
 	runs, err := st.ListTaskScheduleRuns(schedule.ScheduleID, 10)
 	if err != nil || len(runs) != 0 {
 		t.Fatalf("run rows recreated after delete: runs=%#v err=%v", runs, err)
+	}
+}
+
+func TestTaskSchedulerCreatesDedicatedMemorySessionAndCompletesAtMaxRuns(t *testing.T) {
+	st := newTaskSchedulerTestStore(t)
+	seenSessionIDs := make(chan string, 2)
+	scheduler := NewTaskScheduler(st, func(_ context.Context, schedule *model.TaskSchedule) (string, error) {
+		seenSessionIDs <- schedule.SessionID
+		session, err := st.Get(schedule.SessionID)
+		if err != nil {
+			return "", err
+		}
+		session.Msgs = append(session.Msgs, openai.ChatCompletionMessage{
+			Role: openai.ChatMessageRoleAssistant, Content: "remembered",
+		})
+		if err := st.Put(session); err != nil {
+			return "", err
+		}
+		return "ok", nil
+	}, nil)
+	scheduler.Start(context.Background())
+	t.Cleanup(scheduler.Stop)
+
+	schedule, err := scheduler.Create(CreateTaskScheduleInput{
+		UserID: "user-1", SessionID: "user-1-low-s0001",
+		Name: "one shot", Prompt: "work", Interval: time.Hour, MaxRuns: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if schedule.SessionID == schedule.SourceSessionID {
+		t.Fatalf("schedule reused foreground session %q", schedule.SessionID)
+	}
+	dedicated, err := st.Get(schedule.SessionID)
+	if err != nil || dedicated == nil {
+		t.Fatalf("dedicated session: %#v err=%v", dedicated, err)
+	}
+	if dedicated.Title != "Schedule: one shot" ||
+		len(dedicated.Tags) != 2 ||
+		dedicated.Tags[1] != "schedule:"+schedule.ScheduleID {
+		t.Fatalf("dedicated session metadata = %#v", dedicated)
+	}
+
+	if _, err := scheduler.RunNow(schedule.ScheduleID, "user-1"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-seenSessionIDs:
+		if got != schedule.SessionID {
+			t.Fatalf("executor session = %q, want %q", got, schedule.SessionID)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("schedule did not run")
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		current, getErr := scheduler.Get(schedule.ScheduleID, "user-1")
+		if getErr != nil {
+			t.Fatal(getErr)
+		}
+		if current.Status == model.TaskScheduleCompleted {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	current, err := scheduler.Get(schedule.ScheduleID, "user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Status != model.TaskScheduleCompleted || current.RunCount != 1 {
+		t.Fatalf("schedule status=%q runs=%d", current.Status, current.RunCount)
+	}
+	if _, err := scheduler.Resume(schedule.ScheduleID, "user-1"); err == nil {
+		t.Fatal("completed schedule should not resume past max_runs")
+	}
+	dedicated, err = st.Get(schedule.SessionID)
+	if err != nil || len(dedicated.Msgs) != 1 || dedicated.Msgs[0].Content != "remembered" {
+		t.Fatalf("dedicated session memory was not persisted: %#v err=%v", dedicated, err)
 	}
 }

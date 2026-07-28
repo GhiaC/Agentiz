@@ -359,8 +359,8 @@ func (ch *CoreHandler) processWithTools(
 
 			// Core only dispatches: when it routes to an agent, that agent's
 			// answer goes straight back to the user. The result does NOT
-			// re-enter Core's LLM, so no closed graph is formed. If deeper /
-			// longer planning is needed it must be done by the high-tier agent,
+			// re-enter Core's LLM, so no closed graph is formed. If deeper or
+			// longer reasoning is needed it must be done by the high-tier agent,
 			// not by Core looping back on itself.
 			if isAgentCall && !didDispatch {
 				dispatched = result

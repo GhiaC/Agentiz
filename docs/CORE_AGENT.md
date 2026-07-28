@@ -36,8 +36,9 @@ What makes the Core the "brain":
 | `visionLLMClient` | Optional cheaper LLM for image input ([core/vision.go](../core/vision.go)). |
 | `coreSessions` | `map[userID]*Session` — in-memory cache of each user's Core session. |
 | `userMutexes` / `userProgress` | Per-user serialization + queueing of messages. |
-| `coreTools` | `FunctionRegistry` of Core's own tools (web_search, sessions, ban, plan…). |
-| `orchestrator` | Optional planning layer; when set, adds `execute_plan` + a Planning prompt. |
+| `coreTools` | `FunctionRegistry` of Core's own tools (web_search, sessions, ban, etc.). |
+| `toolApprovalManager` | Optional fail-closed human gate applied to every Core and worker tool call. |
+| `taskScheduler` | Persistent scheduler for fixed-agent prompt tasks and deterministic workflow state machines. |
 | `fileRecorder` | Optional hook to persist files the user sends (wired to `RecordUserFile`). |
 
 The Core session is fetched/created per message by `getOrCreateCoreSession`
@@ -82,11 +83,9 @@ The array, in build order:
 | 6 | **User Files** (compact table of the user's uploaded/generated files) | `buildUserFilesPrompt()` ([core/llm.go](../core/llm.go)) | user, file uploads | **dynamic** |
 | 7 | **Current Active Sessions** (which session is active per agent) | `agents.BuildActiveSessionsPrompt()` ([agentmanager/prompt.go:230](../agentmanager/prompt.go)) | user, session changes | **dynamic** |
 | 8 | **Sessions list** (for `change_session`) | `sessionHandler.GetSessionsPrompt(userID)` ([model/session_handler.go:474](../model/session_handler.go)) | user, session changes | **dynamic** |
-| 9 | **Planning** (decision rules for `execute_plan`) | `planning.CorePrompt()` ([planning/core_prompt.go](../planning/core_prompt.go)) | planning enabled | static, optional |
-
 Two important properties:
 
-- **Static-first ordering is deliberate.** Sections 1–3 (and 9) are byte-stable
+- **Static-first ordering is deliberate.** Sections 1–3 are byte-stable
   across messages for a given deployment, so provider-side **prompt caching**
   (OpenAI/Anthropic) can cache that prefix; the per-user dynamic sections (4–8) come
   later and change without invalidating the cached prefix. `callLLM`
@@ -185,6 +184,11 @@ what covers the worker agents' sessions.)
   listed with title, summary, tags, model on the user detail page
   ([debuger/pages/users.go:386](../debuger/pages/users.go)).
 - **Route traces**: the per-message routing DAG at `/agentize/debug/routes`.
+- **Workflow DAGs**: exact Core-tool state machines and task results at
+  `/agentize/debug/workflows`; scheduled runs link back to their schedule and
+  dedicated session.
+- **Schedules**: each schedule has its own titled/tagged session, so prompt
+  history and summaries become isolated schedule memory.
 - **Summarization logs**: every summarization run is logged with before/after state.
 - **System Info**: backend + counts panel on the dashboard ([systeminfo.go](../systeminfo.go)).
 

@@ -33,7 +33,41 @@ func (ch *CoreHandler) initializeTaskScheduler() {
 		},
 		ch.concludeScheduledTask,
 	)
-	ch.taskScheduler.SetAllowedAgentTypes(model.AgentTypeCore)
+	ch.taskScheduler.SetWorkflowExecutor(
+		func(ctx context.Context, schedule *model.TaskSchedule) (string, error) {
+			workflowSession, err := ch.sessionHandler.GetSession(schedule.SessionID)
+			if err != nil {
+				return "", fmt.Errorf("load workflow schedule session: %w", err)
+			}
+			if workflowSession == nil {
+				return "", fmt.Errorf("workflow schedule session not found")
+			}
+			workflow, runErr := ch.runWorkflow(
+				ctx,
+				schedule.UserID,
+				schedule.SessionID,
+				workflowSession,
+				"",
+				schedule.ScheduleID,
+				schedule.Name,
+				schedule.WorkflowTasks,
+				false,
+			)
+			if workflow == nil {
+				return "", runErr
+			}
+			schedule.LastWorkflowID = workflow.WorkflowID
+			result, summaryErr := workflowResultJSON(workflow, workflowSummaryOutput)
+			if summaryErr != nil {
+				return "", summaryErr
+			}
+			return result, runErr
+		},
+	)
+	// AgentTypeCore is retained for backwards compatibility with schedules
+	// created before dedicated sessions. New deterministic schedules use their
+	// own workflow session type.
+	ch.taskScheduler.SetAllowedAgentTypes(model.AgentTypeCore, model.AgentTypeWorkflow)
 	_ = ch.coreTools.RegisterOrReplace(
 		"manage_schedules",
 		"مدیریت زمان‌بندی‌ها",

@@ -130,7 +130,7 @@
       ]
     },
 
-    { "type": "row", "id": 40, "title": "Knowledge, Moderation, Planning & Runtime", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 36 } },
+    { "type": "row", "id": 40, "title": "Knowledge, Moderation & Runtime", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 36 } },
     {
       "type": "timeseries", "id": 41, "title": "Moderation results (/min)",
       "datasource": { "type": "prometheus", "uid": "${datasource}" }, "gridPos": { "h": 7, "w": 6, "x": 0, "y": 37 },
@@ -139,13 +139,12 @@
       "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum by (result) (rate(agentize_moderation_checks_total[15m])) * 60", "legendFormat": "{{result}}" } ]
     },
     {
-      "type": "timeseries", "id": 42, "title": "Knowledge opens & plan steps (/min)",
+      "type": "timeseries", "id": 42, "title": "Knowledge opens (/min)",
       "datasource": { "type": "prometheus", "uid": "${datasource}" }, "gridPos": { "h": 7, "w": 6, "x": 6, "y": 37 },
       "fieldConfig": { "defaults": { "unit": "cpm", "custom": { "drawStyle": "line", "fillOpacity": 20 } }, "overrides": [] },
       "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"] }, "tooltip": { "mode": "multi" } },
       "targets": [
-        { "refId": "A", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum by (status) (rate(agentize_knowledge_file_opens_total[15m])) * 60", "legendFormat": "open {{status}}" },
-        { "refId": "B", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum by (status) (rate(agentize_planning_steps_total[15m])) * 60", "legendFormat": "plan step {{status}}" }
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum by (status) (rate(agentize_knowledge_file_opens_total[15m])) * 60", "legendFormat": "open {{status}}" }
       ]
     },
     {

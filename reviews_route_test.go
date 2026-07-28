@@ -37,7 +37,7 @@ func TestDebugReviews_ListAndResolve(t *testing.T) {
 	t.Setenv("AGENTIZE_DEBUG_UNSAFE", "1")
 
 	// Raise a review through the host API.
-	req := model.NewReviewRequest("plan_step", "plan-1/step-2")
+	req := model.NewReviewRequest("tool_call", "session-1-t2")
 	req.UserID = "user-1"
 	req.Title = "Approve deploy"
 	reviewID, err := ag.RequestReview(context.Background(), req)
@@ -102,7 +102,7 @@ func TestDebugReviews_ResolveGuards(t *testing.T) {
 	}
 	t.Setenv("AGENTIZE_DEBUG_UNSAFE", "1")
 
-	req := model.NewReviewRequest("plan_step", "p/s")
+	req := model.NewReviewRequest("tool_call", "session-1-t2")
 	req.UserID = "u1"
 	id, _ := ag.RequestReview(context.Background(), req)
 

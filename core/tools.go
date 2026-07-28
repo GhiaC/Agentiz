@@ -132,58 +132,8 @@ func (ch *CoreHandler) getCoreToolsForLLM() []openai.Tool {
 		})
 	}
 
-	if ch.orchestrator != nil {
-		tools = append(tools, openai.Tool{
-			Type: openai.ToolTypeFunction,
-			Function: &openai.FunctionDefinition{
-				Name:        "execute_plan",
-				Description: "Run the user's request through the planning layer. Use for multi-step or structured tasks where order and dependencies matter (e.g. 'fetch data then compare then summarize'). Input: message (the user request). Returns the final output of the plan execution.",
-				Parameters: map[string]interface{}{
-					"type": "object",
-					"properties": map[string]interface{}{
-						"message": map[string]interface{}{
-							"type":        "string",
-							"description": "The user request or goal to execute as a plan (multi-step task).",
-						},
-					},
-					"required": []string{"message"},
-				},
-			},
-		})
-		tools = append(tools, openai.Tool{
-			Type: openai.ToolTypeFunction,
-			Function: &openai.FunctionDefinition{
-				Name:        "get_plan_status",
-				Description: "Get the current status of a plan by ID (running, completed, failed, cancelled). Use to check progress of an execute_plan run.",
-				Parameters: map[string]interface{}{
-					"type": "object",
-					"properties": map[string]interface{}{
-						"plan_id": map[string]interface{}{
-							"type":        "string",
-							"description": "The plan ID returned or known from execute_plan.",
-						},
-					},
-					"required": []string{"plan_id"},
-				},
-			},
-		})
-		tools = append(tools, openai.Tool{
-			Type: openai.ToolTypeFunction,
-			Function: &openai.FunctionDefinition{
-				Name:        "cancel_plan",
-				Description: "Cancel a running plan by ID. No effect if the plan is already completed or failed.",
-				Parameters: map[string]interface{}{
-					"type": "object",
-					"properties": map[string]interface{}{
-						"plan_id": map[string]interface{}{
-							"type":        "string",
-							"description": "The plan ID to cancel.",
-						},
-					},
-					"required": []string{"plan_id"},
-				},
-			},
-		})
+	if _, ok := ch.sessionHandler.GetStore().(workflowPersistence); ok {
+		tools = append(tools, workflowCoreToolDefinitions(ch.taskScheduler != nil)...)
 	}
 
 	if ch.taskScheduler != nil {
@@ -213,6 +163,23 @@ func (ch *CoreHandler) executeCoreTool(
 	messageID string,
 	toolCall openai.ToolCall,
 ) string {
+	result, _ := ch.executeCoreToolWithError(
+		ctx, userID, sessionID, coreSession, messageID, toolCall, true,
+	)
+	return result
+}
+
+// executeCoreToolWithError is the typed execution path used by deterministic
+// workflows. requireApproval is false only for a persisted workflow schedule:
+// the exact DAG was approved when create_workflow_schedule was invoked.
+func (ch *CoreHandler) executeCoreToolWithError(
+	ctx context.Context,
+	userID, sessionID string,
+	coreSession *model.Session,
+	messageID string,
+	toolCall openai.ToolCall,
+	requireApproval bool,
+) (string, error) {
 	persister := ch.getToolCallPersister()
 	var toolID string
 	if coreSession != nil {
@@ -224,8 +191,6 @@ func (ch *CoreHandler) executeCoreTool(
 	if toolDetail == "" {
 		toolDetail = toolCall.Function.Name
 	}
-	engine.NotifyStatus(ctx, userID, sessionID, engine.StatusToolExecuting, toolDetail)
-
 	if ch.Callback != nil {
 		if cbErr := ch.Callback.BeforeAction(ctx, &engine.UsageEvent{
 			UserID:    userID,
@@ -237,16 +202,48 @@ func (ch *CoreHandler) executeCoreTool(
 			persister.Update(toolID, result, cbErr)
 			// Surface the block on the routing DAG (e.g. a quota callback denied it).
 			routeRecorderFrom(ctx).Tool(model.RouteNodeToolCall, toolCall.Function.Name, toolDetail, "blocked: "+cbErr.Error(), model.RouteStatusBlocked, 0)
-			return result
+			return result, cbErr
 		}
 	}
 
+	if requireApproval {
+		approvalRefID := toolID
+		if approvalRefID == "" {
+			approvalRefID = toolCall.ID
+		}
+		if ch.toolApprovalManager != nil {
+			engine.NotifyStatus(ctx, userID, sessionID, engine.StatusToolApproval, toolDetail)
+		}
+		_, approvalErr := engine.AwaitToolApproval(ctx, ch.toolApprovalManager, engine.ToolApprovalRequest{
+			RefID:       approvalRefID,
+			UserID:      userID,
+			SessionID:   sessionID,
+			AgentType:   model.AgentTypeCore,
+			ToolName:    toolCall.Function.Name,
+			DisplayName: toolDetail,
+			Arguments:   toolCall.Function.Arguments,
+		})
+		if approvalErr != nil {
+			result := fmt.Sprintf("Tool %s was not executed: %v", toolCall.Function.Name, approvalErr)
+			engine.NotifyStatus(ctx, userID, sessionID, engine.StatusToolRejected, toolDetail)
+			persister.Update(toolID, result, approvalErr)
+			routeRecorderFrom(ctx).Tool(model.RouteNodeToolCall, toolCall.Function.Name, toolDetail, "blocked: "+approvalErr.Error(), model.RouteStatusBlocked, 0)
+			return result, approvalErr
+		}
+	}
+
+	engine.NotifyStatus(ctx, userID, sessionID, engine.StatusToolExecuting, toolDetail)
+
 	toolStart := time.Now()
-	result, err := ch.runCoreToolImpl(ctx, userID, sessionID, messageID, toolCall)
+	result, err := ch.runCoreToolImpl(ctx, userID, sessionID, coreSession, messageID, toolCall)
 	toolDuration := time.Since(toolStart)
 	metrics.ToolCall("core", toolCall.Function.Name, metrics.Status(err), toolDuration)
 	if err != nil {
-		result = fmt.Sprintf("Error executing tool: %v", err)
+		if result == "" {
+			result = fmt.Sprintf("Error executing tool: %v", err)
+		} else {
+			result += fmt.Sprintf("\nError executing tool: %v", err)
+		}
 	}
 
 	if ch.Callback != nil {
@@ -265,15 +262,13 @@ func (ch *CoreHandler) executeCoreTool(
 
 	// Record into the routing DAG. Agent dispatch/escalation nodes are recorded
 	// in runCoreToolImpl (with per-agent timing), so skip call_agent_* here.
-	if rec := routeRecorderFrom(ctx); rec != nil && !strings.HasPrefix(toolCall.Function.Name, "call_agent_") {
-		nodeType := model.RouteNodeToolCall
-		if toolCall.Function.Name == "execute_plan" {
-			nodeType = model.RouteNodePlan
-		}
-		rec.Tool(nodeType, toolCall.Function.Name, toolDetail, toolCall.Function.Arguments, routeStatus(err), toolDuration.Milliseconds())
+	if rec := routeRecorderFrom(ctx); rec != nil &&
+		!strings.HasPrefix(toolCall.Function.Name, "call_agent_") &&
+		toolCall.Function.Name != "execute_workflow" {
+		rec.Tool(model.RouteNodeToolCall, toolCall.Function.Name, toolDetail, toolCall.Function.Arguments, routeStatus(err), toolDuration.Milliseconds())
 	}
 
-	return result
+	return result, err
 }
 
 // skipRedundantAgentCall records — but does NOT execute — a call_agent_* tool
@@ -304,10 +299,12 @@ func (ch *CoreHandler) skipRedundantAgentCall(ctx context.Context, toolCall open
 }
 
 // runCoreToolImpl runs the Core tool logic (switch on tool name).
-// messageID is the assistant message that contains this tool call; used e.g. to update plan status on that message.
+// messageID is the assistant message that contains this tool call.
 func (ch *CoreHandler) runCoreToolImpl(
 	ctx context.Context,
-	userID, sessionID, messageID string,
+	userID, sessionID string,
+	coreSession *model.Session,
+	messageID string,
 	toolCall openai.ToolCall,
 ) (string, error) {
 	var args map[string]interface{}
@@ -406,18 +403,33 @@ func (ch *CoreHandler) runCoreToolImpl(
 	case "sleep":
 		return ch.sleepTool(ctx, args)
 
-	case "execute_plan":
-		return ch.executePlanTool(ctx, userID, sessionID, messageID, args)
-	case "get_plan_status":
-		return ch.getPlanStatusTool(ctx, args)
-	case "cancel_plan":
-		return ch.cancelPlanTool(ctx, args)
+	case "execute_workflow":
+		return ch.executeWorkflowTool(ctx, userID, sessionID, coreSession, messageID, args)
+
+	case "get_workflow_status":
+		return ch.getWorkflowStatusTool(userID, args)
+
+	case "create_workflow_schedule":
+		return ch.createWorkflowScheduleTool(userID, sessionID, args)
+
 	case "manage_schedules":
 		if ch.taskScheduler == nil {
 			return "", fmt.Errorf("task scheduler is not configured")
 		}
 		args["__user_id__"] = userID
 		args["__session_id__"] = sessionID
+		action, _ := args["action"].(string)
+		if strings.EqualFold(strings.TrimSpace(action), "create") {
+			agentName, err := requireStringArg(args, "agent_name")
+			if err != nil {
+				return "", fmt.Errorf("Core prompt schedules require a fixed agent_name: %w", err)
+			}
+			agent, ok := ch.agents.Get(agentName)
+			if !ok {
+				return "", fmt.Errorf("unknown agent: %s", agentName)
+			}
+			return ch.taskScheduler.ExecuteToolForAgent(args, agent.Config.AgentType)
+		}
 		return ch.taskScheduler.ExecuteTool(args)
 
 	default:
@@ -670,6 +682,9 @@ func (ch *CoreHandler) registerCoreTools() {
 	ch.coreTools.MustRegister("sleep", "توقف موقت", coreToolNoOp)
 	ch.coreTools.MustRegister("web_search", "جستجوی وب", coreToolNoOp)
 	ch.coreTools.MustRegister("web_search_deepresearch", "جستجوی وب (عمیق)", coreToolNoOp)
+	ch.coreTools.MustRegister("execute_workflow", "اجرای گردش‌کار", coreToolNoOp)
+	ch.coreTools.MustRegister("get_workflow_status", "وضعیت گردش‌کار", coreToolNoOp)
+	ch.coreTools.MustRegister("create_workflow_schedule", "زمان‌بندی گردش‌کار", coreToolNoOp)
 }
 
 // saveCoreMessage saves a message from CoreHandler to the database.

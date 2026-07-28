@@ -23,8 +23,6 @@ const (
 	// RouteNodeEscalation is a forward to a higher-tier agent after the first
 	// agent replied with an ESCALATE: result.
 	RouteNodeEscalation RouteNodeType = "escalation"
-	// RouteNodePlan is an execute_plan invocation handed to the planning layer.
-	RouteNodePlan RouteNodeType = "plan"
 	// RouteNodeResponse is the terminal answer returned to the user.
 	RouteNodeResponse RouteNodeType = "response"
 )
@@ -144,7 +142,7 @@ func truncateRouteText(s string) string {
 //   - The root is the user_message node.
 //   - Decision nodes form a spine: root -> decision1 -> decision2 -> ... (each
 //     LLM turn feeds the previous turn's tool results back in).
-//   - Tool / dispatch / plan nodes hang off the decision that invoked them.
+//   - Tool / dispatch nodes hang off the decision that invoked them.
 //   - An escalation node hangs off the dispatch it escalated from.
 //   - The terminal response node hangs off the final decision, or — when the
 //     Core dispatched — off the agent whose answer it returned verbatim.
@@ -234,8 +232,7 @@ func (b *RouteTraceBuilder) Decision(label, model string, tokens int, durationMs
 	}
 }
 
-// Tool records a non-routing tool execution (or a plan invocation) under the
-// current decision. Use RouteNodeToolCall or RouteNodePlan for nodeType.
+// Tool records a non-routing tool execution under the current decision.
 func (b *RouteTraceBuilder) Tool(nodeType RouteNodeType, toolName, label, detail string, status RouteNodeStatus, durationMs int64) {
 	if b == nil {
 		return

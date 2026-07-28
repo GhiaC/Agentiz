@@ -10,7 +10,7 @@ type SystemInfo struct {
 	FileStore       BackendInfo // user-file byte storage (local disk, custom, ...)
 	TotalDocuments  int         // number of recorded user files (uploaded + generated)
 	RegisteredTools int         // number of tools registered with the agent
-	PlanningEnabled bool        // whether the planning layer is active
+	ToolApprovals   bool        // whether every tool call is gated by human approval
 	More            []InfoKV    // extra detail rows shown under "more info"
 }
 

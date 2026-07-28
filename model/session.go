@@ -32,6 +32,10 @@ const (
 	AgentTypeHigh AgentType = "high"
 	AgentTypeLow  AgentType = "low"
 	AgentTypeUser AgentType = "user"
+	// AgentTypeWorkflow owns dedicated sessions used by deterministic Core
+	// workflow schedules. It is intentionally distinct from the singleton Core
+	// session type.
+	AgentTypeWorkflow AgentType = "workflow"
 )
 
 // Session represents a user session in the agent system

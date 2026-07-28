@@ -103,12 +103,23 @@ type Engine struct {
 	// Callback for billing/usage metering (optional, set by application)
 	Callback Callback
 
+	// ToolApprovalManager, when set, requires an explicit human approval before
+	// every tool invocation. The manager is UI-agnostic; review.Manager is the
+	// standard durable implementation.
+	ToolApprovalManager ToolApprovalManager
+
 	// userModelOverrides maps userID -> model id, set at runtime via SetUserModel.
 	// A non-empty override takes precedence over llmConfig.Model for that user's
 	// requests, enabling per-user runtime model switching without reconfiguring the
 	// engine. Empty/absent → engine default model. See user_model.go.
 	userModelOverrides   map[string]string
 	userModelOverridesMu sync.RWMutex
+}
+
+// SetToolApprovalManager enables approval gating for every tool call. Passing
+// nil disables the gate.
+func (e *Engine) SetToolApprovalManager(manager ToolApprovalManager) {
+	e.ToolApprovalManager = manager
 }
 
 // Init initializes the engine by loading the root node and verifying Sessions store is ready.
@@ -1572,8 +1583,6 @@ func (e *Engine) executeTool(
 			toolDetail = d
 		}
 	}
-	NotifyStatus(ctx, session.UserID, sessionID, StatusToolExecuting, toolDetail)
-
 	// Check callback before execution. Expose a tool's "action" arg (e.g.
 	// manage_files edit_image) so the host can pre-block expensive media actions.
 	if e.Callback != nil {
@@ -1591,6 +1600,36 @@ func (e *Engine) executeTool(
 			return result, nil
 		}
 	}
+
+	// Human approval is the final gate before execution. It deliberately runs
+	// after cheap programmatic guards (quota/policy callback), so users are not
+	// asked to approve work that would be blocked anyway.
+	approvalRefID := toolID
+	if approvalRefID == "" {
+		approvalRefID = toolCall.ID
+	}
+	if e.ToolApprovalManager != nil {
+		NotifyStatus(ctx, session.UserID, sessionID, StatusToolApproval, toolDetail)
+	}
+	_, approvalErr := AwaitToolApproval(ctx, e.ToolApprovalManager, ToolApprovalRequest{
+		RefID:       approvalRefID,
+		UserID:      session.UserID,
+		SessionID:   sessionID,
+		AgentType:   session.AgentType,
+		ToolName:    toolCall.Function.Name,
+		DisplayName: toolDetail,
+		Arguments:   toolCall.Function.Arguments,
+	})
+	if approvalErr != nil {
+		result := fmt.Sprintf("Tool %s was not executed: %v", toolCall.Function.Name, approvalErr)
+		NotifyStatus(ctx, session.UserID, sessionID, StatusToolRejected, toolDetail)
+		if persister != nil {
+			persister.Update(toolID, result, approvalErr)
+		}
+		return result, nil
+	}
+
+	NotifyStatus(ctx, session.UserID, sessionID, StatusToolExecuting, toolDetail)
 
 	// Execute tool
 	toolStart := time.Now()

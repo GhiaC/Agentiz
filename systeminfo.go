@@ -22,7 +22,7 @@ func (ag *Agentize) SystemInfo() debuger.SystemInfo {
 		Database:        st.BackendInfo(),
 		FileStore:       describeFileStore(ag.engine.Files),
 		RegisteredTools: len(ag.GetRegisteredTools()),
-		PlanningEnabled: ag.GetPlanStore() != nil,
+		ToolApprovals:   ag.engine.ToolApprovalManager != nil,
 	}
 
 	// Count recorded user files (uploaded + generated), best-effort.

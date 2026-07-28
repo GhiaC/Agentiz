@@ -22,11 +22,11 @@ bot), which wires in its own tools, storage and billing while Agentize orchestra
   (`fsrepo/`, `model/`).
 - **Pluggable persistence** (SQLite / MongoDB / in-memory) for sessions, messages,
   tool calls and opened files (`store/`).
-- **Cross-cutting hooks** for usage metering/billing, live status updates, planning,
+- **Cross-cutting hooks** for usage metering/billing, live status updates, tool approvals,
   moderation and session summarization — all optional and host-supplied.
 
 Design philosophy: **integrate, don't fork.** The host implements interfaces
-(`SessionStore`, `Callback`, tool functions, `Planner`/`Runner`) and registers them;
+(`SessionStore`, `Callback`, tool functions, `ToolApprovalManager`) and registers them;
 Agentize drives the control flow.
 
 ## 2. Layered view
@@ -39,7 +39,7 @@ flowchart TB
       Core["core/ — CoreHandler (router, sessions, core tools)"]
       AM["agentmanager/ — agent registry + tiers"]
       Eng["engine/ — Engine (per-agent LLM + tool loop)"]
-      Plan["planning/ — optional plan orchestrator"]
+      Review["review/ — durable tool approvals"]
       Sched["engine/schedules.go — session summarizer"]
       subgraph Shared
         Model["model/ — sessions, registries, nodes"]
@@ -51,7 +51,8 @@ flowchart TB
 
     Host -->|ProcessMessage| Facade --> Core
     Core -->|call_agent_*| AM --> Eng
-    Core -. optional .-> Plan
+    Core --> Review
+    Eng --> Review
     Core --> Model
     Eng --> Model
     Eng --> Repo
@@ -71,7 +72,7 @@ flowchart TB
 | `core/` | Message router: sessions, system prompts, Core tools, agent dispatch, moderation, vision | `CoreHandler.ProcessMessage` ([core/core.go:183](../core/core.go)), `processOneMessageCore` ([core/core.go:214](../core/core.go)) |
 | `agentmanager/` | Registry of agents with capabilities + cost tiers | `AgentManager`, `RegisteredAgent`, `CostTier` |
 | `engine/` | Per-agent LLM loop, tool execution, callbacks, status, backups, scheduler | `Engine.ProcessMessage` ([engine/user_agent.go:573](../engine/user_agent.go)), `Callback` ([engine/hooks.go](../engine/hooks.go)) |
-| `planning/` | Optional DAG plan: planner + runner orchestration | `Orchestrator`, `Planner`, `Runner` |
+| `review/` | Durable, UI-agnostic approval requests | `Manager`, `Request`, `Await`, `Resolve` |
 | `model/` | Sessions, messages, function/tool registries, knowledge nodes, RBAC | `SessionStore`, `FunctionRegistry`, `Session`, `Node` |
 | `store/` | Persistence backends | `SQLiteStore`, `MongoDBStore`, `DBStore` (cache) |
 | `fsrepo/` | Filesystem knowledge repository | `NodeRepository` |
@@ -122,7 +123,7 @@ sequenceDiagram
             end
             CH->>CB: AfterAction(agent_routing)
             Note over CH: dispatch-only — return the agent answer<br/>directly; it does NOT loop back into Core's LLM
-        else Core tool (web_search, sessions, plan, ...)
+        else Core tool (web_search, sessions, deterministic workflow, ...)
             CH->>CB: BeforeAction(tool_call)  %% may BLOCK
             CH->>CT: run tool, NotifyStatus(ToolExecuting → ToolDone)
             CH->>CB: AfterAction(tool_call, duration, error)
@@ -153,7 +154,7 @@ sequenceDiagram
    ([core/core.go:285](../core/core.go)): the Core LLM decides to answer directly or
    to emit tool calls.
 7. **Tool dispatch** — `executeCoreTool` wraps every tool with
-   `Callback.BeforeAction` (can **block** on quota/credit),
+   `Callback.BeforeAction` (can **block** on quota/credit), human approval,
    timing, and `Callback.AfterAction` ([core/tools.go:192-247](../core/tools.go)).
    - **Agent dispatch (terminal)**: a `call_agent_<name>` tool routes to a registered
      agent; `callAgent` runs that agent's own `Engine.ProcessMessage`
@@ -166,7 +167,7 @@ sequenceDiagram
      (language, plain text, length). If a request needs longer, multi-step reasoning,
      route it to a higher-tier agent instead of expecting Core to iterate.
    - **Core tools (non-terminal)**: `web_search`, session management, `ban_user`,
-     planning, `sleep`, etc. ([core/tools.go:313-350](../core/tools.go)). Their results
+     `sleep`, etc. ([core/tools.go](../core/tools.go)). Their results
      *do* re-enter the loop so the Core LLM can use them to compose its own reply.
 8. **Inside a worker agent** — `Engine.ProcessMessage`
    ([engine/user_agent.go:573](../engine/user_agent.go)) takes a per-session mutex,
@@ -192,10 +193,17 @@ sequenceDiagram
   loop, without the Core router.
 - **Vision**: `CoreHandler.ProcessMessageWithImage` ([core/vision.go:33](../core/vision.go))
   routes image input through a (usually cheaper) vision LLM, falling back to the main LLM.
-- **Planning**: `ProcessMessageWithPlanning` ([agentize.go:437](../agentize.go)) defers to
-  the plan `Orchestrator` when enabled; the Core LLM can also invoke it via the
-  `execute_plan` tool. See [PLANNING.md](./PLANNING.md) for the DAG/step model, runners,
-  store, and the debug page.
+- **Tool approval**: `engine.AwaitToolApproval` creates a durable `tool_call`
+  review and blocks immediately before execution. `approve` continues; every
+  other terminal decision fails closed without invoking the tool. See
+  [REVIEWS.md](./REVIEWS.md).
+- **Workflow DAG**: `execute_workflow` persists and executes exact Core-tool
+  invocations without a planner LLM. Immediate activities use the normal
+  per-tool approval path. `create_workflow_schedule` approves an immutable DAG
+  once, then the scheduler runs it without per-activity approvals.
+- **Schedule memory**: schedule creation provisions a dedicated session with a
+  fixed agent type. Prompt runs append to that session; workflow runs link their
+  state and tool calls to it.
 
 ## 5. Cross-cutting concerns
 
@@ -204,7 +212,7 @@ sequenceDiagram
   `AfterAction` (records tokens, duration, errors). Fired from both the Core
   ([core/tools.go:212-241](../core/tools.go)) and each Engine. This single hook is the
   richest place to meter the whole system. **Coverage**: Core/agent LLM calls, every
-  tool call, agent routing, and plan steps. **Media** is metered too — the **vision**
+  tool call and agent routing. **Media** is metered too — the **vision**
   (image-input) LLM call fires a `llm_call` event with `Metadata{media:"image"}`
   ([core/vision.go](../core/vision.go)), and **image edits** surface the underlying
   image-model `Model` + token cost on the `manage_files` `edit_image` tool event
@@ -232,7 +240,7 @@ sequenceDiagram
 | Billing / quota | `engine.Callback`, set with `CoreHandler.SetCallback` / `AgentManager.SetCallback` |
 | Live progress | inject a `StatusFunc` via `engine.WithStatusFunc(ctx, fn)` |
 | Multi-agent | register agents in `AgentManager` with capabilities + `CostTier` |
-| Planning | implement `planning.Planner` + `Runner`, enable via `UsePlanning` ([PLANNING.md](./PLANNING.md)) |
+| Tool approvals | `Engine.SetToolApprovalManager` or `CoreHandler.SetToolApprovalManager`; normally pass `ag.ReviewManager()` |
 | Knowledge | filesystem nodes (default `fsrepo`) or a custom `NodeRepository` |
 | Debug UI | `AddDebugPage`, served under `/agentize/debug/...` |
 

@@ -446,6 +446,22 @@ var sqliteMigrations = []sqliteMigration{
 			`CREATE INDEX IF NOT EXISTS idx_task_schedule_runs_schedule_started ON task_schedule_runs(schedule_id, started_at DESC)`,
 		)
 	}},
+	{13, "durable Core workflow DAGs", func(tx *sql.Tx) error {
+		return execAll(tx, `
+		CREATE TABLE IF NOT EXISTS workflow_runs (
+			workflow_id TEXT PRIMARY KEY,
+			user_id TEXT NOT NULL,
+			session_id TEXT NOT NULL,
+			status TEXT NOT NULL,
+			data TEXT NOT NULL,
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL
+		)`,
+			`CREATE INDEX IF NOT EXISTS idx_workflow_runs_user_created ON workflow_runs(user_id, created_at DESC)`,
+			`CREATE INDEX IF NOT EXISTS idx_workflow_runs_session_created ON workflow_runs(session_id, created_at DESC)`,
+			`CREATE INDEX IF NOT EXISTS idx_workflow_runs_status_updated ON workflow_runs(status, updated_at DESC)`,
+		)
+	}},
 }
 
 // runMigrations applies every migration newer than the recorded schema version.
@@ -716,6 +732,9 @@ func (s *SQLiteStore) DeleteUserData(userID string) error {
 	}
 	if _, err := tx.Exec("DELETE FROM route_traces WHERE user_id = ?", userID); err != nil {
 		return fmt.Errorf("failed to delete route_traces: %w", err)
+	}
+	if _, err := tx.Exec("DELETE FROM workflow_runs WHERE user_id = ?", userID); err != nil {
+		return fmt.Errorf("failed to delete workflow_runs: %w", err)
 	}
 	if _, err := tx.Exec("DELETE FROM reviews WHERE user_id = ?", userID); err != nil {
 		return fmt.Errorf("failed to delete reviews: %w", err)
@@ -2914,6 +2933,101 @@ func (s *SQLiteStore) ListTaskScheduleRuns(scheduleID string, limit int) ([]*mod
 		return nil, fmt.Errorf("error iterating task schedule runs: %w", err)
 	}
 	return runs, nil
+}
+
+// PutWorkflowRun upserts a durable Core workflow and its task DAG.
+func (s *SQLiteStore) PutWorkflowRun(workflow *model.WorkflowRun) error {
+	if _, err := workflow.Validate(); err != nil {
+		return err
+	}
+	data, err := json.Marshal(workflow)
+	if err != nil {
+		return fmt.Errorf("failed to marshal workflow run: %w", err)
+	}
+	_, err = s.execWrite(
+		`INSERT INTO workflow_runs
+			(workflow_id, user_id, session_id, status, data, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(workflow_id) DO UPDATE SET
+			user_id=excluded.user_id,
+			session_id=excluded.session_id,
+			status=excluded.status,
+			data=excluded.data,
+			updated_at=excluded.updated_at`,
+		workflow.WorkflowID, workflow.UserID, workflow.SessionID, string(workflow.Status),
+		string(data), workflow.CreatedAt.Unix(), workflow.UpdatedAt.Unix(),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to store workflow run: %w", err)
+	}
+	return nil
+}
+
+// GetWorkflowRun returns a workflow by id, or (nil, nil) when absent.
+func (s *SQLiteStore) GetWorkflowRun(workflowID string) (*model.WorkflowRun, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var data string
+	err := s.db.QueryRow(`SELECT data FROM workflow_runs WHERE workflow_id = ?`, workflowID).Scan(&data)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to query workflow run: %w", err)
+	}
+	workflow := &model.WorkflowRun{}
+	if err := json.Unmarshal([]byte(data), workflow); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal workflow run: %w", err)
+	}
+	return workflow, nil
+}
+
+// ListWorkflowRuns returns workflows newest-first. Empty userID lists all.
+func (s *SQLiteStore) ListWorkflowRuns(userID string, limit int) ([]*model.WorkflowRun, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var rows *sql.Rows
+	var err error
+	if userID == "" {
+		rows, err = s.db.Query(
+			`SELECT data FROM workflow_runs ORDER BY created_at DESC, workflow_id DESC LIMIT ?`,
+			limit,
+		)
+	} else {
+		rows, err = s.db.Query(
+			`SELECT data FROM workflow_runs WHERE user_id = ? ORDER BY created_at DESC, workflow_id DESC LIMIT ?`,
+			userID, limit,
+		)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to list workflow runs: %w", err)
+	}
+	defer rows.Close()
+
+	var workflows []*model.WorkflowRun
+	for rows.Next() {
+		var data string
+		if err := rows.Scan(&data); err != nil {
+			return nil, fmt.Errorf("failed to scan workflow run: %w", err)
+		}
+		workflow := &model.WorkflowRun{}
+		if err := json.Unmarshal([]byte(data), workflow); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal workflow run: %w", err)
+		}
+		workflows = append(workflows, workflow)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating workflow runs: %w", err)
+	}
+	return workflows, nil
 }
 
 // Ensure SQLiteStore implements model.SessionStore and debuger.DebugStore
