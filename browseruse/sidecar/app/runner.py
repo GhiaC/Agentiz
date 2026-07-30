@@ -30,6 +30,7 @@ class BrowserUseRunner:
 		downloads_dir = self.settings.data_dir / "downloads" / job_id
 		uploads_dir = self._uploads_dir(job_id)
 		profile_dir.mkdir(parents=True, exist_ok=True)
+		self._clear_stale_chromium_locks(profile_dir)
 		downloads_dir.mkdir(parents=True, exist_ok=True)
 		upload_paths = self._stage_uploads(request.uploads, uploads_dir)
 		har_path, _ = self.artifacts.prepare(job_id)
@@ -152,6 +153,18 @@ class BrowserUseRunner:
 
 	def _downloads_dir(self, job_id: str) -> Path:
 		return (self.settings.data_dir / "downloads" / job_id).resolve()
+
+	def _clear_stale_chromium_locks(self, profile_dir: Path) -> None:
+		# Chromium leaves these files behind when a job/container is interrupted.
+		# Jobs sharing a profile are serialized by JobManager, so no live browser can
+		# own them when a new job for this session starts.
+		for name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+			try:
+				(profile_dir / name).unlink(missing_ok=True)
+			except OSError:
+				# A malformed profile must not prevent the job from reporting Chromium's
+				# own startup error.
+				pass
 
 	def _uploads_dir(self, job_id: str) -> Path:
 		return (self.settings.data_dir / "uploads" / job_id).resolve()
