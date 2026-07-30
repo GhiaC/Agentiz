@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import base64
 import hashlib
+import mimetypes
 import os
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -9,7 +12,10 @@ from browser_use import Agent, BrowserProfile, BrowserSession
 
 from .artifacts import BrowserArtifacts
 from .config import Settings
-from .models import JobResult, StartJobRequest
+from .models import BrowserDownload, BrowserUpload, JobResult, StartJobRequest
+
+
+MAX_DOWNLOAD_BYTES = 25 << 20
 
 
 class BrowserUseRunner:
@@ -22,8 +28,10 @@ class BrowserUseRunner:
 		session_key = hashlib.sha256(session_id.encode("utf-8")).hexdigest()
 		profile_dir = self.settings.data_dir / "profiles" / session_key
 		downloads_dir = self.settings.data_dir / "downloads" / job_id
+		uploads_dir = self._uploads_dir(job_id)
 		profile_dir.mkdir(parents=True, exist_ok=True)
 		downloads_dir.mkdir(parents=True, exist_ok=True)
+		upload_paths = self._stage_uploads(request.uploads, uploads_dir)
 		har_path, _ = self.artifacts.prepare(job_id)
 
 		profile = BrowserProfile(
@@ -37,6 +45,10 @@ class BrowserUseRunner:
 			chromium_sandbox=self.settings.chromium_sandbox,
 			keep_alive=False,
 			proxy={"server": self.settings.proxy_url} if self.settings.proxy_url else None,
+			# browser-use polls the CDP endpoint through 127.0.0.1. Pin Chromium to
+			# that address as well; newer Chromium builds may otherwise select IPv6
+			# localhost, which makes the browser-use startup probe time out.
+			args=["--remote-debugging-address=127.0.0.1"],
 			record_har_path=har_path,
 			record_har_content="omit",
 			record_har_mode="full",
@@ -50,6 +62,8 @@ class BrowserUseRunner:
 			use_judge=False,
 			enable_signal_handler=False,
 			calculate_cost=True,
+			available_file_paths=[str(path) for path in upload_paths] or None,
+			file_system_path=str(uploads_dir),
 		)
 
 		async def capture_latest_screenshot(_: Agent) -> None:
@@ -92,6 +106,67 @@ class BrowserUseRunner:
 
 	def cleanup(self, job_id: str) -> None:
 		self.artifacts.cleanup(job_id)
+		try:
+			shutil.rmtree(self._downloads_dir(job_id))
+		except FileNotFoundError:
+			pass
+		except OSError:
+			pass
+		try:
+			shutil.rmtree(self._uploads_dir(job_id))
+		except FileNotFoundError:
+			pass
+		except OSError:
+			pass
+
+	def list_downloads(self, job_id: str) -> list[BrowserDownload]:
+		root = self._downloads_dir(job_id)
+		if not root.is_dir():
+			return []
+		files: list[BrowserDownload] = []
+		for path in sorted(root.iterdir(), key=lambda item: item.name.lower()):
+			try:
+				resolved = path.resolve()
+				resolved.relative_to(root)
+				if not resolved.is_file():
+					continue
+				size = resolved.stat().st_size
+			except (OSError, ValueError):
+				continue
+			mime_type, _ = mimetypes.guess_type(resolved.name)
+			files.append(BrowserDownload(name=resolved.name, mime_type=mime_type or "application/octet-stream", size=size))
+		return files
+
+	def read_download(self, job_id: str, name: str) -> tuple[BrowserDownload, bytes]:
+		for download in self.list_downloads(job_id):
+			if download.name != name:
+				continue
+			if download.size > MAX_DOWNLOAD_BYTES:
+				raise ValueError(f"browser download exceeds {MAX_DOWNLOAD_BYTES} byte limit")
+			path = self._downloads_dir(job_id) / download.name
+			data = path.read_bytes()
+			if not data:
+				raise FileNotFoundError("browser download is empty")
+			return download, data
+		raise FileNotFoundError("browser download not found")
+
+	def _downloads_dir(self, job_id: str) -> Path:
+		return (self.settings.data_dir / "downloads" / job_id).resolve()
+
+	def _uploads_dir(self, job_id: str) -> Path:
+		return (self.settings.data_dir / "uploads" / job_id).resolve()
+
+	def _stage_uploads(self, uploads: list[BrowserUpload], directory: Path) -> list[Path]:
+		directory.mkdir(parents=True, exist_ok=True)
+		paths: list[Path] = []
+		for index, upload in enumerate(uploads, start=1):
+			data = base64.b64decode(upload.data_base64, validate=True)
+			path = directory / upload.name
+			if path.exists():
+				path = directory / f"{index}-{upload.name}"
+			path.write_bytes(data)
+			paths.append(path)
+		return paths
 
 	def _allowed_domains(self, request: StartJobRequest) -> list[str] | None:
 		# A deployment-wide allowlist is authoritative. Callers can only provide a

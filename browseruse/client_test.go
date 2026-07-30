@@ -162,6 +162,44 @@ func TestClientScreenshotUsesTrustedSessionAndReturnsImage(t *testing.T) {
 	}
 }
 
+func TestClientListsAndDownloadsJobFiles(t *testing.T) {
+	t.Parallel()
+
+	httpClient := testHTTPClient(func(request *http.Request) (*http.Response, error) {
+		if got := request.Header.Get(sessionHeader); got != "session-42" {
+			t.Fatalf("unexpected session header: %q", got)
+		}
+		switch request.URL.Path {
+		case "/v1/jobs/job-1/downloads":
+			return jsonResponse(http.StatusOK, `{"files":[{"name":"report.csv","mime_type":"text/csv","size":5}]}`), nil
+		case "/v1/jobs/job-1/downloads/report.csv":
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/csv; charset=utf-8"}},
+				Body:       io.NopCloser(bytes.NewReader([]byte("a,b\n1"))),
+			}, nil
+		default:
+			t.Fatalf("unexpected path: %s", request.URL.Path)
+			return nil, nil
+		}
+	})
+	client, err := NewClient(Config{BaseURL: "http://browser-use.test", Token: "secret", HTTPClient: httpClient})
+	if err != nil {
+		t.Fatal(err)
+	}
+	files, err := client.Downloads(context.Background(), "session-42", "job-1")
+	if err != nil || len(files) != 1 || files[0].Name != "report.csv" {
+		t.Fatalf("unexpected downloads: %#v, %v", files, err)
+	}
+	download, err := client.Download(context.Background(), "session-42", "job-1", "report.csv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(download.Data) != "a,b\n1" || download.MIMEType != "text/csv" || download.Size != 5 {
+		t.Fatalf("unexpected download: %#v", download)
+	}
+}
+
 func TestClientDebugRequestsBoundedMetadata(t *testing.T) {
 	t.Parallel()
 
@@ -226,5 +264,16 @@ func TestClientRejectsInvalidJobID(t *testing.T) {
 	_, err = client.Get(context.Background(), "session-42", "../other-job", 0)
 	if err == nil {
 		t.Fatal("expected invalid job ID error")
+	}
+}
+
+func TestClientRejectsUnsafeDownloadName(t *testing.T) {
+	t.Parallel()
+	client, err := NewClient(Config{BaseURL: "http://localhost:8087", Token: "secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Download(context.Background(), "session-42", "job-1", "../secret"); err == nil {
+		t.Fatal("expected invalid download name error")
 	}
 }

@@ -28,24 +28,36 @@ func BrowserUseToolDefinition() openai.Tool {
 		Function: &openai.FunctionDefinition{
 			Name: browserUseToolName,
 			Description: "Run and inspect autonomous web-browser tasks in the isolated browser-use service. " +
-				"Use run with a precise task; it returns the completed result when possible or a job_id for later status calls. " +
+				"Use run with a precise task; the browser agent can search, navigate/back, wait, click, type, upload session files supplied through file_ids, scroll, find text, send keys, run page JavaScript, switch/close tabs, extract content, inspect/select dropdowns, take visual screenshots, and read/write/replace task files. " +
+				"It can complete research, data extraction, login and form workflows, testing, and browser downloads. It returns the completed result when possible or a job_id for later status calls. " +
 				"Use screenshot with a job_id to save the latest captured browser view as a generated user image that the host can attach to the reply. " +
+				"Use downloads to list files the browser downloaded, then download to save one selected file as a generated user file. " +
 				"Use cancel to stop unneeded work. Browser profiles persist per Agentize session. " +
-				"Actions: run, status, screenshot, cancel.",
+				"Actions: run, status, screenshot, downloads, download, cancel.",
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
 					"action": map[string]interface{}{
 						"type": "string",
-						"enum": []string{"run", "status", "screenshot", "cancel"},
+						"enum": []string{"run", "status", "screenshot", "downloads", "download", "cancel"},
 					},
 					"task": map[string]interface{}{
 						"type":        "string",
 						"description": "Detailed browser objective. Required for run.",
 					},
+					"file_ids": map[string]interface{}{
+						"type":        "array",
+						"items":       map[string]interface{}{"type": "string"},
+						"maxItems":    10,
+						"description": "User files from this session to make available for a run, such as files to upload in a web form.",
+					},
 					"job_id": map[string]interface{}{
 						"type":        "string",
-						"description": "Job returned by run. Required for status, screenshot, and cancel.",
+						"description": "Job returned by run. Required for status, screenshot, downloads, download, and cancel.",
+					},
+					"file_name": map[string]interface{}{
+						"type":        "string",
+						"description": "Downloaded filename returned by downloads. Required for download.",
 					},
 					"allowed_domains": map[string]interface{}{
 						"type":        "array",
@@ -126,6 +138,10 @@ func (e *Engine) executeBrowserUseTool(args map[string]interface{}) (string, err
 		if err != nil {
 			return "", err
 		}
+		uploads, err := e.browserUseUploads(sessionID, args)
+		if err != nil {
+			return "", err
+		}
 		var useVision *bool
 		if value, exists := args["use_vision"]; exists {
 			typed, ok := value.(bool)
@@ -147,6 +163,7 @@ func (e *Engine) executeBrowserUseTool(args map[string]interface{}) (string, err
 			AllowedDomains: allowedDomains,
 			MaxSteps:       maxSteps,
 			UseVision:      useVision,
+			Uploads:        uploads,
 		})
 		cancelStart()
 		if err != nil {
@@ -274,6 +291,83 @@ func (e *Engine) executeBrowserUseTool(args map[string]interface{}) (string, err
 			},
 		})
 
+	case "downloads":
+		jobID, err := browserUseRequiredString(args, "job_id")
+		if err != nil {
+			return "", err
+		}
+		downloadService, ok := e.BrowserUse.(browseruse.DownloadService)
+		if !ok {
+			return "", fmt.Errorf("browser-use service does not support downloads")
+		}
+		requestContext, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		files, err := downloadService.Downloads(requestContext, sessionID, jobID)
+		if err != nil {
+			return "", fmt.Errorf("list browser downloads: %w", err)
+		}
+		return browserUseJSON(map[string]interface{}{
+			"ok":     true,
+			"job_id": jobID,
+			"files":  files,
+			"next_action": map[string]interface{}{
+				"action": "download",
+				"job_id": jobID,
+			},
+		})
+
+	case "download":
+		jobID, err := browserUseRequiredString(args, "job_id")
+		if err != nil {
+			return "", err
+		}
+		fileName, err := browserUseRequiredString(args, "file_name")
+		if err != nil {
+			return "", err
+		}
+		downloadService, ok := e.BrowserUse.(browseruse.DownloadService)
+		if !ok {
+			return "", fmt.Errorf("browser-use service does not support downloads")
+		}
+		if e.Files == nil {
+			return "", fmt.Errorf("file store is not configured; cannot deliver browser download")
+		}
+		requestContext, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		defer cancel()
+		download, err := downloadService.Download(requestContext, sessionID, jobID, fileName)
+		if err != nil {
+			return "", fmt.Errorf("retrieve browser download: %w", err)
+		}
+		if download == nil || len(download.Data) == 0 {
+			return "", fmt.Errorf("browser-use service returned an empty download")
+		}
+		name := strings.TrimSpace(download.Name)
+		if name == "" {
+			name = fileName
+		}
+		mimeType := strings.TrimSpace(download.MIMEType)
+		if mimeType == "" {
+			mimeType = "application/octet-stream"
+		}
+		file, err := e.RecordUserFile(sessionID, name, mimeType, model.FileSourceGenerated, download.Data)
+		if err != nil {
+			return "", fmt.Errorf("save browser download: %w", err)
+		}
+		return browserUseJSON(map[string]interface{}{
+			"ok":     true,
+			"job_id": jobID,
+			"download": map[string]interface{}{
+				"file_id":   file.FileID,
+				"name":      file.Name,
+				"mime_type": file.MIMEType,
+				"size":      file.Size,
+			},
+			"delivery": map[string]interface{}{
+				"type":    "generated_user_file",
+				"file_id": file.FileID,
+			},
+		})
+
 	default:
 		return "", fmt.Errorf("unsupported browser-use action %q", action)
 	}
@@ -375,6 +469,42 @@ func browserUseStringSlice(args map[string]interface{}, key string) ([]string, e
 		result = append(result, text)
 	}
 	return result, nil
+}
+
+func (e *Engine) browserUseUploads(sessionID string, args map[string]interface{}) ([]browseruse.Upload, error) {
+	fileIDs, err := browserUseStringSlice(args, "file_ids")
+	if err != nil || len(fileIDs) == 0 {
+		return nil, err
+	}
+	if len(fileIDs) > 10 {
+		return nil, fmt.Errorf("file_ids cannot contain more than 10 entries")
+	}
+	if e.Files == nil {
+		return nil, fmt.Errorf("file store is not configured; cannot stage browser uploads")
+	}
+	const maxUploadBytes = 10 << 20
+	const maxTotalUploadBytes = 25 << 20
+	var total int64
+	uploads := make([]browseruse.Upload, 0, len(fileIDs))
+	for _, fileID := range fileIDs {
+		data, meta, readErr := e.ReadUserFile(fileID)
+		if readErr != nil || meta == nil || meta.SessionID != sessionID {
+			return nil, fmt.Errorf("file is not available in this session: %s", fileID)
+		}
+		if len(data) == 0 || int64(len(data)) > maxUploadBytes {
+			return nil, fmt.Errorf("browser upload %q must be between 1 byte and %d bytes", meta.Name, maxUploadBytes)
+		}
+		total += int64(len(data))
+		if total > maxTotalUploadBytes {
+			return nil, fmt.Errorf("browser uploads cannot exceed %d bytes total", maxTotalUploadBytes)
+		}
+		uploads = append(uploads, browseruse.Upload{
+			Name:     meta.Name,
+			MIMEType: meta.MIMEType,
+			Data:     data,
+		})
+	}
+	return uploads, nil
 }
 
 func browserUseJSON(value interface{}) (string, error) {

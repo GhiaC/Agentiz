@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -22,6 +23,13 @@ type fakeBrowserUseService struct {
 	screenshotSession string
 	screenshotJobID   string
 	screenshot        *browseruse.Screenshot
+	downloadsSession  string
+	downloadsJobID    string
+	downloadSession   string
+	downloadJobID     string
+	downloadName      string
+	downloads         []browseruse.Download
+	download          *browseruse.DownloadFile
 }
 
 func (f *fakeBrowserUseService) Health(context.Context) error { return nil }
@@ -65,6 +73,25 @@ func (f *fakeBrowserUseService) Screenshot(
 	return f.screenshot, nil
 }
 
+func (f *fakeBrowserUseService) Downloads(
+	_ context.Context,
+	sessionID, jobID string,
+) ([]browseruse.Download, error) {
+	f.downloadsSession = sessionID
+	f.downloadsJobID = jobID
+	return f.downloads, nil
+}
+
+func (f *fakeBrowserUseService) Download(
+	_ context.Context,
+	sessionID, jobID, name string,
+) (*browseruse.DownloadFile, error) {
+	f.downloadSession = sessionID
+	f.downloadJobID = jobID
+	f.downloadName = name
+	return f.download, nil
+}
+
 func TestBrowserUseToolRunUsesTrustedSessionAndReturnsNextAction(t *testing.T) {
 	t.Parallel()
 
@@ -104,6 +131,30 @@ func TestBrowserUseToolRunUsesTrustedSessionAndReturnsNextAction(t *testing.T) {
 	}
 	if response["next_action"] == nil {
 		t.Fatalf("expected next_action in %s", result)
+	}
+}
+
+func TestBrowserUseToolStagesSessionFileForBrowserUpload(t *testing.T) {
+	eng, session := newUserFileTestEngine(t)
+	upload, err := eng.RecordUserFile(session.SessionID, "resume.pdf", "application/pdf", model.FileSourceUploaded, []byte("PDF"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := &fakeBrowserUseService{job: &browseruse.Job{ID: "job-upload", Status: browseruse.JobQueued, CreatedAt: time.Now()}}
+	eng.SetBrowserUse(service)
+
+	if _, err := eng.executeBrowserUseTool(map[string]interface{}{
+		"action": "run", "task": "Upload the attached resume to the application form", "file_ids": []interface{}{upload.FileID},
+		"wait_seconds": float64(0), "__session_id__": session.SessionID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(service.startRequest.Uploads) != 1 {
+		t.Fatalf("expected one staged upload, got %#v", service.startRequest.Uploads)
+	}
+	staged := service.startRequest.Uploads[0]
+	if staged.Name != "resume.pdf" || staged.MIMEType != "application/pdf" || string(staged.Data) != "PDF" {
+		t.Fatalf("unexpected staged upload: %#v", staged)
 	}
 }
 
@@ -205,6 +256,53 @@ func TestBrowserUseToolScreenshotRecordsGeneratedUserFile(t *testing.T) {
 	}
 }
 
+func TestBrowserUseToolDeliversBrowserDownload(t *testing.T) {
+	eng, session := newUserFileTestEngine(t)
+	service := &fakeBrowserUseService{
+		downloads: []browseruse.Download{{Name: "report.csv", MIMEType: "text/csv", Size: 5}},
+		download: &browseruse.DownloadFile{
+			Download: browseruse.Download{Name: "report.csv", MIMEType: "text/csv", Size: 5},
+			Data:     []byte("a,b\n1"),
+		},
+	}
+	eng.SetBrowserUse(service)
+
+	listed, err := eng.executeBrowserUseTool(map[string]interface{}{
+		"action": "downloads", "job_id": "job-4", "__session_id__": session.SessionID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if service.downloadsSession != session.SessionID || service.downloadsJobID != "job-4" || !strings.Contains(listed, "report.csv") {
+		t.Fatalf("unexpected list result: session=%q job=%q result=%s", service.downloadsSession, service.downloadsJobID, listed)
+	}
+
+	result, err := eng.executeBrowserUseTool(map[string]interface{}{
+		"action": "download", "job_id": "job-4", "file_name": "report.csv", "__session_id__": session.SessionID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if service.downloadSession != session.SessionID || service.downloadJobID != "job-4" || service.downloadName != "report.csv" {
+		t.Fatalf("unexpected download call: %#v", service)
+	}
+	var response struct {
+		Download struct {
+			FileID string `json:"file_id"`
+		} `json:"download"`
+	}
+	if err := json.Unmarshal([]byte(result), &response); err != nil {
+		t.Fatal(err)
+	}
+	data, meta, err := eng.ReadUserFile(response.Download.FileID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "a,b\n1" || meta.Name != "report.csv" || meta.MIMEType != "text/csv" {
+		t.Fatalf("unexpected stored download: data=%q meta=%#v", data, meta)
+	}
+}
+
 func TestBrowserUseToolDefinitionDeclaresActions(t *testing.T) {
 	t.Parallel()
 
@@ -228,14 +326,19 @@ func TestBrowserUseToolDefinitionDeclaresActions(t *testing.T) {
 	if !ok {
 		t.Fatalf("unexpected action enum: %#v", action["enum"])
 	}
-	foundScreenshot := false
+	foundScreenshot, foundDownloads, foundDownload := false, false, false
 	for _, value := range actions {
-		if value == "screenshot" {
+		switch value {
+		case "screenshot":
 			foundScreenshot = true
+		case "downloads":
+			foundDownloads = true
+		case "download":
+			foundDownload = true
 			break
 		}
 	}
-	if !foundScreenshot {
-		t.Fatalf("screenshot action missing from %#v", actions)
+	if !foundScreenshot || !foundDownloads || !foundDownload {
+		t.Fatalf("browser artifact actions missing from %#v", actions)
 	}
 }

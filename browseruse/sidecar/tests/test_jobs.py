@@ -11,7 +11,7 @@ from fastapi import HTTPException
 from app.artifacts import BrowserArtifacts
 from app.config import Settings
 from app.jobs import JobManager
-from app.models import JobResult, JobStatus, StartJobRequest
+from app.models import BrowserDownload, JobResult, JobStatus, StartJobRequest
 
 
 def settings() -> Settings:
@@ -61,6 +61,14 @@ class CompletingRunner:
 	def network_loads(self, _job_id: str, _limit: int):
 		return 1, []
 
+	def list_downloads(self, _job_id: str):
+		return [BrowserDownload(name="report.csv", mime_type="text/csv", size=5)]
+
+	def read_download(self, _job_id: str, name: str):
+		if name != "report.csv":
+			raise FileNotFoundError
+		return BrowserDownload(name=name, mime_type="text/csv", size=5), b"a,b\n1"
+
 
 class BlockingRunner:
 	def __init__(self):
@@ -96,6 +104,20 @@ class JobManagerTests(unittest.IsolatedAsyncioTestCase):
 		self.assertEqual(await manager.screenshot("session-1", created.id), b"PNG")
 		with self.assertRaises(HTTPException) as caught:
 			await manager.screenshot("session-2", created.id)
+		self.assertEqual(caught.exception.status_code, 404)
+		await manager.shutdown()
+
+	async def test_downloads_are_scoped_to_job_owner(self):
+		manager = JobManager(settings(), CompletingRunner())
+		created = await manager.create("session-1", StartJobRequest(task="download a report"))
+		await manager.get("session-1", created.id, wait_seconds=2)
+		files = await manager.downloads("session-1", created.id)
+		self.assertEqual(files[0].name, "report.csv")
+		download, data = await manager.download("session-1", created.id, "report.csv")
+		self.assertEqual(download.mime_type, "text/csv")
+		self.assertEqual(data, b"a,b\n1")
+		with self.assertRaises(HTTPException) as caught:
+			await manager.downloads("session-2", created.id)
 		self.assertEqual(caught.exception.status_code, 404)
 		await manager.shutdown()
 

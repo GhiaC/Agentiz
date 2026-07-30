@@ -23,6 +23,14 @@ type ScreenshotService interface {
 	Screenshot(ctx context.Context, sessionID, jobID string) (*Screenshot, error)
 }
 
+// DownloadService is an optional extension implemented by services that expose
+// files downloaded by a browser job. Downloads remain scoped to their owning
+// session and are copied into Agentize's user-file store only on request.
+type DownloadService interface {
+	Downloads(ctx context.Context, sessionID, jobID string) ([]Download, error)
+	Download(ctx context.Context, sessionID, jobID, name string) (*DownloadFile, error)
+}
+
 // DebugService is an optional extension implemented by services that expose
 // bounded, operator-facing browser job and network-load metadata.
 type DebugService interface {
@@ -35,6 +43,15 @@ type StartJobRequest struct {
 	AllowedDomains []string `json:"allowed_domains,omitempty"`
 	MaxSteps       int      `json:"max_steps,omitempty"`
 	UseVision      *bool    `json:"use_vision,omitempty"`
+	Uploads        []Upload `json:"uploads,omitempty"`
+}
+
+// Upload is a user-owned file staged only for one browser job. The sidecar
+// gives its path to browser-use so the agent can attach it to a web form.
+type Upload struct {
+	Name     string `json:"name"`
+	MIMEType string `json:"mime_type"`
+	Data     []byte `json:"data_base64"`
 }
 
 // JobStatus is the lifecycle state reported by the sidecar.
@@ -91,6 +108,19 @@ type Screenshot struct {
 	Data     []byte
 	Name     string
 	MIMEType string
+}
+
+// Download is safe metadata for a file downloaded by a browser job.
+type Download struct {
+	Name     string `json:"name"`
+	MIMEType string `json:"mime_type"`
+	Size     int64  `json:"size"`
+}
+
+// DownloadFile contains a downloaded file's metadata and bytes.
+type DownloadFile struct {
+	Download
+	Data []byte `json:"-"`
 }
 
 // BrowserLoad is a safe, bounded projection of one network request. Request and

@@ -9,7 +9,7 @@ from uuid import uuid4
 from fastapi import HTTPException, status
 
 from .config import Settings
-from .models import BrowserDebugResponse, DebugJobResponse, JobResponse, JobResult, JobStatus, StartJobRequest
+from .models import BrowserDebugResponse, BrowserDownload, DebugJobResponse, JobResponse, JobResult, JobStatus, StartJobRequest
 
 
 class BrowserRunner(Protocol):
@@ -110,6 +110,25 @@ class JobManager:
 				status_code=status.HTTP_404_NOT_FOUND,
 				detail="no screenshot is available for this browser job yet",
 			) from None
+		except ValueError as exc:
+			raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc)) from exc
+
+	async def downloads(self, session_id: str, job_id: str) -> list[BrowserDownload]:
+		job = await self._owned_job(session_id, job_id)
+		lister = getattr(self.runner, "list_downloads", None)
+		if lister is None:
+			raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail="browser runner does not support downloads")
+		return lister(job.id)
+
+	async def download(self, session_id: str, job_id: str, name: str) -> tuple[BrowserDownload, bytes]:
+		job = await self._owned_job(session_id, job_id)
+		reader = getattr(self.runner, "read_download", None)
+		if reader is None:
+			raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail="browser runner does not support downloads")
+		try:
+			return reader(job.id, name)
+		except FileNotFoundError:
+			raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="browser download not found") from None
 		except ValueError as exc:
 			raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc)) from exc
 

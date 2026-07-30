@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import base64
+import binascii
 from datetime import datetime
 from enum import StrEnum
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -19,6 +22,31 @@ class JobStatus(StrEnum):
 		return self in {self.SUCCEEDED, self.FAILED, self.CANCELLED}
 
 
+class BrowserUpload(BaseModel):
+	name: str = Field(min_length=1, max_length=255)
+	mime_type: str = Field(default="application/octet-stream", max_length=255)
+	data_base64: str = Field(min_length=1)
+
+	@field_validator("name")
+	@classmethod
+	def safe_name(cls, value: str) -> str:
+		value = value.strip()
+		if not value or Path(value).name != value or value in {".", ".."}:
+			raise ValueError("upload name must be a filename")
+		return value
+
+	@field_validator("data_base64")
+	@classmethod
+	def valid_data(cls, value: str) -> str:
+		try:
+			data = base64.b64decode(value, validate=True)
+		except (ValueError, binascii.Error) as error:
+			raise ValueError("upload data must be valid base64") from error
+		if not data or len(data) > 10 << 20:
+			raise ValueError("upload data must be between 1 byte and 10485760 bytes")
+		return value
+
+
 class StartJobRequest(BaseModel):
 	model_config = ConfigDict(extra="forbid")
 
@@ -26,6 +54,7 @@ class StartJobRequest(BaseModel):
 	allowed_domains: list[str] = Field(default_factory=list, max_length=100)
 	max_steps: int | None = Field(default=None, ge=1, le=500)
 	use_vision: bool | None = None
+	uploads: list[BrowserUpload] = Field(default_factory=list, max_length=10)
 
 	@field_validator("task")
 	@classmethod
@@ -81,6 +110,16 @@ class BrowserLoad(BaseModel):
 	mime_type: str = ""
 	bytes: int = 0
 	failed: bool = False
+
+
+class BrowserDownload(BaseModel):
+	name: str
+	mime_type: str = "application/octet-stream"
+	size: int = Field(ge=0)
+
+
+class BrowserDownloadsResponse(BaseModel):
+	files: list[BrowserDownload] = Field(default_factory=list)
 
 
 class DebugJobResponse(JobResponse):

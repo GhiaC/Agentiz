@@ -8,7 +8,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from .config import Settings
 from .jobs import JobManager
-from .models import BrowserDebugResponse, HealthResponse, JobResponse, StartJobRequest
+from .models import BrowserDebugResponse, BrowserDownloadsResponse, HealthResponse, JobResponse, StartJobRequest
 from .runner import BrowserUseRunner
 
 
@@ -117,3 +117,29 @@ async def get_job_screenshot(
 		media_type="image/png",
 		headers={"Content-Disposition": f'inline; filename="browser-{job_id}.png"'},
 	)
+
+
+@app.get(
+	"/v1/jobs/{job_id}/downloads",
+	response_model=BrowserDownloadsResponse,
+	dependencies=[Depends(require_auth)],
+)
+async def list_job_downloads(
+	job_id: str,
+	session_id: str = Depends(require_session),
+) -> BrowserDownloadsResponse:
+	return BrowserDownloadsResponse(files=await manager.downloads(session_id, job_id))
+
+
+@app.get(
+	"/v1/jobs/{job_id}/downloads/{name}",
+	dependencies=[Depends(require_auth)],
+	response_class=Response,
+)
+async def get_job_download(
+	job_id: str,
+	name: str,
+	session_id: str = Depends(require_session),
+) -> Response:
+	download, data = await manager.download(session_id, job_id, name)
+	return Response(content=data, media_type=download.mime_type)

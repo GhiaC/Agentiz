@@ -17,6 +17,7 @@ import (
 const (
 	defaultMaxResponseBytes   = int64(2 << 20)
 	defaultMaxScreenshotBytes = int64(10 << 20)
+	defaultMaxDownloadBytes   = int64(25 << 20)
 	sessionHeader             = "X-Agentize-Session-ID"
 )
 
@@ -27,6 +28,7 @@ type Config struct {
 	HTTPClient         *http.Client
 	MaxResponseBytes   int64
 	MaxScreenshotBytes int64
+	MaxDownloadBytes   int64
 }
 
 // Client is an HTTP implementation of Service.
@@ -36,11 +38,13 @@ type Client struct {
 	httpClient         *http.Client
 	maxResponseBytes   int64
 	maxScreenshotBytes int64
+	maxDownloadBytes   int64
 }
 
 var (
 	_ Service           = (*Client)(nil)
 	_ ScreenshotService = (*Client)(nil)
+	_ DownloadService   = (*Client)(nil)
 	_ DebugService      = (*Client)(nil)
 )
 
@@ -89,6 +93,10 @@ func NewClient(config Config) (*Client, error) {
 	if maxScreenshotBytes <= 0 {
 		maxScreenshotBytes = defaultMaxScreenshotBytes
 	}
+	maxDownloadBytes := config.MaxDownloadBytes
+	if maxDownloadBytes <= 0 {
+		maxDownloadBytes = defaultMaxDownloadBytes
+	}
 
 	return &Client{
 		baseURL:            baseURL,
@@ -96,6 +104,7 @@ func NewClient(config Config) (*Client, error) {
 		httpClient:         httpClient,
 		maxResponseBytes:   maxResponseBytes,
 		maxScreenshotBytes: maxScreenshotBytes,
+		maxDownloadBytes:   maxDownloadBytes,
 	}, nil
 }
 
@@ -163,6 +172,8 @@ func (c *Client) Screenshot(ctx context.Context, sessionID, jobID string) (*Scre
 		path+"/screenshot",
 		sessionID,
 		c.maxScreenshotBytes,
+		"image/png",
+		"browser-use screenshot",
 	)
 	if err != nil {
 		return nil, err
@@ -175,6 +186,51 @@ func (c *Client) Screenshot(ctx context.Context, sessionID, jobID string) (*Scre
 		Name:     "browser-" + jobID + ".png",
 		MIMEType: contentType,
 	}, nil
+}
+
+// Downloads lists files downloaded by a browser job without returning their
+// contents. Use Download to retrieve one selected file.
+func (c *Client) Downloads(ctx context.Context, sessionID, jobID string) ([]Download, error) {
+	path, err := jobPath(jobID)
+	if err != nil {
+		return nil, err
+	}
+	var response struct {
+		Files []Download `json:"files"`
+	}
+	if err := c.do(ctx, http.MethodGet, path+"/downloads", sessionID, nil, &response); err != nil {
+		return nil, err
+	}
+	return response.Files, nil
+}
+
+// Download retrieves one browser-job download. The name must come from the
+// preceding Downloads response, avoiding paths controlled by the model.
+func (c *Client) Download(ctx context.Context, sessionID, jobID, name string) (*DownloadFile, error) {
+	path, err := jobPath(jobID)
+	if err != nil {
+		return nil, err
+	}
+	name, err = downloadName(name)
+	if err != nil {
+		return nil, err
+	}
+	payload, contentType, err := c.doBytes(
+		ctx,
+		http.MethodGet,
+		path+"/downloads/"+url.PathEscape(name),
+		sessionID,
+		c.maxDownloadBytes,
+		"application/octet-stream",
+		"browser-use download",
+	)
+	if err != nil {
+		return nil, err
+	}
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	return &DownloadFile{Download: Download{Name: name, MIMEType: contentType, Size: int64(len(payload))}, Data: payload}, nil
 }
 
 // Debug returns recent browser jobs and bounded network-load metadata for the
@@ -215,6 +271,14 @@ func jobPath(jobID string) (string, error) {
 		}
 	}
 	return "/v1/jobs/" + jobID, nil
+}
+
+func downloadName(name string) (string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" || len(name) > 255 || name == "." || name == ".." || strings.ContainsAny(name, `/\\`) {
+		return "", errors.New("browser-use download name is invalid")
+	}
+	return name, nil
 }
 
 func (c *Client) do(
@@ -281,6 +345,7 @@ func (c *Client) doBytes(
 	ctx context.Context,
 	method, path, sessionID string,
 	maxBytes int64,
+	accept, resourceName string,
 ) ([]byte, string, error) {
 	endpoint := *c.baseURL
 	endpoint.Path = strings.TrimRight(c.baseURL.Path, "/") + path
@@ -288,7 +353,7 @@ func (c *Client) doBytes(
 	if err != nil {
 		return nil, "", fmt.Errorf("create browser-use request: %w", err)
 	}
-	request.Header.Set("Accept", "image/png")
+	request.Header.Set("Accept", accept)
 	request.Header.Set("Authorization", "Bearer "+c.token)
 	if sessionID != "" {
 		request.Header.Set(sessionHeader, sessionID)
@@ -306,16 +371,16 @@ func (c *Client) doBytes(
 		return nil, "", fmt.Errorf("read browser-use response: %w", err)
 	}
 	if int64(len(payload)) > maxBytes {
-		return nil, "", errors.New("browser-use screenshot exceeded configured size limit")
+		return nil, "", fmt.Errorf("%s exceeded configured size limit", resourceName)
 	}
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
 		return nil, "", decodeAPIError(response.StatusCode, payload)
 	}
 	if len(payload) == 0 {
-		return nil, "", errors.New("browser-use screenshot response was empty")
+		return nil, "", fmt.Errorf("%s response was empty", resourceName)
 	}
 	contentType := strings.TrimSpace(strings.Split(response.Header.Get("Content-Type"), ";")[0])
-	if !strings.HasPrefix(contentType, "image/") {
+	if accept == "image/png" && !strings.HasPrefix(contentType, "image/") {
 		return nil, "", fmt.Errorf("browser-use screenshot returned unexpected content type %q", contentType)
 	}
 	return payload, contentType, nil

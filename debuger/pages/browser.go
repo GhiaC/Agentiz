@@ -1,6 +1,7 @@
 package pages
 
 import (
+	"encoding/json"
 	"fmt"
 	"html/template"
 	"net/url"
@@ -55,11 +56,7 @@ func RenderBrowserDebugWithStatus(
 	}
 
 	content += browserStats(snapshot)
-	content += `<div class="d-flex flex-wrap gap-2 align-items-center mb-3">
-		<label for="browser-debug-filter" class="form-label mb-0 fw-semibold">Filter</label>
-		<input id="browser-debug-filter" class="form-control form-control-sm" style="max-width:420px"
-			placeholder="job, session, task, URL, MIME type…" oninput="filterBrowserDebug(this.value)">
-	</div>`
+	content += browserControls(snapshot.Jobs)
 
 	if len(snapshot.Jobs) == 0 {
 		content += components.InfoAlert(
@@ -71,14 +68,7 @@ func RenderBrowserDebugWithStatus(
 			content += browserJobCard(&job)
 		}
 	}
-	content += `<script>
-	function filterBrowserDebug(value) {
-		var query = (value || '').toLowerCase().trim();
-		document.querySelectorAll('[data-browser-debug-job]').forEach(function (node) {
-			node.style.display = !query || node.dataset.browserSearch.indexOf(query) !== -1 ? '' : 'none';
-		});
-	}
-	</script>`
+	content += browserDebugScript()
 	content += ui.ContainerEnd()
 	return ui.Header("Agentize Debug - Browser") +
 		ui.NavbarAndBody(browserDebugPath, content) + ui.Footer()
@@ -129,6 +119,7 @@ func browserToolOverview(configured bool, fetchErr error) string {
 }
 
 func browserStats(snapshot *browseruse.DebugSnapshot) string {
+	loads, failures, bytes := browserLoadTotals(snapshot.Jobs)
 	return fmt.Sprintf(`<div class="row g-3 mb-3">
 		<div class="col-6 col-lg-3"><div class="card h-100"><div class="card-body">
 			<div class="text-muted small">Jobs retained</div><div class="fs-4 fw-semibold">%d / %d</div>
@@ -140,15 +131,60 @@ func browserStats(snapshot *browseruse.DebugSnapshot) string {
 			<div class="text-muted small">Concurrency</div><div class="fs-4 fw-semibold">%d</div>
 		</div></div></div>
 		<div class="col-6 col-lg-3"><div class="card h-100"><div class="card-body">
-			<div class="text-muted small">Loads shown</div><div class="fs-4 fw-semibold">%d</div>
+			<div class="text-muted small">Network shown</div><div class="fs-4 fw-semibold">%d</div><div class="small text-muted">%s transferred · %d failed</div>
 		</div></div></div>
 	</div>`,
 		snapshot.TotalJobs,
 		snapshot.MaxJobs,
 		snapshot.RunningJobs,
 		snapshot.MaxConcurrentJobs,
-		countBrowserLoads(snapshot.Jobs),
+		loads,
+		formatBytes(bytes),
+		failures,
 	)
+}
+
+func browserControls(jobs []browseruse.DebugJob) string {
+	counts := map[browseruse.JobStatus]int{}
+	for _, job := range jobs {
+		counts[job.Status]++
+	}
+	button := func(label string, status browseruse.JobStatus, count int, active bool) string {
+		activeClass := "btn-outline-secondary"
+		if active {
+			activeClass = "btn-secondary"
+		}
+		return fmt.Sprintf(`<button type="button" class="btn btn-sm %s" data-browser-status-filter="%s">%s <span class="badge text-bg-light ms-1">%d</span></button>`,
+			activeClass,
+			template.HTMLEscapeString(string(status)),
+			template.HTMLEscapeString(label),
+			count,
+		)
+	}
+
+	return `<section class="card mb-3"><div class="card-body py-3">
+		<div class="d-flex flex-wrap gap-2 justify-content-between align-items-center mb-2">
+			<div class="fw-semibold">Jobs <span id="browser-debug-visible-count" class="text-muted small">Showing ` + fmt.Sprintf("%d", len(jobs)) + `</span></div>
+			<div class="d-flex gap-2 align-items-center">
+				<label class="form-check form-switch small mb-0"><input id="browser-debug-auto-refresh" class="form-check-input" type="checkbox"> Auto-refresh</label>
+				<a href="` + browserDebugPath + `" class="btn btn-sm btn-outline-primary">Refresh now</a>
+			</div>
+		</div>
+		<div class="d-flex flex-wrap gap-2 align-items-center mb-2">` +
+		button("All", "", len(jobs), true) +
+		button("Running", browseruse.JobRunning, counts[browseruse.JobRunning], false) +
+		button("Failed", browseruse.JobFailed, counts[browseruse.JobFailed], false) +
+		button("Succeeded", browseruse.JobSucceeded, counts[browseruse.JobSucceeded], false) +
+		button("Cancelled", browseruse.JobCancelled, counts[browseruse.JobCancelled], false) +
+		`</div>
+		<div class="d-flex flex-wrap gap-2 align-items-center">
+			<label for="browser-debug-filter" class="form-label mb-0 fw-semibold">Search</label>
+			<input id="browser-debug-filter" class="form-control form-control-sm" style="max-width:420px"
+				placeholder="job, session, task, URL, MIME type…" oninput="filterBrowserDebug(this.value)">
+			<button type="button" class="btn btn-sm btn-outline-secondary" onclick="resetBrowserDebugFilters()">Clear</button>
+		</div>
+		<div id="browser-debug-no-results" class="text-muted small mt-2 d-none">No jobs match these filters.</div>
+	</div></section>`
 }
 
 func browserJobCard(job *browseruse.DebugJob) string {
@@ -186,10 +222,10 @@ func browserJobCard(job *browseruse.DebugJob) string {
 		)
 	}
 
-	return fmt.Sprintf(`<section class="card mb-3" data-browser-debug-job data-browser-search="%s">
+	return fmt.Sprintf(`<section class="card mb-3" data-browser-debug-job data-browser-status="%s" data-browser-search="%s">
 		<div class="card-header d-flex flex-wrap gap-2 justify-content-between align-items-center">
 			<div><strong>%s</strong> %s</div>
-			<div class="d-flex gap-2 align-items-center">%s</div>
+			<div class="d-flex gap-2 align-items-center"><button type="button" class="btn btn-sm btn-outline-secondary" data-browser-copy="%s" title="Copy job ID">Copy ID</button>%s</div>
 		</div>
 		<div class="card-body">
 			<div class="row g-3">
@@ -208,11 +244,14 @@ func browserJobCard(job *browseruse.DebugJob) string {
 			</div>
 			%s
 			%s
+			%s
 		</div>
 	</section>`,
+		template.HTMLEscapeString(string(job.Status)),
 		search,
 		template.HTMLEscapeString(job.ID),
 		browserStatusBadge(job.Status),
+		template.HTMLEscapeString(job.ID),
 		screenshot,
 		template.HTMLEscapeString(job.Task),
 		template.HTMLEscapeString(job.SessionID),
@@ -220,8 +259,61 @@ func browserJobCard(job *browseruse.DebugJob) string {
 		duration,
 		job.LoadCount,
 		errorBlock,
+		browserResultDetails(job),
 		browserLoadsTable(job),
 	)
+}
+
+func browserResultDetails(job *browseruse.DebugJob) string {
+	if job.Result == nil {
+		return ""
+	}
+	result := job.Result
+	success := "Not reported"
+	if result.Successful != nil {
+		if *result.Successful {
+			success = "Yes"
+		} else {
+			success = "No"
+		}
+	}
+	out := fmt.Sprintf(`<details class="mt-3"><summary class="fw-semibold">Run outcome</summary>
+		<div class="row g-3 mt-1">
+			<div class="col-md-5"><table class="table table-sm table-borderless mb-0">
+				<tr><th>Completed</th><td>%t</td></tr><tr><th>Successful</th><td>%s</td></tr>
+				<tr><th>Steps</th><td>%d</td></tr><tr><th>Runner duration</th><td>%s</td></tr>
+			</table></div>
+			<div class="col-md-7">`, result.Done, success, result.Steps, debuger.FormatDurationMs(int64(result.DurationSeconds*1000)))
+	if result.FinalResult != "" {
+		out += `<div class="small text-muted mb-1">Final result</div><pre class="bg-light border rounded p-2 text-break mb-2" style="white-space:pre-wrap">` + template.HTMLEscapeString(result.FinalResult) + `</pre>`
+	}
+	if len(result.VisitedURLs) > 0 {
+		out += `<div class="small text-muted mb-1">Visited URLs</div><ul class="small mb-2">`
+		for _, visitedURL := range result.VisitedURLs {
+			out += `<li class="text-break">` + template.HTMLEscapeString(visitedURL) + `</li>`
+		}
+		out += `</ul>`
+	}
+	if len(result.ActionNames) > 0 {
+		out += `<div class="small text-muted mb-1">Actions</div><div class="d-flex flex-wrap gap-1 mb-2">`
+		for _, action := range result.ActionNames {
+			out += components.InlineCode(template.HTMLEscapeString(action))
+		}
+		out += `</div>`
+	}
+	if len(result.Errors) > 0 {
+		out += `<div class="alert alert-warning py-2 mb-2"><strong>Runner notes:</strong><ul class="mb-0">`
+		for _, resultError := range result.Errors {
+			out += `<li class="text-break">` + template.HTMLEscapeString(resultError) + `</li>`
+		}
+		out += `</ul></div>`
+	}
+	if len(result.Actions) > 0 {
+		if actionsJSON, err := json.Marshal(result.Actions); err == nil {
+			out += `<details><summary class="small">Action trace (` + fmt.Sprintf("%d", len(result.Actions)) + `)</summary><pre class="bg-light border rounded p-2 mt-2 text-break mb-0" style="white-space:pre-wrap">` + template.HTMLEscapeString(string(actionsJSON)) + `</pre></details>`
+		}
+	}
+	return out + `</div></div></details>`
 }
 
 func browserLoadsTable(job *browseruse.DebugJob) string {
@@ -233,10 +325,14 @@ func browserLoadsTable(job *browseruse.DebugJob) string {
 	if hidden > 0 {
 		summary += fmt.Sprintf(" (%d older omitted)", hidden)
 	}
+	_, failures, bytes := browserLoadTotals([]browseruse.DebugJob{*job})
 	out := fmt.Sprintf(`<details class="mt-3"><summary class="fw-semibold">%s</summary>
+		<div class="small text-muted mt-1">%s transferred · %d failed</div>
 		<div class="table-responsive mt-2"><table class="table table-sm table-hover align-middle">
 		<thead><tr><th>Time</th><th>Method</th><th>Status</th><th>Type</th><th>Size</th><th>Duration</th><th>URL</th></tr></thead><tbody>`,
 		template.HTMLEscapeString(summary),
+		formatBytes(bytes),
+		failures,
 	)
 	for _, load := range job.Loads {
 		when := "—"
@@ -292,9 +388,76 @@ func browserStatusBadge(status browseruse.JobStatus) string {
 }
 
 func countBrowserLoads(jobs []browseruse.DebugJob) int {
-	total := 0
-	for _, job := range jobs {
-		total += len(job.Loads)
-	}
+	total, _, _ := browserLoadTotals(jobs)
 	return total
+}
+
+func browserLoadTotals(jobs []browseruse.DebugJob) (total, failures int, bytes int64) {
+	for _, job := range jobs {
+		for _, load := range job.Loads {
+			total++
+			bytes += load.Bytes
+			if load.Failed || load.Status == 0 || load.Status >= 400 {
+				failures++
+			}
+		}
+	}
+	return total, failures, bytes
+}
+
+func browserDebugScript() string {
+	return `<script>
+	var browserStatusFilter = '';
+	function filterBrowserDebug(value) {
+		var query = (value || '').toLowerCase().trim();
+		var visible = 0;
+		document.querySelectorAll('[data-browser-debug-job]').forEach(function (node) {
+			var matches = (!query || node.dataset.browserSearch.indexOf(query) !== -1) &&
+				(!browserStatusFilter || node.dataset.browserStatus === browserStatusFilter);
+			node.style.display = matches ? '' : 'none';
+			if (matches) visible++;
+		});
+		var count = document.getElementById('browser-debug-visible-count');
+		if (count) count.textContent = 'Showing ' + visible;
+		var empty = document.getElementById('browser-debug-no-results');
+		if (empty) empty.classList.toggle('d-none', visible !== 0);
+	}
+	function resetBrowserDebugFilters() {
+		browserStatusFilter = '';
+		var input = document.getElementById('browser-debug-filter');
+		if (input) input.value = '';
+		document.querySelectorAll('[data-browser-status-filter]').forEach(function (button) {
+			button.classList.toggle('btn-secondary', !button.dataset.browserStatusFilter);
+			button.classList.toggle('btn-outline-secondary', !!button.dataset.browserStatusFilter);
+		});
+		filterBrowserDebug('');
+	}
+	document.querySelectorAll('[data-browser-status-filter]').forEach(function (button) {
+		button.addEventListener('click', function () {
+			browserStatusFilter = button.dataset.browserStatusFilter || '';
+			document.querySelectorAll('[data-browser-status-filter]').forEach(function (other) {
+				other.classList.toggle('btn-secondary', other === button);
+				other.classList.toggle('btn-outline-secondary', other !== button);
+			});
+			var input = document.getElementById('browser-debug-filter');
+			filterBrowserDebug(input ? input.value : '');
+		});
+	});
+	document.querySelectorAll('[data-browser-copy]').forEach(function (button) {
+		button.addEventListener('click', function () {
+			var original = button.textContent;
+			if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(button.dataset.browserCopy);
+			button.textContent = 'Copied';
+			setTimeout(function () { button.textContent = original; }, 1200);
+		});
+	});
+	var autoRefresh = document.getElementById('browser-debug-auto-refresh');
+	if (autoRefresh) {
+		autoRefresh.checked = window.sessionStorage.getItem('browserDebugAutoRefresh') === '1';
+		autoRefresh.addEventListener('change', function () {
+			window.sessionStorage.setItem('browserDebugAutoRefresh', autoRefresh.checked ? '1' : '0');
+		});
+		setInterval(function () { if (autoRefresh.checked) window.location.reload(); }, 10000);
+	}
+	</script>`
 }

@@ -12,6 +12,7 @@ import (
 func TestRenderBrowserDebugShowsJobsLoadsAndScreenshot(t *testing.T) {
 	now := time.Date(2026, 7, 30, 10, 0, 0, 0, time.UTC)
 	finished := now.Add(2 * time.Second)
+	successful := true
 	snapshot := &browseruse.DebugSnapshot{
 		TotalJobs:         1,
 		MaxJobs:           1000,
@@ -23,6 +24,16 @@ func TestRenderBrowserDebugShowsJobsLoadsAndScreenshot(t *testing.T) {
 				CreatedAt:           now,
 				CompletedAt:         &finished,
 				ScreenshotAvailable: true,
+				Result: &browseruse.JobResult{
+					Done:            true,
+					Successful:      &successful,
+					Steps:           3,
+					DurationSeconds: 1.5,
+					FinalResult:     `Found <b>the title</b>`,
+					VisitedURLs:     []string{"https://example.com"},
+					ActionNames:     []string{"navigate", "extract_text"},
+					Actions:         []map[string]interface{}{{"name": "navigate"}},
+				},
 			},
 			SessionID: "session-1",
 			Task:      `inspect <script>alert("x")</script>`,
@@ -52,12 +63,17 @@ func TestRenderBrowserDebugShowsJobsLoadsAndScreenshot(t *testing.T) {
 		"https://example.com/app.js",
 		"text/javascript",
 		"Network metadata only",
+		"Auto-refresh",
+		"Copy ID",
+		"Run outcome",
+		"Action trace",
+		"42 B transferred",
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("rendered browser page missing %q", want)
 		}
 	}
-	if strings.Contains(html, "<script>alert") || strings.Contains(html, "<unsafe>") {
+	if strings.Contains(html, "<script>alert") || strings.Contains(html, "<unsafe>") || strings.Contains(html, "<b>the title</b>") {
 		t.Fatalf("browser debug page rendered unescaped data:\n%s", html)
 	}
 }
