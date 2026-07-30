@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/ghiac/agentize/engine"
+	"github.com/ghiac/agentize/filestore"
 	"github.com/ghiac/agentize/fsrepo"
 	"github.com/ghiac/agentize/model"
 	"github.com/ghiac/agentize/store"
@@ -21,6 +22,31 @@ func (*noopToolApprovalManager) Request(_ context.Context, r *model.ReviewReques
 
 func (*noopToolApprovalManager) Await(_ context.Context, _ string) (*model.ReviewRequest, error) {
 	return &model.ReviewRequest{Status: model.ReviewApproved}, nil
+}
+
+func TestSetFileStoreEnablesManageFilesForCurrentAndFutureAgents(t *testing.T) {
+	manager := New(nil)
+	first := newTestEngine()
+	if err := manager.Register(AgentConfig{Name: "first"}, first); err != nil {
+		t.Fatal(err)
+	}
+
+	fileStore, err := filestore.NewLocalFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.SetFileStore(fileStore)
+	if first.Files != fileStore || !first.Functions.Has("manage_files") {
+		t.Fatal("current agent did not receive shared file manager")
+	}
+
+	second := newTestEngine()
+	if err := manager.Register(AgentConfig{Name: "second"}, second); err != nil {
+		t.Fatal(err)
+	}
+	if second.Files != fileStore || !second.Functions.Has("manage_files") {
+		t.Fatal("future agent did not receive shared file manager")
+	}
 }
 
 // newTestEngine returns a minimal Engine with only Functions set.

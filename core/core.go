@@ -294,6 +294,48 @@ func (ch *CoreHandler) ProcessMessage(
 	return ch.ProcessMessageWithContentType(ctx, userID, userMessage, model.ContentTypeText)
 }
 
+type generatedFileLister interface {
+	GetUserFilesByUser(userID string) ([]*model.UserFile, error)
+}
+
+// ProcessMessageWithGeneratedFiles processes one Core turn and returns every
+// user-owned file generated during it, including files produced inside worker
+// agent sessions. Bot/chat adapters should use this method when they need to
+// attach browser screenshots or other generated artifacts to the reply.
+func (ch *CoreHandler) ProcessMessageWithGeneratedFiles(
+	ctx context.Context,
+	userID string,
+	userMessage string,
+) (string, []*model.UserFile, error) {
+	if ch.userProgress.TryQueue(userID, userMessage) {
+		metrics.MessageQueued("core")
+		return "⏳ Processing previous request... Please wait. 📋 Your message was queued and will be answered in order.", nil, nil
+	}
+
+	userMu := ch.getUserMutex(userID)
+	userMu.Lock()
+	defer userMu.Unlock()
+
+	lister, ok := ch.sessionHandler.GetStore().(generatedFileLister)
+	if !ok {
+		return "", nil, fmt.Errorf("session store does not support user files")
+	}
+	before, err := lister.GetUserFilesByUser(userID)
+	if err != nil {
+		return "", nil, fmt.Errorf("list user files before message: %w", err)
+	}
+
+	response, processErr := ch.processMessageLocked(ctx, userID, userMessage, model.ContentTypeText)
+	after, afterErr := lister.GetUserFilesByUser(userID)
+	if afterErr != nil {
+		if processErr != nil {
+			return response, nil, processErr
+		}
+		return response, nil, fmt.Errorf("list user files after message: %w", afterErr)
+	}
+	return response, model.GeneratedFilesSince(before, after), processErr
+}
+
 // ProcessMessageWithContentType is like ProcessMessage but stores the user message with the given content type.
 func (ch *CoreHandler) ProcessMessageWithContentType(
 	ctx context.Context,

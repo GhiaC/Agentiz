@@ -29,6 +29,13 @@ API, security & observability hardening (improvement roadmap
   `MaxToolResultLength`.
 
 ### Added
+
+- **Per-user file manager and chatbot attachment delivery.** Current and future
+  worker agents can share Agentize's file store and receive the built-in
+  owner-scoped `manage_files` tool (`list`, `read`, `grep`, `save`, `edit`,
+  `edit_image`, and `delete`). Core can now return generated files created in
+  worker sessions, while `DeliverGeneratedFiles` hands their bytes to the host
+  bot's photo/document sender without trusting a `file_id` quoted in model text.
 - **Browser debug console and screenshot delivery.** The protected debugger now
   has a Browser tab with recent job state and bounded per-resource load
   metadata. The sidecar captures a latest-step PNG and exposes an owner-scoped

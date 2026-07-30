@@ -42,6 +42,10 @@ func TestRenderBrowserDebugShowsJobsLoadsAndScreenshot(t *testing.T) {
 	html := RenderBrowserDebug(snapshot, nil)
 	for _, want := range []string{
 		"Browser",
+		"browser_use",
+		"Ready",
+		`"action":"run"`,
+		"screenshot",
 		"job-1",
 		"session-1",
 		"Open screenshot",
@@ -58,9 +62,27 @@ func TestRenderBrowserDebugShowsJobsLoadsAndScreenshot(t *testing.T) {
 	}
 }
 
+func TestRenderBrowserDebugExplainsEmptyAndUnconfiguredStates(t *testing.T) {
+	empty := RenderBrowserDebugWithStatus(&browseruse.DebugSnapshot{}, true, nil)
+	for _, want := range []string{"browser_use", "Ready", "Only action", "sidecar restart"} {
+		if !strings.Contains(empty, want) {
+			t.Errorf("empty browser page missing %q", want)
+		}
+	}
+
+	unconfigured := RenderBrowserDebugWithStatus(nil, false, errors.New("browser-use is not configured"))
+	for _, want := range []string{"browser_use", "Not configured", "UseBrowserUse"} {
+		if !strings.Contains(unconfigured, want) {
+			t.Errorf("unconfigured browser page missing %q", want)
+		}
+	}
+}
+
 func TestRenderBrowserDebugKeepsSidecarFailureInsidePage(t *testing.T) {
-	html := RenderBrowserDebug(nil, errors.New("connection refused"))
-	if !strings.Contains(html, "Browser sidecar unavailable") || !strings.Contains(html, "connection refused") {
+	html := RenderBrowserDebugWithStatus(nil, true, errors.New("connection refused"))
+	if !strings.Contains(html, "Configured; debug unavailable") ||
+		!strings.Contains(html, "Browser sidecar unavailable") ||
+		!strings.Contains(html, "connection refused") {
 		t.Fatalf("unexpected failure page:\n%s", html)
 	}
 }

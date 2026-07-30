@@ -98,7 +98,13 @@ func TestBrowserDebugRoutesRenderLoadsAndProxyScreenshot(t *testing.T) {
 	if page.Code != http.StatusOK {
 		t.Fatalf("browser debug status=%d body=%s", page.Code, page.Body.String())
 	}
-	for _, want := range []string{"inspect example.com", "https://example.com/app.js", "Open screenshot"} {
+	for _, want := range []string{
+		"browser_use",
+		"Ready",
+		"inspect example.com",
+		"https://example.com/app.js",
+		"Open screenshot",
+	} {
 		if !strings.Contains(page.Body.String(), want) {
 			t.Errorf("browser debug page missing %q", want)
 		}

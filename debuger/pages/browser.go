@@ -19,11 +19,24 @@ const browserDebugPath = "/agentize/debug/browser"
 // metadata. The caller supplies fetchErr so a sidecar outage remains a useful
 // debugger page instead of turning into an HTTP 500.
 func RenderBrowserDebug(snapshot *browseruse.DebugSnapshot, fetchErr error) string {
+	configured := snapshot != nil || fetchErr == nil
+	return RenderBrowserDebugWithStatus(snapshot, configured, fetchErr)
+}
+
+// RenderBrowserDebugWithStatus renders the browser debugger with an explicit
+// configuration status. Keeping configuration separate from connectivity lets
+// operators distinguish missing wiring from an unavailable/old sidecar.
+func RenderBrowserDebugWithStatus(
+	snapshot *browseruse.DebugSnapshot,
+	configured bool,
+	fetchErr error,
+) string {
 	content := ui.ContainerStart()
+	content += browserToolOverview(configured, fetchErr)
 	content += `<div class="alert alert-info" role="alert">
-		<strong>Network metadata only.</strong> Request/response bodies and headers are intentionally omitted.
-		Screenshots are the latest viewport captured at a completed browser step.
-	</div>`
+			<strong>Network metadata only.</strong> Request/response bodies and headers are intentionally omitted.
+			Screenshots are the latest viewport captured at a completed browser step.
+		</div>`
 
 	if fetchErr != nil {
 		content += fmt.Sprintf(
@@ -49,7 +62,10 @@ func RenderBrowserDebug(snapshot *browseruse.DebugSnapshot, fetchErr error) stri
 	</div>`
 
 	if len(snapshot.Jobs) == 0 {
-		content += components.InfoAlert("No browser jobs have been recorded yet.")
+		content += components.InfoAlert(
+			`No browser jobs have been recorded yet. Invoke browser_use with action "run" first. ` +
+				`Jobs live in the sidecar process and disappear after its retention TTL or a sidecar restart.`,
+		)
 	} else {
 		for _, job := range snapshot.Jobs {
 			content += browserJobCard(&job)
@@ -66,6 +82,50 @@ func RenderBrowserDebug(snapshot *browseruse.DebugSnapshot, fetchErr error) stri
 	content += ui.ContainerEnd()
 	return ui.Header("Agentize Debug - Browser") +
 		ui.NavbarAndBody(browserDebugPath, content) + ui.Footer()
+}
+
+func browserToolOverview(configured bool, fetchErr error) string {
+	status := `<span class="badge text-bg-secondary">Not configured</span>`
+	statusDetail := `Create a browseruse.Client and pass it through agentize.Options{BrowserUse: client} ` +
+		`or call ag.UseBrowserUse(client).`
+	if configured && fetchErr != nil {
+		status = `<span class="badge text-bg-warning">Configured; debug unavailable</span>`
+		statusDetail = `The browser_use schema is wired, but Agentize could not read debug metadata. ` +
+			`Rebuild/restart the sidecar so it exposes GET /v1/debug/jobs.`
+	} else if configured {
+		status = `<span class="badge text-bg-success">Ready</span>`
+		statusDetail = `The tool and browser debug endpoint are connected. Only action "run" creates a browser job.`
+	}
+
+	return fmt.Sprintf(`<section class="card mb-3">
+		<div class="card-header d-flex flex-wrap gap-2 justify-content-between align-items-center">
+			<div><strong>Tool:</strong> <code>browser_use</code></div>
+			%s
+		</div>
+		<div class="card-body">
+			<p class="mb-3">%s</p>
+			<div class="row g-3">
+				<div class="col-lg-5">
+					<div class="small text-muted mb-1">Supported actions</div>
+					<div class="d-flex flex-wrap gap-2">
+						<code>run</code><code>status</code><code>screenshot</code><code>cancel</code>
+					</div>
+				</div>
+				<div class="col-lg-7">
+					<div class="small text-muted mb-1">Create debug data</div>
+					<pre class="bg-light border rounded p-2 mb-2"><code>{"action":"run","task":"Open example.com and report the page title"}</code></pre>
+					<div class="small text-muted mb-1">Capture the latest viewport</div>
+					<pre class="bg-light border rounded p-2 mb-0"><code>{"action":"screenshot","job_id":"&lt;job_id from run&gt;"}</code></pre>
+				</div>
+			</div>
+			<div class="small text-muted mt-3">
+				Actual invocations also appear under <a href="/agentize/debug/tool-calls">Tool Calls</a>
+				after the LLM calls the tool and the call is persisted. If tool approvals are enabled,
+				approve the <code>run</code> call under <a href="/agentize/debug/reviews">Reviews</a>
+				before expecting a browser job here.
+			</div>
+		</div>
+	</section>`, status, template.HTMLEscapeString(statusDetail))
 }
 
 func browserStats(snapshot *browseruse.DebugSnapshot) string {

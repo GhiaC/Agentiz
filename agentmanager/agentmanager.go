@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"github.com/ghiac/agentize/engine"
+	"github.com/ghiac/agentize/filestore"
 	"github.com/ghiac/agentize/model"
 )
 
@@ -49,6 +50,7 @@ type AgentManager struct {
 	agents         map[string]*RegisteredAgent
 	sessionHandler *model.SessionHandler
 	toolApprovals  engine.ToolApprovalManager
+	fileStore      filestore.FileStore
 	mu             sync.RWMutex
 }
 
@@ -86,6 +88,9 @@ func (am *AgentManager) Register(config AgentConfig, eng *engine.Engine) error {
 		Config: config,
 		Engine: eng,
 	}
+	if am.fileStore != nil {
+		eng.SetFileStore(am.fileStore)
+	}
 	// A shared store may back several agent Engines. Scope each recurring-task
 	// worker to its own session type so one persisted schedule is never executed
 	// once by every agent.
@@ -97,6 +102,19 @@ func (am *AgentManager) Register(config AgentConfig, eng *engine.Engine) error {
 	}
 
 	return nil
+}
+
+// SetFileStore shares one byte store with all current and future worker agents.
+// Each Engine then exposes the built-in, user-scoped manage_files tool.
+func (am *AgentManager) SetFileStore(fileStore filestore.FileStore) {
+	am.mu.Lock()
+	defer am.mu.Unlock()
+	am.fileStore = fileStore
+	for _, agent := range am.agents {
+		if agent.Engine != nil {
+			agent.Engine.SetFileStore(fileStore)
+		}
+	}
 }
 
 // SetToolApprovalManager applies the same approval gate to all current and

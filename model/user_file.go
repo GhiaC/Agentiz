@@ -83,3 +83,27 @@ func NewUserFile(session *Session, name, mimeType string, size int64, storageKey
 		CreatedAt:  time.Now(),
 	}
 }
+
+// GeneratedFilesSince returns generated files present in after but not before.
+// It is used by message adapters to discover artifacts created during one turn
+// without re-delivering older files. Uploaded files are deliberately excluded.
+func GeneratedFilesSince(before, after []*UserFile) []*UserFile {
+	existing := make(map[string]struct{}, len(before))
+	for _, file := range before {
+		if file != nil {
+			existing[file.FileID] = struct{}{}
+		}
+	}
+
+	generated := make([]*UserFile, 0)
+	for _, file := range after {
+		if file == nil || file.Source != FileSourceGenerated {
+			continue
+		}
+		if _, found := existing[file.FileID]; found {
+			continue
+		}
+		generated = append(generated, file)
+	}
+	return generated
+}

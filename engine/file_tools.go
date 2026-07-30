@@ -237,18 +237,19 @@ func ManageFilesToolDefinition() openai.Tool {
 				"- grep: search text files for 'query' (regex) and return matching lines with line numbers; pass file_id to search one file, omit it to search all the user's text files.\n" +
 				"- save: store 'content' as a new text file named 'name'; returns the new file_id.\n" +
 				"- edit: edit a text file in place — replace 'old_string' with 'new_string' (set replace_all=true for all occurrences), or pass 'content' to overwrite the whole file.\n" +
-				"- edit_image: edit an image file (file_id) per 'instruction' using an image model; the edited image is saved as a NEW independent file and its file_id is returned.",
+				"- edit_image: edit an image file (file_id) per 'instruction' using an image model; the edited image is saved as a NEW independent file and its file_id is returned.\n" +
+				"- delete: permanently delete an owned file's bytes and metadata.",
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
 					"action": map[string]interface{}{
 						"type":        "string",
-						"enum":        []string{"list", "read", "grep", "save", "edit", "edit_image"},
+						"enum":        []string{"list", "read", "grep", "save", "edit", "edit_image", "delete"},
 						"description": "The operation to perform.",
 					},
 					"file_id": map[string]interface{}{
 						"type":        "string",
-						"description": "Target file id. Required for read, edit, edit_image; optional for grep.",
+						"description": "Target file id. Required for read, edit, edit_image, and delete; optional for grep.",
 					},
 					"name": map[string]interface{}{
 						"type":        "string",
@@ -299,7 +300,7 @@ func (e *Engine) RegisterManageFilesTool() {
 	if e.Functions == nil {
 		return
 	}
-	e.Functions.Register("manage_files", "مدیریت فایل‌ها", e.manageFilesFunction())
+	_ = e.Functions.RegisterOrReplace("manage_files", "مدیریت فایل‌ها", e.manageFilesFunction())
 }
 
 // manageFilesFunction builds the manage_files tool implementation.
@@ -337,8 +338,11 @@ func (e *Engine) manageFilesFunction() model.ToolFunction {
 		case "edit_image":
 			s, opErr := e.manageFilesEditImage(userID, sessionID, args)
 			return recordFileOp("edit_image", start, s, opErr)
+		case "delete":
+			s, opErr := e.manageFilesDelete(userID, args)
+			return recordFileOp("delete", start, s, opErr)
 		default:
-			return fmt.Sprintf("Unknown action %q. Valid actions: list, read, grep, save, edit, edit_image.", action), nil
+			return fmt.Sprintf("Unknown action %q. Valid actions: list, read, grep, save, edit, edit_image, delete.", action), nil
 		}
 	}
 }
@@ -615,6 +619,29 @@ func (e *Engine) manageFilesEditImage(userID, sessionID string, args map[string]
 	}
 	return fmt.Sprintf("Edited image saved as a NEW file %s (id=%s, %s, %d bytes), derived from %s.",
 		uf.Name, uf.FileID, uf.MIMEType, uf.Size, meta.FileID), nil
+}
+
+// manageFilesDelete permanently removes an owned file's bytes and metadata.
+func (e *Engine) manageFilesDelete(userID string, args map[string]interface{}) (string, error) {
+	if e.Files == nil {
+		return "File storage is not configured on this deployment.", errManageFiles
+	}
+	fileID, _ := args["file_id"].(string)
+	if fileID == "" {
+		return "Error: file_id is required for action=delete.", errManageFiles
+	}
+	meta, errMsg := e.getOwnedFileMeta(userID, fileID)
+	if errMsg != "" {
+		return errMsg, errManageFiles
+	}
+	if err := e.Files.Delete(meta.StorageKey); err != nil {
+		return fmt.Sprintf("Error deleting file bytes: %v", err), err
+	}
+	st, _ := e.userFiles()
+	if err := st.DeleteUserFile(meta.FileID); err != nil {
+		return fmt.Sprintf("Error deleting file metadata: %v", err), err
+	}
+	return fmt.Sprintf("Deleted file %s (id=%s).", meta.Name, meta.FileID), nil
 }
 
 // getOwnedFileMeta loads a file's metadata and verifies the user owns it.

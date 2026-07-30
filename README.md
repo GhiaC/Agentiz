@@ -15,7 +15,7 @@ a standalone CLI/server).
 - 🤖 **LLM message processing** — single-agent or multi-agent (Core router + worker agents)
 - 💬 **Sessions & summarization** — persistent sessions with a background rolling-window summarizer
 - 🗄️ **Pluggable storage** — SQLite (default) or MongoDB behind one `store.Store` interface
-- 📎 **User files & image editing** — record uploads, `manage_files` tool, optional OpenRouter image edits
+- 📎 **Per-user file manager** — shared files across sessions and agents, owner-scoped `manage_files`, generated-file delivery, and optional image edits
 - 🌐 **Isolated browser automation** — optional Dockerized `browser-use` sidecar with asynchronous, session-owned jobs, load tracing, and user-deliverable screenshots
 - ✅ **Human-approved tools** — every tool call can pause for a durable approve/reject decision before execution
 - 🔀 **Deterministic workflows** — durable Core-tool DAGs without a planner LLM, including scheduled state machines
@@ -180,7 +180,9 @@ See [docs/SECURITY.md](docs/SECURITY.md) for the threat model and
 [docs/OPERATIONS.md](docs/OPERATIONS.md) for running it in production.
 
 The optional autonomous browser module is documented in
-[docs/BROWSER_USE.md](docs/BROWSER_USE.md).
+[docs/BROWSER_USE.md](docs/BROWSER_USE.md). Per-user storage, worker-agent
+access, and chatbot attachment delivery are documented in
+[docs/FILE_MANAGER.md](docs/FILE_MANAGER.md).
 
 ## 4 — Multi-agent (Core router + worker agents)
 

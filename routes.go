@@ -746,7 +746,7 @@ func (ag *Agentize) handleDebugBrowser(c *gin.Context) {
 		fetchErr = errors.New("configured browser-use service does not expose debug metadata")
 	}
 
-	html := pages.RenderBrowserDebug(snapshot, fetchErr)
+	html := pages.RenderBrowserDebugWithStatus(snapshot, ag.engine.BrowserUse != nil, fetchErr)
 	c.Header("Content-Type", "text/html; charset=utf-8")
 	c.String(http.StatusOK, html)
 }

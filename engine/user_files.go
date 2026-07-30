@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ghiac/agentize/filestore"
 	"github.com/ghiac/agentize/log"
 	"github.com/ghiac/agentize/metrics"
 	"github.com/ghiac/agentize/model"
@@ -22,6 +23,7 @@ type userFileStore interface {
 	PutUserFile(*model.UserFile) error
 	GetUserFile(string) (*model.UserFile, error)
 	GetUserFilesByUser(string) ([]*model.UserFile, error)
+	DeleteUserFile(string) error
 }
 
 // userFiles returns the store narrowed to the user-file methods. The bool is
@@ -36,6 +38,17 @@ func (e *Engine) userFiles() (userFileStore, bool) {
 // host can meter/bill it). It is pluggable so an application can wire any
 // image-capable model/API. The implementation owns its own timeouts.
 type ImageEditorFunc func(image []byte, mimeType, instruction string) (*model.ImageEditResult, error)
+
+// SetFileStore enables the user-scoped file manager on this Engine and
+// re-registers its built-in tool implementation. AgentManager uses this to
+// share one byte store across all worker agents.
+func (e *Engine) SetFileStore(fileStore filestore.FileStore) {
+	if e == nil {
+		return
+	}
+	e.Files = fileStore
+	e.RegisterManageFilesTool()
+}
 
 // SetImageEditor wires the function used by the manage_files edit_image action.
 func (e *Engine) SetImageEditor(editor ImageEditorFunc) {
@@ -205,6 +218,22 @@ func (e *Engine) ReadUserFile(fileID string) ([]byte, *model.UserFile, error) {
 		return nil, meta, fmt.Errorf("failed to read file bytes: %w", err)
 	}
 	metrics.FileBytes("read", int64(len(data)))
+	return data, meta, nil
+}
+
+// ReadUserFileForUser returns a file only when it belongs to userID. It is the
+// safe read path for user-facing HTTP/chat adapters; ReadUserFile remains the
+// trusted operator/internal API.
+func (e *Engine) ReadUserFileForUser(userID, fileID string) ([]byte, *model.UserFile, error) {
+	meta, errMsg := e.getOwnedFileMeta(userID, fileID)
+	if errMsg != "" {
+		// Do not reveal whether a file owned by another user exists.
+		return nil, nil, fmt.Errorf("file not found: %s", fileID)
+	}
+	data, _, err := e.ReadUserFile(meta.FileID)
+	if err != nil {
+		return nil, meta, err
+	}
 	return data, meta, nil
 }
 

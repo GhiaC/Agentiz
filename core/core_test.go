@@ -11,6 +11,7 @@ import (
 
 	"github.com/ghiac/agentize/agentmanager"
 	"github.com/ghiac/agentize/engine"
+	"github.com/ghiac/agentize/filestore"
 	"github.com/ghiac/agentize/fsrepo"
 	"github.com/ghiac/agentize/model"
 	"github.com/ghiac/agentize/store"
@@ -345,6 +346,59 @@ func TestProcessMessage_RecordsRouteTrace(t *testing.T) {
 	}
 	if !hasUser || !hasDecision || !hasResponse {
 		t.Errorf("missing node types: user=%v decision=%v response=%v (nodes=%+v)", hasUser, hasDecision, hasResponse, tr.Nodes)
+	}
+}
+
+func TestProcessMessageWithGeneratedFilesFindsWorkerSessionFiles(t *testing.T) {
+	ch, _, coreTx, agentTx := newDispatchableCore(t, "researcher")
+	worker, ok := ch.agents.Get("researcher")
+	if !ok {
+		t.Fatal("researcher agent not found")
+	}
+	fileStore, err := filestore.NewLocalFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker.Engine.SetFileStore(fileStore)
+	worker.Engine.Executor = func(name string, args map[string]interface{}) (string, error) {
+		return worker.Engine.Functions.Execute(name, args)
+	}
+
+	coreTx.AddResponse(coreDispatchTurn("researcher", "create a report file"))
+	agentTx["researcher"].AddResponse(openai.ChatCompletionResponse{
+		Choices: []openai.ChatCompletionChoice{{
+			Message: openai.ChatCompletionMessage{
+				Role: openai.ChatMessageRoleAssistant,
+				ToolCalls: []openai.ToolCall{{
+					ID:   "save-file",
+					Type: openai.ToolTypeFunction,
+					Function: openai.FunctionCall{
+						Name:      "manage_files",
+						Arguments: `{"action":"save","name":"report.txt","content":"worker output"}`,
+					},
+				}},
+			},
+			FinishReason: openai.FinishReasonToolCalls,
+		}},
+	})
+	agentTx["researcher"].AddResponse(agentAnswer("report created"))
+
+	response, files, err := ch.ProcessMessageWithGeneratedFiles(
+		context.Background(),
+		"user1",
+		"make a report",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response != "report created" {
+		t.Fatalf("response=%q", response)
+	}
+	if len(files) != 1 || files[0].UserID != "user1" || files[0].Name != "report.txt" {
+		t.Fatalf("worker-generated files were not returned: %+v", files)
+	}
+	if files[0].Source != model.FileSourceGenerated {
+		t.Fatalf("unexpected source: %s", files[0].Source)
 	}
 }
 

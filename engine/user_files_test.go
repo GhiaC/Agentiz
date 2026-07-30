@@ -305,6 +305,54 @@ func TestManageFilesTool_GrepAndEdit(t *testing.T) {
 	}
 }
 
+func TestManageFilesTool_DeleteEnforcesOwnershipAndRemovesBytes(t *testing.T) {
+	eng, session := newUserFileTestEngine(t)
+	file, err := eng.RecordUserFile(
+		session.SessionID,
+		"delete-me.txt",
+		"text/plain",
+		model.FileSourceGenerated,
+		[]byte("temporary"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	intruderResult, err := eng.Functions.Execute("manage_files", map[string]interface{}{
+		"__user_id__": "intruder",
+		"action":      "delete",
+		"file_id":     file.FileID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(intruderResult, "does not belong to you") {
+		t.Fatalf("expected owner refusal, got %q", intruderResult)
+	}
+
+	result, err := eng.Functions.Execute("manage_files", map[string]interface{}{
+		"__user_id__": "user-1",
+		"action":      "delete",
+		"file_id":     file.FileID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result, "Deleted file") {
+		t.Fatalf("unexpected delete result: %q", result)
+	}
+	if _, exists, statErr := eng.Files.Stat(file.StorageKey); statErr != nil || exists {
+		t.Fatalf("file bytes still exist: exists=%v err=%v", exists, statErr)
+	}
+	meta, err := eng.Sessions.GetUserFile(file.FileID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta != nil {
+		t.Fatalf("file metadata still exists: %+v", meta)
+	}
+}
+
 func TestManageFilesTool_EditImageIndependent(t *testing.T) {
 	eng, session := newUserFileTestEngine(t)
 	// Fake editor: returns a distinct payload + usage so we can verify

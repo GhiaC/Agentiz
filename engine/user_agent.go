@@ -607,12 +607,7 @@ func (e *Engine) ProcessMessage(
 	sessionID string,
 	userMessage string,
 ) (string, int, error) {
-	// Defensive: ensure progress guard is initialized (e.g. if Init() was not called)
-	e.dbReadyMu.Lock()
-	if e.sessionProgress == nil {
-		e.sessionProgress = NewProgressGuard()
-	}
-	e.dbReadyMu.Unlock()
+	e.ensureSessionProgress()
 	// Check if already processing - queue if busy
 	if e.sessionProgress.TryQueue(sessionID, userMessage) {
 		metrics.MessageQueued("agent")
@@ -625,6 +620,48 @@ func (e *Engine) ProcessMessage(
 	defer sessionMu.Unlock()
 
 	return e.processMessageLocked(ctx, sessionID, userMessage)
+}
+
+// ProcessMessageWithGeneratedFiles processes one session turn and returns files
+// generated while that turn held the session lock. Keeping both snapshots inside
+// the lock prevents concurrent callers from re-delivering each other's files.
+func (e *Engine) ProcessMessageWithGeneratedFiles(
+	ctx context.Context,
+	sessionID string,
+	userMessage string,
+) (string, int, []*model.UserFile, error) {
+	e.ensureSessionProgress()
+	if e.sessionProgress.TryQueue(sessionID, userMessage) {
+		metrics.MessageQueued("agent")
+		return "⏳ Processing previous request... Please wait. 📋 Your message was queued and will be answered in order.", 0, nil, nil
+	}
+
+	sessionMu := e.getSessionMutex(sessionID)
+	sessionMu.Lock()
+	defer sessionMu.Unlock()
+
+	before, err := e.Sessions.GetUserFilesBySession(sessionID)
+	if err != nil {
+		return "", 0, nil, fmt.Errorf("list session files before message: %w", err)
+	}
+	response, tokens, processErr := e.processMessageLocked(ctx, sessionID, userMessage)
+	after, afterErr := e.Sessions.GetUserFilesBySession(sessionID)
+	if afterErr != nil {
+		if processErr != nil {
+			return response, tokens, nil, processErr
+		}
+		return response, tokens, nil, fmt.Errorf("list session files after message: %w", afterErr)
+	}
+	return response, tokens, model.GeneratedFilesSince(before, after), processErr
+}
+
+func (e *Engine) ensureSessionProgress() {
+	// Defensive: ensure progress guard is initialized (e.g. if Init() was not called).
+	e.dbReadyMu.Lock()
+	if e.sessionProgress == nil {
+		e.sessionProgress = NewProgressGuard()
+	}
+	e.dbReadyMu.Unlock()
 }
 
 // ProcessScheduledMessage runs a background scheduled prompt on the owning

@@ -494,6 +494,12 @@ func (ag *Agentize) ReadUserFile(fileID string) ([]byte, *model.UserFile, error)
 	return ag.engine.ReadUserFile(fileID)
 }
 
+// ReadUserFileForUser returns bytes only if userID owns fileID. User-facing
+// chat/API adapters should prefer this over the trusted ReadUserFile method.
+func (ag *Agentize) ReadUserFileForUser(userID, fileID string) ([]byte, *model.UserFile, error) {
+	return ag.engine.ReadUserFileForUser(userID, fileID)
+}
+
 // SetImageEditor wires an image-editing backend, enabling the manage_files
 // edit_image action. The function receives the source image bytes + MIME type
 // and an instruction, and returns the edited image bytes + MIME type.
@@ -588,39 +594,11 @@ func (ag *Agentize) ProcessMessageWithGeneratedFiles(
 	sessionID string,
 	userMessage string,
 ) (string, int, []*model.UserFile, error) {
-	before, beforeErr := ag.GetSessionStore().GetUserFilesBySession(sessionID)
-	if beforeErr != nil {
-		return "", 0, nil, fmt.Errorf("list session files before message: %w", beforeErr)
-	}
-	response, tokens, processErr := ag.ProcessMessage(ctx, sessionID, userMessage)
-	after, afterErr := ag.GetSessionStore().GetUserFilesBySession(sessionID)
-	if afterErr != nil {
-		if processErr != nil {
-			return response, tokens, nil, processErr
-		}
-		return response, tokens, nil, fmt.Errorf("list session files after message: %w", afterErr)
-	}
-	return response, tokens, generatedUserFilesSince(before, after), processErr
+	return ag.engine.ProcessMessageWithGeneratedFiles(ctx, sessionID, userMessage)
 }
 
 func generatedUserFilesSince(before, after []*model.UserFile) []*model.UserFile {
-	existing := make(map[string]struct{}, len(before))
-	for _, file := range before {
-		if file != nil {
-			existing[file.FileID] = struct{}{}
-		}
-	}
-	generated := make([]*model.UserFile, 0)
-	for _, file := range after {
-		if file == nil || file.Source != model.FileSourceGenerated {
-			continue
-		}
-		if _, found := existing[file.FileID]; found {
-			continue
-		}
-		generated = append(generated, file)
-	}
-	return generated
+	return model.GeneratedFilesSince(before, after)
 }
 
 // UploadedFile describes a file the user sent alongside a message. Data holds the
