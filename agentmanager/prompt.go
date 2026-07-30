@@ -2,6 +2,7 @@ package agentmanager
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/ghiac/agentize/model"
@@ -106,10 +107,37 @@ func (am *AgentManager) BuildAgentToolsPrompt() string {
 	sb.WriteString("## Registered Agent Tools\n\n")
 	sb.WriteString("The following tools are available to agents.\n")
 	sb.WriteString("When a user's request requires any of these tools, delegate to the appropriate agent.\n\n")
+	names := make([]string, 0, len(toolSet))
 	for name := range toolSet {
-		sb.WriteString(fmt.Sprintf("- `%s`\n", name))
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		sb.WriteString(fmt.Sprintf("- `%s`", name))
+		if description := agentToolPromptDescription(name); description != "" {
+			sb.WriteString(": ")
+			sb.WriteString(description)
+		}
+		sb.WriteString("\n")
 	}
 	return sb.String()
+}
+
+// agentToolPromptDescription supplies operational guidance for agent tools whose
+// capability cannot be inferred from the name alone. The Core sees this prompt
+// while deciding which agent should handle a request; it does not invoke the
+// agent's tools itself.
+func agentToolPromptDescription(name string) string {
+	switch name {
+	case "browser_use":
+		return "Autonomous browser work: navigate, search, extract content, interact with pages and forms, " +
+			"upload session files, download files, and capture screenshots. Delegate web research, website testing, " +
+			"login/form workflows, or browser-based data extraction to an agent with this tool. The agent starts work " +
+			"with `action=run` and a precise `task`; it can then use the returned job ID with `status`, `screenshot`, " +
+			"`downloads`, `download`, or `cancel`. Use `file_ids` on `run` when user files must be uploaded to a site."
+	default:
+		return ""
+	}
 }
 
 // ---------------------------------------------------------------------------

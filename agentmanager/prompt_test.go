@@ -106,6 +106,30 @@ func TestBuildAgentToolsPrompt_Content(t *testing.T) {
 	}
 }
 
+func TestBuildAgentToolsPrompt_DescribesBrowserUse(t *testing.T) {
+	am := newTestManagerWithAgents(
+		[]AgentConfig{{Name: "browser", CostTier: CostTierLow}},
+		[][]string{{"browser_use"}},
+	)
+
+	got := am.BuildAgentToolsPrompt()
+	for _, want := range []string{
+		"`browser_use`",
+		"Autonomous browser work",
+		"upload session files",
+		"`status`",
+		"`screenshot`",
+		"`downloads`",
+		"`download`",
+		"`cancel`",
+		"`file_ids`",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("browser-use prompt missing %q:\n%s", want, got)
+		}
+	}
+}
+
 func TestBuildCallTools_Count(t *testing.T) {
 	am := newTestManagerWithAgents(
 		[]AgentConfig{
