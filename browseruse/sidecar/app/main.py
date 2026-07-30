@@ -3,12 +3,12 @@ from __future__ import annotations
 import hmac
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from .config import Settings
 from .jobs import JobManager
-from .models import HealthResponse, JobResponse, StartJobRequest
+from .models import BrowserDebugResponse, HealthResponse, JobResponse, StartJobRequest
 from .runner import BrowserUseRunner
 
 
@@ -66,6 +66,18 @@ async def create_job(
 
 
 @app.get(
+	"/v1/debug/jobs",
+	response_model=BrowserDebugResponse,
+	dependencies=[Depends(require_auth)],
+)
+async def debug_jobs(
+	limit: int = Query(default=20, ge=1, le=100),
+	load_limit: int = Query(default=50, ge=0, le=250),
+) -> BrowserDebugResponse:
+	return await manager.debug(limit, load_limit)
+
+
+@app.get(
 	"/v1/jobs/{job_id}",
 	response_model=JobResponse,
 	dependencies=[Depends(require_auth)],
@@ -88,3 +100,20 @@ async def cancel_job(
 	session_id: str = Depends(require_session),
 ) -> JobResponse:
 	return await manager.cancel(session_id, job_id)
+
+
+@app.get(
+	"/v1/jobs/{job_id}/screenshot",
+	dependencies=[Depends(require_auth)],
+	response_class=Response,
+)
+async def get_job_screenshot(
+	job_id: str,
+	session_id: str = Depends(require_session),
+) -> Response:
+	data = await manager.screenshot(session_id, job_id)
+	return Response(
+		content=data,
+		media_type="image/png",
+		headers={"Content-Disposition": f'inline; filename="browser-{job_id}.png"'},
+	)

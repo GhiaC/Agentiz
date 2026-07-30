@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/ghiac/agentize/browseruse"
+	"github.com/ghiac/agentize/model"
 	"github.com/sashabaranov/go-openai"
 )
 
@@ -28,14 +29,15 @@ func BrowserUseToolDefinition() openai.Tool {
 			Name: browserUseToolName,
 			Description: "Run and inspect autonomous web-browser tasks in the isolated browser-use service. " +
 				"Use run with a precise task; it returns the completed result when possible or a job_id for later status calls. " +
+				"Use screenshot with a job_id to save the latest captured browser view as a generated user image that the host can attach to the reply. " +
 				"Use cancel to stop unneeded work. Browser profiles persist per Agentize session. " +
-				"Actions: run, status, cancel.",
+				"Actions: run, status, screenshot, cancel.",
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
 					"action": map[string]interface{}{
 						"type": "string",
-						"enum": []string{"run", "status", "cancel"},
+						"enum": []string{"run", "status", "screenshot", "cancel"},
 					},
 					"task": map[string]interface{}{
 						"type":        "string",
@@ -43,7 +45,7 @@ func BrowserUseToolDefinition() openai.Tool {
 					},
 					"job_id": map[string]interface{}{
 						"type":        "string",
-						"description": "Job returned by run. Required for status and cancel.",
+						"description": "Job returned by run. Required for status, screenshot, and cancel.",
 					},
 					"allowed_domains": map[string]interface{}{
 						"type":        "array",
@@ -217,6 +219,60 @@ func (e *Engine) executeBrowserUseTool(args map[string]interface{}) (string, err
 			return "", fmt.Errorf("cancel browser-use job: %w", err)
 		}
 		return browserUseJobJSON(job)
+
+	case "screenshot":
+		jobID, err := browserUseRequiredString(args, "job_id")
+		if err != nil {
+			return "", err
+		}
+		screenshotService, ok := e.BrowserUse.(browseruse.ScreenshotService)
+		if !ok {
+			return "", fmt.Errorf("browser-use service does not support screenshots")
+		}
+		if e.Files == nil {
+			return "", fmt.Errorf("file store is not configured; cannot deliver browser screenshot")
+		}
+		requestContext, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		screenshot, err := screenshotService.Screenshot(requestContext, sessionID, jobID)
+		if err != nil {
+			return "", fmt.Errorf("take browser screenshot: %w", err)
+		}
+		if screenshot == nil || len(screenshot.Data) == 0 {
+			return "", fmt.Errorf("browser-use service returned an empty screenshot")
+		}
+		mimeType := strings.TrimSpace(screenshot.MIMEType)
+		if !strings.HasPrefix(mimeType, "image/") {
+			return "", fmt.Errorf("browser-use service returned invalid screenshot MIME type %q", mimeType)
+		}
+		name := strings.TrimSpace(screenshot.Name)
+		if name == "" {
+			name = "browser-" + jobID + ".png"
+		}
+		file, err := e.RecordUserFile(
+			sessionID,
+			name,
+			mimeType,
+			model.FileSourceGenerated,
+			screenshot.Data,
+		)
+		if err != nil {
+			return "", fmt.Errorf("save browser screenshot: %w", err)
+		}
+		return browserUseJSON(map[string]interface{}{
+			"ok":     true,
+			"job_id": jobID,
+			"screenshot": map[string]interface{}{
+				"file_id":   file.FileID,
+				"name":      file.Name,
+				"mime_type": file.MIMEType,
+				"size":      file.Size,
+			},
+			"delivery": map[string]interface{}{
+				"type":    "generated_user_file",
+				"file_id": file.FileID,
+			},
+		})
 
 	default:
 		return "", fmt.Errorf("unsupported browser-use action %q", action)

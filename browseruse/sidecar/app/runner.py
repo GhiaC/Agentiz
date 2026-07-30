@@ -7,6 +7,7 @@ from typing import Any
 
 from browser_use import Agent, BrowserProfile, BrowserSession
 
+from .artifacts import BrowserArtifacts
 from .config import Settings
 from .models import JobResult, StartJobRequest
 
@@ -15,6 +16,7 @@ class BrowserUseRunner:
 	def __init__(self, settings: Settings):
 		self.settings = settings
 		self.llm = self._create_llm()
+		self.artifacts = BrowserArtifacts(settings.data_dir)
 
 	async def run(self, session_id: str, job_id: str, request: StartJobRequest) -> JobResult:
 		session_key = hashlib.sha256(session_id.encode("utf-8")).hexdigest()
@@ -22,6 +24,7 @@ class BrowserUseRunner:
 		downloads_dir = self.settings.data_dir / "downloads" / job_id
 		profile_dir.mkdir(parents=True, exist_ok=True)
 		downloads_dir.mkdir(parents=True, exist_ok=True)
+		har_path, _ = self.artifacts.prepare(job_id)
 
 		profile = BrowserProfile(
 			executable_path=self.settings.executable_path,
@@ -33,6 +36,9 @@ class BrowserUseRunner:
 			block_ip_addresses=self.settings.block_ip_addresses,
 			chromium_sandbox=self.settings.chromium_sandbox,
 			keep_alive=False,
+			record_har_path=har_path,
+			record_har_content="omit",
+			record_har_mode="full",
 		)
 		browser = BrowserSession(browser_profile=profile)
 		agent = Agent(
@@ -44,7 +50,24 @@ class BrowserUseRunner:
 			enable_signal_handler=False,
 			calculate_cost=True,
 		)
-		history = await agent.run(max_steps=request.max_steps or self.settings.max_steps)
+
+		async def capture_latest_screenshot(_: Agent) -> None:
+			try:
+				data = await browser.take_screenshot(full_page=False, format="png")
+				self.artifacts.save_screenshot(job_id, data)
+			except Exception:
+				# Screenshot capture is best-effort and must never fail the browser task.
+				pass
+
+		try:
+			history = await agent.run(
+				max_steps=request.max_steps or self.settings.max_steps,
+				on_step_end=capture_latest_screenshot,
+			)
+		finally:
+			# browser-use's HAR writer includes headers even when response bodies
+			# are omitted. Strip sensitive fields before the artifact remains at rest.
+			self.artifacts.sanitize_har(job_id)
 		return JobResult(
 			final_result=_truncate(history.final_result() or "", 64_000),
 			done=history.is_done(),
@@ -56,6 +79,18 @@ class BrowserUseRunner:
 			actions=_bounded_actions(history.action_history()),
 			errors=_unique_strings(history.errors(), 100, 4_000),
 		)
+
+	def screenshot_available(self, job_id: str) -> bool:
+		return self.artifacts.screenshot_available(job_id)
+
+	def read_screenshot(self, job_id: str) -> bytes:
+		return self.artifacts.read_screenshot(job_id)
+
+	def network_loads(self, job_id: str, limit: int):
+		return self.artifacts.network_loads(job_id, limit)
+
+	def cleanup(self, job_id: str) -> None:
+		self.artifacts.cleanup(job_id)
 
 	def _allowed_domains(self, request: StartJobRequest) -> list[str] | None:
 		# A deployment-wide allowlist is authoritative. Callers can only provide a

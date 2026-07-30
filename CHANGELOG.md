@@ -29,6 +29,14 @@ API, security & observability hardening (improvement roadmap
   `MaxToolResultLength`.
 
 ### Added
+- **Browser debug console and screenshot delivery.** The protected debugger now
+  has a Browser tab with recent job state and bounded per-resource load
+  metadata. The sidecar captures a latest-step PNG and exposes an owner-scoped
+  `browser_use` `screenshot` action; Agentize stores it as a generated user
+  file. `ProcessMessageWithGeneratedFiles` lets host chat integrations attach
+  screenshots and other files generated during the same turn. Debug artifacts
+  strip request/response headers, cookies, POST data, and bodies before
+  remaining at rest.
 - **Deterministic Core workflows.** `execute_workflow` accepts an exact Core-tool
   DAG, calls no planner LLM, persists every task transition in `workflow_runs`,
   and requests approval for each immediate task. The admin dashboard exposes

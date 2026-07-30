@@ -129,6 +129,82 @@ func TestClientReturnsTypedAPIError(t *testing.T) {
 	}
 }
 
+func TestClientScreenshotUsesTrustedSessionAndReturnsImage(t *testing.T) {
+	t.Parallel()
+
+	httpClient := testHTTPClient(func(request *http.Request) (*http.Response, error) {
+		if request.Method != http.MethodGet || request.URL.Path != "/v1/jobs/job-1/screenshot" {
+			t.Fatalf("unexpected request: %s %s", request.Method, request.URL.Path)
+		}
+		if got := request.Header.Get(sessionHeader); got != "session-42" {
+			t.Fatalf("unexpected session header: %q", got)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"image/png"}},
+			Body:       io.NopCloser(bytes.NewReader([]byte("PNG"))),
+		}, nil
+	})
+	client, err := NewClient(Config{
+		BaseURL:    "http://browser-use.test",
+		Token:      "secret",
+		HTTPClient: httpClient,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	screenshot, err := client.Screenshot(context.Background(), "session-42", "job-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(screenshot.Data) != "PNG" || screenshot.MIMEType != "image/png" {
+		t.Fatalf("unexpected screenshot: %#v", screenshot)
+	}
+}
+
+func TestClientDebugRequestsBoundedMetadata(t *testing.T) {
+	t.Parallel()
+
+	httpClient := testHTTPClient(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Path != "/v1/debug/jobs" {
+			t.Fatalf("unexpected path: %s", request.URL.Path)
+		}
+		if request.URL.Query().Get("limit") != "100" || request.URL.Query().Get("load_limit") != "250" {
+			t.Fatalf("unexpected query: %s", request.URL.RawQuery)
+		}
+		return jsonResponse(http.StatusOK, `{
+			"total_jobs":1,
+			"running_jobs":0,
+			"max_jobs":1000,
+			"max_concurrent_jobs":2,
+			"jobs":[{
+				"id":"job-1",
+				"status":"succeeded",
+				"created_at":"2026-07-30T10:00:00Z",
+				"session_id":"session-42",
+				"task":"inspect",
+				"load_count":1,
+				"loads":[{"method":"GET","url":"https://example.com","status":200,"duration_ms":10,"bytes":42,"failed":false}]
+			}]
+		}`), nil
+	})
+	client, err := NewClient(Config{
+		BaseURL:    "http://browser-use.test",
+		Token:      "secret",
+		HTTPClient: httpClient,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := client.Debug(context.Background(), 1000, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.TotalJobs != 1 || len(snapshot.Jobs) != 1 || snapshot.Jobs[0].LoadCount != 1 {
+		t.Fatalf("unexpected snapshot: %#v", snapshot)
+	}
+}
+
 func TestNewClientRejectsUnsafeConfiguration(t *testing.T) {
 	t.Parallel()
 

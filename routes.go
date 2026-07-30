@@ -1,6 +1,8 @@
 package agentize
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -10,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ghiac/agentize/browseruse"
 	"github.com/ghiac/agentize/core"
 	"github.com/ghiac/agentize/debuger"
 	"github.com/ghiac/agentize/debuger/pages"
@@ -85,6 +88,8 @@ func (ag *Agentize) RegisterRoutes(router *gin.Engine) {
 	router.GET("/agentize/debug/documents/:fileID/raw", p(ag.handleDebugDocumentRaw))
 	router.GET("/agentize/debug/tool-calls", p(ag.handleDebugToolCalls))
 	router.GET("/agentize/debug/tool-calls/:toolID", p(ag.handleDebugToolCallDetail))
+	router.GET("/agentize/debug/browser", p(ag.handleDebugBrowser))
+	router.GET("/agentize/debug/browser/:jobID/screenshot", p(ag.handleDebugBrowserScreenshot))
 	router.GET("/agentize/debug/routes", p(ag.handleDebugRoutes))
 	router.GET("/agentize/debug/routes/:traceID", p(ag.handleDebugRouteDetail))
 	router.GET("/agentize/debug/summarized", p(ag.handleDebugSummarized))
@@ -724,6 +729,68 @@ func sanitizeContentDispositionName(name string) string {
 		return "file"
 	}
 	return strings.NewReplacer("\"", "", "\\", "", "\n", "", "\r", "").Replace(name)
+}
+
+// handleDebugBrowser renders recent browser jobs and network-load metadata from
+// an optional DebugService extension on the configured browser-use service.
+func (ag *Agentize) handleDebugBrowser(c *gin.Context) {
+	var snapshot *browseruse.DebugSnapshot
+	var fetchErr error
+	if ag.engine.BrowserUse == nil {
+		fetchErr = errors.New("browser-use is not configured")
+	} else if service, ok := ag.engine.BrowserUse.(browseruse.DebugService); ok {
+		ctx, cancel := context.WithTimeout(c.Request.Context(), 8*time.Second)
+		defer cancel()
+		snapshot, fetchErr = service.Debug(ctx, 20, 50)
+	} else {
+		fetchErr = errors.New("configured browser-use service does not expose debug metadata")
+	}
+
+	html := pages.RenderBrowserDebug(snapshot, fetchErr)
+	c.Header("Content-Type", "text/html; charset=utf-8")
+	c.String(http.StatusOK, html)
+}
+
+// handleDebugBrowserScreenshot proxies an owner-scoped sidecar screenshot for
+// the protected debugger. It never exposes the sidecar bearer token to clients.
+func (ag *Agentize) handleDebugBrowserScreenshot(c *gin.Context) {
+	jobID := c.Param("jobID")
+	sessionID := c.Query("session_id")
+	if jobID == "" || sessionID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "jobID and session_id are required"})
+		return
+	}
+	if ag.rawFileLimiter != nil && !ag.rawFileLimiter.allow(c.ClientIP()) {
+		c.Header("Retry-After", "6")
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": "rate limit exceeded for browser screenshots; slow down"})
+		return
+	}
+	service, ok := ag.engine.BrowserUse.(browseruse.ScreenshotService)
+	if !ok {
+		c.JSON(http.StatusNotImplemented, gin.H{"error": "browser screenshot service is not configured"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
+	defer cancel()
+	screenshot, err := service.Screenshot(ctx, sessionID, jobID)
+	if err != nil {
+		code := http.StatusBadGateway
+		var apiError *browseruse.APIError
+		if errors.As(err, &apiError) && apiError.StatusCode >= 400 && apiError.StatusCode < 600 {
+			code = apiError.StatusCode
+		}
+		c.JSON(code, gin.H{"error": err.Error()})
+		return
+	}
+	if screenshot == nil || len(screenshot.Data) == 0 || !strings.HasPrefix(screenshot.MIMEType, "image/") {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "browser sidecar returned an invalid screenshot"})
+		return
+	}
+	c.Header(
+		"Content-Disposition",
+		fmt.Sprintf(`inline; filename="%s"`, sanitizeContentDispositionName(screenshot.Name)),
+	)
+	c.Data(http.StatusOK, screenshot.MIMEType, screenshot.Data)
 }
 
 // handleDebugToolCalls handles tool calls list page requests

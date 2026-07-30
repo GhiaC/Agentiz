@@ -3,13 +3,17 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from typing import Protocol
 from uuid import uuid4
 
 from fastapi import HTTPException, status
 
 from .config import Settings
-from .models import JobResponse, JobResult, JobStatus, StartJobRequest
-from .runner import BrowserUseRunner
+from .models import BrowserDebugResponse, DebugJobResponse, JobResponse, JobResult, JobStatus, StartJobRequest
+
+
+class BrowserRunner(Protocol):
+	async def run(self, session_id: str, job_id: str, request: StartJobRequest) -> JobResult: ...
 
 
 @dataclass
@@ -39,7 +43,7 @@ class _Job:
 
 
 class JobManager:
-	def __init__(self, settings: Settings, runner: BrowserUseRunner):
+	def __init__(self, settings: Settings, runner: BrowserRunner):
 		self.settings = settings
 		self.runner = runner
 		self._jobs: dict[str, _Job] = {}
@@ -74,7 +78,7 @@ class JobManager:
 						await asyncio.wait_for(job.changed.wait(), timeout=remaining)
 					except TimeoutError:
 						break
-		return job.response()
+		return self._response(job)
 
 	async def cancel(self, session_id: str, job_id: str) -> JobResponse:
 		job = await self._owned_job(session_id, job_id)
@@ -89,7 +93,53 @@ class JobManager:
 			# never reaches _execute's CancelledError handler.
 			if not job.status.terminal:
 				await self._transition(job, JobStatus.CANCELLED)
-		return job.response()
+		return self._response(job)
+
+	async def screenshot(self, session_id: str, job_id: str) -> bytes:
+		job = await self._owned_job(session_id, job_id)
+		reader = getattr(self.runner, "read_screenshot", None)
+		if reader is None:
+			raise HTTPException(
+				status_code=status.HTTP_501_NOT_IMPLEMENTED,
+				detail="browser runner does not support screenshots",
+			)
+		try:
+			return reader(job.id)
+		except FileNotFoundError:
+			raise HTTPException(
+				status_code=status.HTTP_404_NOT_FOUND,
+				detail="no screenshot is available for this browser job yet",
+			) from None
+		except ValueError as exc:
+			raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc)) from exc
+
+	async def debug(self, job_limit: int, load_limit: int) -> BrowserDebugResponse:
+		async with self._jobs_lock:
+			jobs = sorted(self._jobs.values(), key=lambda item: item.created_at, reverse=True)[:job_limit]
+			total_jobs = len(self._jobs)
+			running_jobs = sum(1 for item in self._jobs.values() if not item.status.terminal)
+
+		debug_jobs: list[DebugJobResponse] = []
+		load_reader = getattr(self.runner, "network_loads", None)
+		for job in jobs:
+			load_count, loads = load_reader(job.id, load_limit) if load_reader is not None else (0, [])
+			response = self._response(job)
+			debug_jobs.append(
+				DebugJobResponse(
+					**response.model_dump(),
+					session_id=job.session_id,
+					task=_truncate(job.request.task, 2_000),
+					load_count=load_count,
+					loads=loads,
+				)
+			)
+		return BrowserDebugResponse(
+			total_jobs=total_jobs,
+			running_jobs=running_jobs,
+			max_jobs=self.settings.max_jobs,
+			max_concurrent_jobs=self.settings.max_concurrent_jobs,
+			jobs=debug_jobs,
+		)
 
 	async def shutdown(self) -> None:
 		async with self._jobs_lock:
@@ -140,6 +190,13 @@ class JobManager:
 			raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="browser job not found")
 		return job
 
+	def _response(self, job: _Job) -> JobResponse:
+		response = job.response()
+		checker = getattr(self.runner, "screenshot_available", None)
+		if checker is not None:
+			response.screenshot_available = bool(checker(job.id))
+		return response
+
 	def _prune_locked(self) -> None:
 		cutoff = datetime.now(UTC) - timedelta(seconds=self.settings.job_ttl_seconds)
 		expired = [
@@ -149,6 +206,9 @@ class JobManager:
 		]
 		for job_id in expired:
 			del self._jobs[job_id]
+			cleanup = getattr(self.runner, "cleanup", None)
+			if cleanup is not None:
+				cleanup(job_id)
 		active_sessions = {job.session_id for job in self._jobs.values()}
 		for session_id in list(self._session_locks):
 			if session_id not in active_sessions:
@@ -160,3 +220,7 @@ def _safe_error(error: Exception) -> str:
 	if len(message) > 4_000:
 		return message[:4_000] + "..."
 	return message
+
+
+def _truncate(value: str, limit: int) -> str:
+	return value if len(value) <= limit else value[:limit] + "..."

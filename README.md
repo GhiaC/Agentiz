@@ -16,12 +16,12 @@ a standalone CLI/server).
 - 💬 **Sessions & summarization** — persistent sessions with a background rolling-window summarizer
 - 🗄️ **Pluggable storage** — SQLite (default) or MongoDB behind one `store.Store` interface
 - 📎 **User files & image editing** — record uploads, `manage_files` tool, optional OpenRouter image edits
-- 🌐 **Isolated browser automation** — optional Dockerized `browser-use` sidecar with asynchronous, session-owned jobs
+- 🌐 **Isolated browser automation** — optional Dockerized `browser-use` sidecar with asynchronous, session-owned jobs, load tracing, and user-deliverable screenshots
 - ✅ **Human-approved tools** — every tool call can pause for a durable approve/reject decision before execution
 - 🔀 **Deterministic workflows** — durable Core-tool DAGs without a planner LLM, including scheduled state machines
 - ⏱️ **Memory-isolated schedules** — every prompt/workflow schedule owns a dedicated persistent session
 - 📊 **Observability** — ~30 Prometheus metrics + two Grafana dashboards (see [docs/METRICS.md](docs/METRICS.md))
-- 🛠️ **Debug dashboard** — users, sessions, schedules, workflow DAGs, messages, files, tool calls, routing DAGs, and summaries — behind admin auth
+- 🛠️ **Debug dashboard** — users, sessions, browser loads/screenshots, schedules, workflow DAGs, messages, files, tool calls, routing DAGs, and summaries — behind admin auth
 
 ## 🚀 Installation
 

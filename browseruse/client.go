@@ -15,25 +15,34 @@ import (
 )
 
 const (
-	defaultMaxResponseBytes = int64(2 << 20)
-	sessionHeader           = "X-Agentize-Session-ID"
+	defaultMaxResponseBytes   = int64(2 << 20)
+	defaultMaxScreenshotBytes = int64(10 << 20)
+	sessionHeader             = "X-Agentize-Session-ID"
 )
 
 // Config configures the HTTP sidecar client.
 type Config struct {
-	BaseURL          string
-	Token            string
-	HTTPClient       *http.Client
-	MaxResponseBytes int64
+	BaseURL            string
+	Token              string
+	HTTPClient         *http.Client
+	MaxResponseBytes   int64
+	MaxScreenshotBytes int64
 }
 
 // Client is an HTTP implementation of Service.
 type Client struct {
-	baseURL          *url.URL
-	token            string
-	httpClient       *http.Client
-	maxResponseBytes int64
+	baseURL            *url.URL
+	token              string
+	httpClient         *http.Client
+	maxResponseBytes   int64
+	maxScreenshotBytes int64
 }
+
+var (
+	_ Service           = (*Client)(nil)
+	_ ScreenshotService = (*Client)(nil)
+	_ DebugService      = (*Client)(nil)
+)
 
 // APIError is returned for a non-2xx response from the sidecar.
 type APIError struct {
@@ -76,12 +85,17 @@ func NewClient(config Config) (*Client, error) {
 	if maxResponseBytes <= 0 {
 		maxResponseBytes = defaultMaxResponseBytes
 	}
+	maxScreenshotBytes := config.MaxScreenshotBytes
+	if maxScreenshotBytes <= 0 {
+		maxScreenshotBytes = defaultMaxScreenshotBytes
+	}
 
 	return &Client{
-		baseURL:          baseURL,
-		token:            token,
-		httpClient:       httpClient,
-		maxResponseBytes: maxResponseBytes,
+		baseURL:            baseURL,
+		token:              token,
+		httpClient:         httpClient,
+		maxResponseBytes:   maxResponseBytes,
+		maxScreenshotBytes: maxScreenshotBytes,
 	}, nil
 }
 
@@ -135,6 +149,56 @@ func (c *Client) Cancel(ctx context.Context, sessionID, jobID string) (*Job, err
 		return nil, err
 	}
 	return &job, nil
+}
+
+// Screenshot returns the latest PNG captured for a browser job.
+func (c *Client) Screenshot(ctx context.Context, sessionID, jobID string) (*Screenshot, error) {
+	path, err := jobPath(jobID)
+	if err != nil {
+		return nil, err
+	}
+	payload, contentType, err := c.doBytes(
+		ctx,
+		http.MethodGet,
+		path+"/screenshot",
+		sessionID,
+		c.maxScreenshotBytes,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if contentType == "" {
+		contentType = "image/png"
+	}
+	return &Screenshot{
+		Data:     payload,
+		Name:     "browser-" + jobID + ".png",
+		MIMEType: contentType,
+	}, nil
+}
+
+// Debug returns recent browser jobs and bounded network-load metadata for the
+// protected Agentize debugger.
+func (c *Client) Debug(ctx context.Context, jobLimit, loadLimit int) (*DebugSnapshot, error) {
+	if jobLimit < 1 {
+		jobLimit = 20
+	}
+	if jobLimit > 100 {
+		jobLimit = 100
+	}
+	if loadLimit < 0 {
+		loadLimit = 0
+	}
+	if loadLimit > 250 {
+		loadLimit = 250
+	}
+	path := "/v1/debug/jobs?limit=" + strconv.Itoa(jobLimit) +
+		"&load_limit=" + strconv.Itoa(loadLimit)
+	var snapshot DebugSnapshot
+	if err := c.do(ctx, http.MethodGet, path, "", nil, &snapshot); err != nil {
+		return nil, err
+	}
+	return &snapshot, nil
 }
 
 func jobPath(jobID string) (string, error) {
@@ -211,6 +275,50 @@ func (c *Client) do(
 		return fmt.Errorf("decode browser-use response: %w", err)
 	}
 	return nil
+}
+
+func (c *Client) doBytes(
+	ctx context.Context,
+	method, path, sessionID string,
+	maxBytes int64,
+) ([]byte, string, error) {
+	endpoint := *c.baseURL
+	endpoint.Path = strings.TrimRight(c.baseURL.Path, "/") + path
+	request, err := http.NewRequestWithContext(ctx, method, endpoint.String(), nil)
+	if err != nil {
+		return nil, "", fmt.Errorf("create browser-use request: %w", err)
+	}
+	request.Header.Set("Accept", "image/png")
+	request.Header.Set("Authorization", "Bearer "+c.token)
+	if sessionID != "" {
+		request.Header.Set(sessionHeader, sessionID)
+	}
+
+	response, err := c.httpClient.Do(request)
+	if err != nil {
+		return nil, "", fmt.Errorf("call browser-use service: %w", err)
+	}
+	defer response.Body.Close()
+
+	limited := io.LimitReader(response.Body, maxBytes+1)
+	payload, err := io.ReadAll(limited)
+	if err != nil {
+		return nil, "", fmt.Errorf("read browser-use response: %w", err)
+	}
+	if int64(len(payload)) > maxBytes {
+		return nil, "", errors.New("browser-use screenshot exceeded configured size limit")
+	}
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		return nil, "", decodeAPIError(response.StatusCode, payload)
+	}
+	if len(payload) == 0 {
+		return nil, "", errors.New("browser-use screenshot response was empty")
+	}
+	contentType := strings.TrimSpace(strings.Split(response.Header.Get("Content-Type"), ";")[0])
+	if !strings.HasPrefix(contentType, "image/") {
+		return nil, "", fmt.Errorf("browser-use screenshot returned unexpected content type %q", contentType)
+	}
+	return payload, contentType, nil
 }
 
 func decodeAPIError(statusCode int, payload []byte) error {

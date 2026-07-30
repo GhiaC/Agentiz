@@ -139,3 +139,19 @@ func TestAppendUploadedFilesNote(t *testing.T) {
 		t.Errorf("note should preserve the original message, got %q", got)
 	}
 }
+
+func TestGeneratedUserFilesSinceReturnsOnlyNewGeneratedFiles(t *testing.T) {
+	before := []*model.UserFile{
+		{FileID: "old-generated", Source: model.FileSourceGenerated},
+		{FileID: "old-upload", Source: model.FileSourceUploaded},
+	}
+	after := []*model.UserFile{
+		{FileID: "new-upload", Source: model.FileSourceUploaded},
+		{FileID: "new-screenshot", Source: model.FileSourceGenerated, MIMEType: "image/png"},
+		{FileID: "old-generated", Source: model.FileSourceGenerated},
+	}
+	got := generatedUserFilesSince(before, after)
+	if len(got) != 1 || got[0].FileID != "new-screenshot" {
+		t.Fatalf("unexpected generated files: %+v", got)
+	}
+}

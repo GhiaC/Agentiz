@@ -68,6 +68,34 @@ class JobResponse(BaseModel):
 	completed_at: datetime | None = None
 	result: JobResult | None = None
 	error: str = ""
+	screenshot_available: bool = False
+
+
+class BrowserLoad(BaseModel):
+	started_at: datetime | None = None
+	duration_ms: float = 0
+	method: str = "GET"
+	url: str = ""
+	status: int = 0
+	status_text: str = ""
+	mime_type: str = ""
+	bytes: int = 0
+	failed: bool = False
+
+
+class DebugJobResponse(JobResponse):
+	session_id: str
+	task: str
+	load_count: int = 0
+	loads: list[BrowserLoad] = Field(default_factory=list)
+
+
+class BrowserDebugResponse(BaseModel):
+	total_jobs: int
+	running_jobs: int
+	max_jobs: int
+	max_concurrent_jobs: int
+	jobs: list[DebugJobResponse] = Field(default_factory=list)
 
 
 class HealthResponse(BaseModel):

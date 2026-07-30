@@ -579,6 +579,50 @@ func (ag *Agentize) ProcessMessage(ctx context.Context, sessionID string, userMe
 	return ag.engine.ProcessMessage(ctx, sessionID, userMessage)
 }
 
+// ProcessMessageWithGeneratedFiles processes a message and also returns any
+// files generated during that turn. Chat/bot integrations can use this entry
+// point to attach browser screenshots and other generated artifacts to the user
+// response by reading each file through ReadUserFile.
+func (ag *Agentize) ProcessMessageWithGeneratedFiles(
+	ctx context.Context,
+	sessionID string,
+	userMessage string,
+) (string, int, []*model.UserFile, error) {
+	before, beforeErr := ag.GetSessionStore().GetUserFilesBySession(sessionID)
+	if beforeErr != nil {
+		return "", 0, nil, fmt.Errorf("list session files before message: %w", beforeErr)
+	}
+	response, tokens, processErr := ag.ProcessMessage(ctx, sessionID, userMessage)
+	after, afterErr := ag.GetSessionStore().GetUserFilesBySession(sessionID)
+	if afterErr != nil {
+		if processErr != nil {
+			return response, tokens, nil, processErr
+		}
+		return response, tokens, nil, fmt.Errorf("list session files after message: %w", afterErr)
+	}
+	return response, tokens, generatedUserFilesSince(before, after), processErr
+}
+
+func generatedUserFilesSince(before, after []*model.UserFile) []*model.UserFile {
+	existing := make(map[string]struct{}, len(before))
+	for _, file := range before {
+		if file != nil {
+			existing[file.FileID] = struct{}{}
+		}
+	}
+	generated := make([]*model.UserFile, 0)
+	for _, file := range after {
+		if file == nil || file.Source != model.FileSourceGenerated {
+			continue
+		}
+		if _, found := existing[file.FileID]; found {
+			continue
+		}
+		generated = append(generated, file)
+	}
+	return generated
+}
+
 // UploadedFile describes a file the user sent alongside a message. Data holds the
 // raw bytes; MIMEType is optional and detected from the name/content when empty.
 type UploadedFile struct {
