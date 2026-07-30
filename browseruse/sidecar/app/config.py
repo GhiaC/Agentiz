@@ -39,6 +39,14 @@ def _csv(name: str) -> tuple[str, ...]:
 	return tuple(item.strip() for item in os.getenv(name, "").split(",") if item.strip())
 
 
+def _proxy_url() -> str | None:
+	for name in ("BROWSER_USE_PROXY_URL", "http_proxy", "HTTP_PROXY"):
+		value = os.getenv(name, "").strip()
+		if value:
+			return value
+	return None
+
+
 @dataclass(frozen=True)
 class Settings:
 	service_token: str
@@ -58,6 +66,7 @@ class Settings:
 	default_use_vision: bool
 	allowed_domains: tuple[str, ...]
 	prohibited_domains: tuple[str, ...]
+	proxy_url: str | None
 
 	@classmethod
 	def from_environment(cls) -> "Settings":
@@ -87,4 +96,5 @@ class Settings:
 			default_use_vision=_boolean("BROWSER_USE_DEFAULT_USE_VISION", True),
 			allowed_domains=_csv("BROWSER_USE_ALLOWED_DOMAINS"),
 			prohibited_domains=_csv("BROWSER_USE_PROHIBITED_DOMAINS"),
+			proxy_url=_proxy_url(),
 		)

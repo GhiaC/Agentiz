@@ -33,6 +33,7 @@ def settings() -> Settings:
 		default_use_vision=False,
 		allowed_domains=(),
 		prohibited_domains=(),
+		proxy_url=None,
 	)
 
 

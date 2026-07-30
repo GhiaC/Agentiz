@@ -36,6 +36,7 @@ class BrowserUseRunner:
 			block_ip_addresses=self.settings.block_ip_addresses,
 			chromium_sandbox=self.settings.chromium_sandbox,
 			keep_alive=False,
+			proxy={"server": self.settings.proxy_url} if self.settings.proxy_url else None,
 			record_har_path=har_path,
 			record_har_content="omit",
 			record_har_mode="full",

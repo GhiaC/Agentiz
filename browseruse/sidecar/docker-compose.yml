@@ -15,6 +15,12 @@ services:
     env_file:
       - path: ${BROWSER_USE_ENV_FILE:-.env}
         required: true
+    environment:
+      # Forward host proxy settings as well as values in the selected env file.
+      # The sidecar prefers BROWSER_USE_PROXY_URL, then http_proxy, then HTTP_PROXY.
+      BROWSER_USE_PROXY_URL: ${BROWSER_USE_PROXY_URL:-}
+      http_proxy: ${http_proxy:-}
+      HTTP_PROXY: ${HTTP_PROXY:-}
     ports:
       - "${BROWSER_USE_BIND_ADDRESS:-127.0.0.1}:${BROWSER_USE_PORT:-8087}:8087"
     volumes:
