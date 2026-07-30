@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import mimetypes
@@ -7,6 +8,7 @@ import os
 import shutil
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from browser_use import Agent, BrowserProfile, BrowserSession
 
@@ -67,8 +69,15 @@ class BrowserUseRunner:
 			file_system_path=str(uploads_dir),
 		)
 
-		async def capture_latest_screenshot(_: Agent) -> None:
+		async def capture_latest_screenshot(agent: Agent) -> None:
 			try:
+				state = await agent.browser_session.get_browser_state_summary()
+				if not _is_web_page(state.url):
+					return
+				# Give the active page a short paint window. Without this, the first
+				# callback can capture browser-use's own blank startup tab instead of
+				# the page opened by the preceding browser action.
+				await asyncio.sleep(0.25)
 				data = await browser.take_screenshot(full_page=False, format="png")
 				self.artifacts.save_screenshot(job_id, data)
 			except Exception:
@@ -235,6 +244,11 @@ class BrowserUseRunner:
 
 def _truncate(value: str, limit: int) -> str:
 	return value if len(value) <= limit else value[:limit] + "..."
+
+
+def _is_web_page(value: str | None) -> bool:
+	parsed = urlparse(value or "")
+	return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
 
 def _required_key(name: str) -> str:
