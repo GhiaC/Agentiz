@@ -8,7 +8,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from .config import Settings
 from .jobs import JobManager
-from .models import BrowserDebugResponse, BrowserDownloadsResponse, HealthResponse, JobResponse, StartJobRequest
+from .models import BrowserDebugResponse, BrowserDownloadsResponse, BrowserTabsResponse, HealthResponse, JobResponse, StartJobRequest
 from .runner import BrowserUseRunner
 
 
@@ -143,3 +143,26 @@ async def get_job_download(
 ) -> Response:
 	download, data = await manager.download(session_id, job_id, name)
 	return Response(content=data, media_type=download.mime_type)
+
+
+@app.get(
+	"/v1/tabs",
+	response_model=BrowserTabsResponse,
+	dependencies=[Depends(require_auth)],
+)
+async def list_tabs(
+	session_id: str = Depends(require_session),
+) -> BrowserTabsResponse:
+	return BrowserTabsResponse(tabs=await manager.tabs(session_id))
+
+
+@app.post(
+	"/v1/tabs/{tab_id}/close",
+	response_model=BrowserTabsResponse,
+	dependencies=[Depends(require_auth)],
+)
+async def close_tab(
+	tab_id: str,
+	session_id: str = Depends(require_session),
+) -> BrowserTabsResponse:
+	return BrowserTabsResponse(tabs=await manager.close_tab(session_id, tab_id))

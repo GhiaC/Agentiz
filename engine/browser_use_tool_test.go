@@ -30,6 +30,10 @@ type fakeBrowserUseService struct {
 	downloadName      string
 	downloads         []browseruse.Download
 	download          *browseruse.DownloadFile
+	tabsSession       string
+	closeTabSession   string
+	closeTabID        string
+	tabs              []browseruse.BrowserTab
 }
 
 func (f *fakeBrowserUseService) Health(context.Context) error { return nil }
@@ -90,6 +94,23 @@ func (f *fakeBrowserUseService) Download(
 	f.downloadJobID = jobID
 	f.downloadName = name
 	return f.download, nil
+}
+
+func (f *fakeBrowserUseService) Tabs(
+	_ context.Context,
+	sessionID string,
+) ([]browseruse.BrowserTab, error) {
+	f.tabsSession = sessionID
+	return f.tabs, nil
+}
+
+func (f *fakeBrowserUseService) CloseTab(
+	_ context.Context,
+	sessionID, tabID string,
+) ([]browseruse.BrowserTab, error) {
+	f.closeTabSession = sessionID
+	f.closeTabID = tabID
+	return f.tabs, nil
 }
 
 func TestBrowserUseToolRunUsesTrustedSessionAndReturnsNextAction(t *testing.T) {
@@ -303,6 +324,36 @@ func TestBrowserUseToolDeliversBrowserDownload(t *testing.T) {
 	}
 }
 
+func TestBrowserUseToolListsAndClosesPersistentTabs(t *testing.T) {
+	t.Parallel()
+
+	service := &fakeBrowserUseService{
+		tabs: []browseruse.BrowserTab{{ID: "tab-1", URL: "https://example.com", Active: true}},
+	}
+	engine := &Engine{Functions: model.NewFunctionRegistry(), BrowserUse: service}
+	engine.RegisterBrowserUseTool()
+
+	listed, err := engine.executeBrowserUseTool(map[string]interface{}{
+		"action": "tabs", "__session_id__": "session-tabs",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if service.tabsSession != "session-tabs" || !strings.Contains(listed, "tab-1") {
+		t.Fatalf("unexpected tabs result: session=%q result=%s", service.tabsSession, listed)
+	}
+
+	closed, err := engine.executeBrowserUseTool(map[string]interface{}{
+		"action": "close_tab", "tab_id": "tab-1", "__session_id__": "session-tabs",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if service.closeTabSession != "session-tabs" || service.closeTabID != "tab-1" || !strings.Contains(closed, "closed_tab_id") {
+		t.Fatalf("unexpected close result: %#v result=%s", service, closed)
+	}
+}
+
 func TestBrowserUseToolDefinitionDeclaresActions(t *testing.T) {
 	t.Parallel()
 
@@ -326,7 +377,7 @@ func TestBrowserUseToolDefinitionDeclaresActions(t *testing.T) {
 	if !ok {
 		t.Fatalf("unexpected action enum: %#v", action["enum"])
 	}
-	foundScreenshot, foundDownloads, foundDownload := false, false, false
+	foundScreenshot, foundDownloads, foundDownload, foundTabs, foundCloseTab := false, false, false, false, false
 	for _, value := range actions {
 		switch value {
 		case "screenshot":
@@ -335,10 +386,13 @@ func TestBrowserUseToolDefinitionDeclaresActions(t *testing.T) {
 			foundDownloads = true
 		case "download":
 			foundDownload = true
-			break
+		case "tabs":
+			foundTabs = true
+		case "close_tab":
+			foundCloseTab = true
 		}
 	}
-	if !foundScreenshot || !foundDownloads || !foundDownload {
+	if !foundScreenshot || !foundDownloads || !foundDownload || !foundTabs || !foundCloseTab {
 		t.Fatalf("browser artifact actions missing from %#v", actions)
 	}
 }

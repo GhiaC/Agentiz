@@ -134,7 +134,9 @@ func agentToolPromptDescription(name string) string {
 			"upload session files, download files, and capture screenshots. Delegate web research, website testing, " +
 			"login/form workflows, or browser-based data extraction to an agent with this tool. The agent starts work " +
 			"with `action=run` and a precise `task`; it can then use the returned job ID with `status`, `screenshot`, " +
-			"`downloads`, `download`, or `cancel`. Use `file_ids` on `run` when user files must be uploaded to a site."
+			"`downloads`, `download`, or `cancel`. The browser session and open tabs persist between runs; use " +
+			"`tabs` for a current tab snapshot and `close_tab` with a returned `tab_id` to close one. Use `file_ids` " +
+			"on `run` when user files must be uploaded to a site."
 	default:
 		return ""
 	}

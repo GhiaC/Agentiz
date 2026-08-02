@@ -30,16 +30,17 @@ func BrowserUseToolDefinition() openai.Tool {
 			Description: "Run and inspect autonomous web-browser tasks in the isolated browser-use service. " +
 				"Use run with a precise task; the browser agent can search, navigate/back, wait, click, type, upload session files supplied through file_ids, scroll, find text, send keys, run page JavaScript, switch/close tabs, extract content, inspect/select dropdowns, take visual screenshots, and read/write/replace task files. " +
 				"It can complete research, data extraction, login and form workflows, testing, and browser downloads. It returns the completed result when possible or a job_id for later status calls. " +
+				"Browser sessions and their open tabs persist between run calls for the same Agentize session. Use tabs to inspect the current tab snapshot and close_tab to explicitly close one tab. " +
 				"Use screenshot with a job_id to save the latest captured browser view as a generated user image that the host can attach to the reply. " +
 				"Use downloads to list files the browser downloaded, then download to save one selected file as a generated user file. " +
-				"Use cancel to stop unneeded work. Browser profiles persist per Agentize session. " +
-				"Actions: run, status, screenshot, downloads, download, cancel.",
+				"Use cancel to stop unneeded work; cancel does not close the persistent browser session. " +
+				"Actions: run, status, tabs, close_tab, screenshot, downloads, download, cancel.",
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
 					"action": map[string]interface{}{
 						"type": "string",
-						"enum": []string{"run", "status", "screenshot", "downloads", "download", "cancel"},
+						"enum": []string{"run", "status", "tabs", "close_tab", "screenshot", "downloads", "download", "cancel"},
 					},
 					"task": map[string]interface{}{
 						"type":        "string",
@@ -54,6 +55,10 @@ func BrowserUseToolDefinition() openai.Tool {
 					"job_id": map[string]interface{}{
 						"type":        "string",
 						"description": "Job returned by run. Required for status, screenshot, downloads, download, and cancel.",
+					},
+					"tab_id": map[string]interface{}{
+						"type":        "string",
+						"description": "Tab ID returned by tabs. Required for close_tab.",
 					},
 					"file_name": map[string]interface{}{
 						"type":        "string",
@@ -236,6 +241,43 @@ func (e *Engine) executeBrowserUseTool(args map[string]interface{}) (string, err
 			return "", fmt.Errorf("cancel browser-use job: %w", err)
 		}
 		return browserUseJobJSON(job)
+
+	case "tabs":
+		tabService, ok := e.BrowserUse.(browseruse.TabService)
+		if !ok {
+			return "", fmt.Errorf("browser-use service does not support persistent tabs")
+		}
+		requestContext, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		tabs, err := tabService.Tabs(requestContext, sessionID)
+		if err != nil {
+			return "", fmt.Errorf("list browser tabs: %w", err)
+		}
+		return browserUseJSON(map[string]interface{}{
+			"ok":   true,
+			"tabs": tabs,
+		})
+
+	case "close_tab":
+		tabID, err := browserUseRequiredString(args, "tab_id")
+		if err != nil {
+			return "", err
+		}
+		tabService, ok := e.BrowserUse.(browseruse.TabService)
+		if !ok {
+			return "", fmt.Errorf("browser-use service does not support persistent tabs")
+		}
+		requestContext, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		tabs, err := tabService.CloseTab(requestContext, sessionID, tabID)
+		if err != nil {
+			return "", fmt.Errorf("close browser tab: %w", err)
+		}
+		return browserUseJSON(map[string]interface{}{
+			"ok":            true,
+			"closed_tab_id": tabID,
+			"tabs":          tabs,
+		})
 
 	case "screenshot":
 		jobID, err := browserUseRequiredString(args, "job_id")

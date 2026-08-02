@@ -77,7 +77,7 @@ The array, in build order:
 |---|---------|--------|-----------|-----------|
 | 1 | **Core Controller** (rules, hard constraints, decision flow) | `core_controller.md`, embedded ([core/core.go:21](../core/core.go)) | nothing | **static** |
 | 2 | **Available Agents** (table: name, desc, cost tier, capabilities, knowledge) | `agents.BuildAgentsDescriptionPrompt()` ([agentmanager/prompt.go:29](../agentmanager/prompt.go)) | registered agents | static per deployment |
-| 3 | **Registered Agent Tools** (union of all agents' tool names) | `agents.BuildAgentToolsPrompt()` ([agentmanager/prompt.go:89](../agentmanager/prompt.go)) | registered agents | static per deployment |
+| 3 | **Registered Agent Tools** (union of all agent tools with routing guidance for capabilities such as `browser_use`) | `agents.BuildAgentToolsPrompt()` ([agentmanager/prompt.go:89](../agentmanager/prompt.go)) | registered agents | static per deployment |
 | 4 | **Core Session Context** (Summary + Tags of *this user's* Core session) | `buildCoreSessionContext()` ([core/session.go:109](../core/session.go)) | user, summarization | **dynamic** |
 | 5 | **Agent Session Contexts** (Summary + Tags of each agent's active session) | `agents.BuildAllSessionContextsPrompt()` ([agentmanager/prompt.go:335](../agentmanager/prompt.go)) | user, summarization | **dynamic** |
 | 6 | **User Files** (compact table of the user's uploaded/generated files) | `buildUserFilesPrompt()` ([core/llm.go](../core/llm.go)) | user, file uploads | **dynamic** |
@@ -119,6 +119,19 @@ Source) of the user's uploaded/generated files, capped at
 file's **ID and name** in the `call_agent_*` message rather than pasting bytes; the
 worker agent then reads it on demand via its own file tool. Files are user-scoped, so
 any of the user's agents can resolve the ID.
+
+Configure one shared per-user file manager after registering the agents:
+
+```go
+ag.ShareFileManagerWithCore(coreHandler)
+```
+
+For a chatbot that must attach screenshots or other generated files, use
+`CoreHandler.ProcessMessageWithGeneratedFiles` instead of parsing `file_id`
+text from the model response. The method detects files created by worker-agent
+sessions during the turn. Attachment transport remains the host bot's
+responsibility; `Agentize.DeliverGeneratedFiles` provides the owner-checked
+delivery callback. See [FILE_MANAGER.md](FILE_MANAGER.md).
 
 ### How a section is built (example: Core Session Context)
 

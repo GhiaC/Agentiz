@@ -45,6 +45,7 @@ var (
 	_ Service           = (*Client)(nil)
 	_ ScreenshotService = (*Client)(nil)
 	_ DownloadService   = (*Client)(nil)
+	_ TabService        = (*Client)(nil)
 	_ DebugService      = (*Client)(nil)
 )
 
@@ -233,6 +234,33 @@ func (c *Client) Download(ctx context.Context, sessionID, jobID, name string) (*
 	return &DownloadFile{Download: Download{Name: name, MIMEType: contentType, Size: int64(len(payload))}, Data: payload}, nil
 }
 
+// Tabs returns the current tabs for a persistent browser session.
+func (c *Client) Tabs(ctx context.Context, sessionID string) ([]BrowserTab, error) {
+	var response struct {
+		Tabs []BrowserTab `json:"tabs"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/v1/tabs", sessionID, nil, &response); err != nil {
+		return nil, err
+	}
+	return response.Tabs, nil
+}
+
+// CloseTab closes one tab in a persistent browser session and returns the
+// remaining tab snapshot.
+func (c *Client) CloseTab(ctx context.Context, sessionID, tabID string) ([]BrowserTab, error) {
+	tabID, err := tabPath(tabID)
+	if err != nil {
+		return nil, err
+	}
+	var response struct {
+		Tabs []BrowserTab `json:"tabs"`
+	}
+	if err := c.do(ctx, http.MethodPost, "/v1/tabs/"+url.PathEscape(tabID)+"/close", sessionID, nil, &response); err != nil {
+		return nil, err
+	}
+	return response.Tabs, nil
+}
+
 // Debug returns recent browser jobs and bounded network-load metadata for the
 // protected Agentize debugger.
 func (c *Client) Debug(ctx context.Context, jobLimit, loadLimit int) (*DebugSnapshot, error) {
@@ -271,6 +299,22 @@ func jobPath(jobID string) (string, error) {
 		}
 	}
 	return "/v1/jobs/" + jobID, nil
+}
+
+func tabPath(tabID string) (string, error) {
+	tabID = strings.TrimSpace(tabID)
+	if tabID == "" {
+		return "", errors.New("browser-use tab ID is required")
+	}
+	for _, char := range tabID {
+		if (char < 'a' || char > 'z') &&
+			(char < 'A' || char > 'Z') &&
+			(char < '0' || char > '9') &&
+			char != '-' && char != '_' {
+			return "", errors.New("browser-use tab ID contains invalid characters")
+		}
+	}
+	return tabID, nil
 }
 
 func downloadName(name string) (string, error) {

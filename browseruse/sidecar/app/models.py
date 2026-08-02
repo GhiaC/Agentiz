@@ -47,6 +47,15 @@ class BrowserUpload(BaseModel):
 		return value
 
 
+class BrowserTab(BaseModel):
+	"""Safe metadata for one tab in a persistent browser session."""
+
+	id: str = Field(min_length=1, max_length=255)
+	url: str = Field(default="", max_length=2_000)
+	title: str = Field(default="", max_length=500)
+	active: bool = False
+
+
 class StartJobRequest(BaseModel):
 	model_config = ConfigDict(extra="forbid")
 
@@ -87,6 +96,7 @@ class JobResult(BaseModel):
 	action_names: list[str] = Field(default_factory=list)
 	actions: list[dict[str, Any]] = Field(default_factory=list)
 	errors: list[str] = Field(default_factory=list)
+	tabs: list[BrowserTab] = Field(default_factory=list)
 
 
 class JobResponse(BaseModel):
@@ -120,6 +130,10 @@ class BrowserDownload(BaseModel):
 
 class BrowserDownloadsResponse(BaseModel):
 	files: list[BrowserDownload] = Field(default_factory=list)
+
+
+class BrowserTabsResponse(BaseModel):
+	tabs: list[BrowserTab] = Field(default_factory=list)
 
 
 class DebugJobResponse(JobResponse):

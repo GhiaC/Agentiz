@@ -9,7 +9,16 @@ from uuid import uuid4
 from fastapi import HTTPException, status
 
 from .config import Settings
-from .models import BrowserDebugResponse, BrowserDownload, DebugJobResponse, JobResponse, JobResult, JobStatus, StartJobRequest
+from .models import (
+	BrowserDebugResponse,
+	BrowserDownload,
+	BrowserTab,
+	DebugJobResponse,
+	JobResponse,
+	JobResult,
+	JobStatus,
+	StartJobRequest,
+)
 
 
 class BrowserRunner(Protocol):
@@ -132,6 +141,25 @@ class JobManager:
 		except ValueError as exc:
 			raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc)) from exc
 
+	async def tabs(self, session_id: str) -> list[BrowserTab]:
+		lister = getattr(self.runner, "tabs", None)
+		if lister is None:
+			raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail="browser runner does not support tabs")
+		lock = await self._session_lock(session_id)
+		async with lock:
+			return await lister(session_id)
+
+	async def close_tab(self, session_id: str, tab_id: str) -> list[BrowserTab]:
+		closer = getattr(self.runner, "close_tab", None)
+		if closer is None:
+			raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail="browser runner does not support tabs")
+		lock = await self._session_lock(session_id)
+		async with lock:
+			try:
+				return await closer(session_id, tab_id)
+			except KeyError:
+				raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="browser tab not found") from None
+
 	async def debug(self, job_limit: int, load_limit: int) -> BrowserDebugResponse:
 		async with self._jobs_lock:
 			jobs = sorted(self._jobs.values(), key=lambda item: item.created_at, reverse=True)[:job_limit]
@@ -167,6 +195,9 @@ class JobManager:
 			task.cancel()
 		if tasks:
 			await asyncio.gather(*tasks, return_exceptions=True)
+		shutdown_runner = getattr(self.runner, "shutdown", None)
+		if shutdown_runner is not None:
+			await shutdown_runner()
 
 	async def _execute(self, job: _Job) -> None:
 		try:
@@ -209,6 +240,10 @@ class JobManager:
 			raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="browser job not found")
 		return job
 
+	async def _session_lock(self, session_id: str) -> asyncio.Lock:
+		async with self._jobs_lock:
+			return self._session_locks.setdefault(session_id, asyncio.Lock())
+
 	def _response(self, job: _Job) -> JobResponse:
 		response = job.response()
 		checker = getattr(self.runner, "screenshot_available", None)
@@ -229,8 +264,10 @@ class JobManager:
 			if cleanup is not None:
 				cleanup(job_id)
 		active_sessions = {job.session_id for job in self._jobs.values()}
+		has_session = getattr(self.runner, "has_session", None)
 		for session_id in list(self._session_locks):
-			if session_id not in active_sessions:
+			persistent = bool(has_session(session_id)) if has_session is not None else False
+			if session_id not in active_sessions and not persistent:
 				del self._session_locks[session_id]
 
 

@@ -31,6 +31,14 @@ type DownloadService interface {
 	Download(ctx context.Context, sessionID, jobID, name string) (*DownloadFile, error)
 }
 
+// TabService exposes the persistent browser session's current tabs. Tabs are
+// scoped to the authenticated Agentize session and remain available between
+// browser jobs until explicitly closed or the sidecar shuts down.
+type TabService interface {
+	Tabs(ctx context.Context, sessionID string) ([]BrowserTab, error)
+	CloseTab(ctx context.Context, sessionID, tabID string) ([]BrowserTab, error)
+}
+
 // DebugService is an optional extension implemented by services that expose
 // bounded, operator-facing browser job and network-load metadata.
 type DebugService interface {
@@ -100,6 +108,15 @@ type JobResult struct {
 	ActionNames     []string                 `json:"action_names,omitempty"`
 	Actions         []map[string]interface{} `json:"actions,omitempty"`
 	Errors          []string                 `json:"errors,omitempty"`
+	Tabs            []BrowserTab             `json:"tabs,omitempty"`
+}
+
+// BrowserTab is a safe snapshot of one persistent browser tab.
+type BrowserTab struct {
+	ID     string `json:"id"`
+	URL    string `json:"url"`
+	Title  string `json:"title,omitempty"`
+	Active bool   `json:"active"`
 }
 
 // Screenshot is a browser image returned by the sidecar. The engine records it

@@ -122,6 +122,8 @@ func TestBuildAgentToolsPrompt_DescribesBrowserUse(t *testing.T) {
 		"`downloads`",
 		"`download`",
 		"`cancel`",
+		"`tabs`",
+		"`close_tab`",
 		"`file_ids`",
 	} {
 		if !strings.Contains(got, want) {

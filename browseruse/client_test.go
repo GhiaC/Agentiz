@@ -200,6 +200,43 @@ func TestClientListsAndDownloadsJobFiles(t *testing.T) {
 	}
 }
 
+func TestClientListsAndClosesPersistentTabs(t *testing.T) {
+	t.Parallel()
+
+	httpClient := testHTTPClient(func(request *http.Request) (*http.Response, error) {
+		if got := request.Header.Get(sessionHeader); got != "session-42" {
+			t.Fatalf("unexpected session header: %q", got)
+		}
+		switch request.URL.Path {
+		case "/v1/tabs":
+			if request.Method != http.MethodGet {
+				t.Fatalf("unexpected tabs method: %s", request.Method)
+			}
+			return jsonResponse(http.StatusOK, `{"tabs":[{"id":"tab-1","url":"https://example.com","active":true}]}`), nil
+		case "/v1/tabs/tab-1/close":
+			if request.Method != http.MethodPost {
+				t.Fatalf("unexpected close method: %s", request.Method)
+			}
+			return jsonResponse(http.StatusOK, `{"tabs":[]}`), nil
+		default:
+			t.Fatalf("unexpected path: %s", request.URL.Path)
+			return nil, nil
+		}
+	})
+	client, err := NewClient(Config{BaseURL: "http://browser-use.test", Token: "secret", HTTPClient: httpClient})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tabs, err := client.Tabs(context.Background(), "session-42")
+	if err != nil || len(tabs) != 1 || tabs[0].ID != "tab-1" || !tabs[0].Active {
+		t.Fatalf("unexpected tabs: %#v, %v", tabs, err)
+	}
+	remaining, err := client.CloseTab(context.Background(), "session-42", "tab-1")
+	if err != nil || len(remaining) != 0 {
+		t.Fatalf("unexpected remaining tabs: %#v, %v", remaining, err)
+	}
+}
+
 func TestClientDebugRequestsBoundedMetadata(t *testing.T) {
 	t.Parallel()
 
@@ -264,6 +301,10 @@ func TestClientRejectsInvalidJobID(t *testing.T) {
 	_, err = client.Get(context.Background(), "session-42", "../other-job", 0)
 	if err == nil {
 		t.Fatal("expected invalid job ID error")
+	}
+	_, err = client.CloseTab(context.Background(), "session-42", "../other-tab")
+	if err == nil {
+		t.Fatal("expected invalid tab ID error")
 	}
 }
 

@@ -11,7 +11,7 @@ from fastapi import HTTPException
 from app.artifacts import BrowserArtifacts
 from app.config import Settings
 from app.jobs import JobManager
-from app.models import BrowserDownload, JobResult, JobStatus, StartJobRequest
+from app.models import BrowserDownload, BrowserTab, JobResult, JobStatus, StartJobRequest
 
 
 def settings() -> Settings:
@@ -68,6 +68,25 @@ class CompletingRunner:
 		if name != "report.csv":
 			raise FileNotFoundError
 		return BrowserDownload(name=name, mime_type="text/csv", size=5), b"a,b\n1"
+
+
+class TabRunner(CompletingRunner):
+	def __init__(self):
+		self.current = [BrowserTab(id="tab-1", url="https://example.com", active=True)]
+		self.tabs_session = ""
+		self.closed = ""
+
+	async def tabs(self, session_id: str):
+		self.tabs_session = session_id
+		return self.current
+
+	async def close_tab(self, session_id: str, tab_id: str):
+		self.tabs_session = session_id
+		self.closed = tab_id
+		if not any(tab.id == tab_id for tab in self.current):
+			raise KeyError(tab_id)
+		self.current = []
+		return self.current
 
 
 class BlockingRunner:
@@ -146,6 +165,20 @@ class JobManagerTests(unittest.IsolatedAsyncioTestCase):
 		await asyncio.wait_for(runner.started.wait(), timeout=1)
 		cancelled = await manager.cancel("session-1", created.id)
 		self.assertEqual(cancelled.status, JobStatus.CANCELLED)
+		await manager.shutdown()
+
+	async def test_tabs_are_scoped_and_close_returns_new_snapshot(self):
+		runner = TabRunner()
+		manager = JobManager(settings(), runner)
+		tabs = await manager.tabs("session-1")
+		self.assertEqual(tabs[0].id, "tab-1")
+		self.assertEqual(runner.tabs_session, "session-1")
+		remaining = await manager.close_tab("session-1", "tab-1")
+		self.assertEqual(remaining, [])
+		self.assertEqual(runner.closed, "tab-1")
+		with self.assertRaises(HTTPException) as caught:
+			await manager.close_tab("session-1", "missing")
+		self.assertEqual(caught.exception.status_code, 404)
 		await manager.shutdown()
 
 

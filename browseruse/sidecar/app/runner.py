@@ -6,6 +6,7 @@ import hashlib
 import mimetypes
 import os
 import shutil
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -14,10 +15,20 @@ from browser_use import Agent, BrowserProfile, BrowserSession
 
 from .artifacts import BrowserArtifacts
 from .config import Settings
-from .models import BrowserDownload, BrowserUpload, JobResult, StartJobRequest
+from .models import BrowserDownload, BrowserTab, BrowserUpload, JobResult, StartJobRequest
 
 
 MAX_DOWNLOAD_BYTES = 25 << 20
+
+
+@dataclass
+class _PersistentBrowser:
+	browser: BrowserSession
+	downloads_dir: Path
+
+
+class BrowserTabNotFound(KeyError):
+	"""Raised when a tab is not owned by the requested browser session."""
 
 
 class BrowserUseRunner:
@@ -25,38 +36,22 @@ class BrowserUseRunner:
 		self.settings = settings
 		self.llm = self._create_llm()
 		self.artifacts = BrowserArtifacts(settings.data_dir)
+		self._sessions: dict[str, _PersistentBrowser] = {}
 
 	async def run(self, session_id: str, job_id: str, request: StartJobRequest) -> JobResult:
-		session_key = hashlib.sha256(session_id.encode("utf-8")).hexdigest()
+		session_key = self._session_key(session_id)
 		profile_dir = self.settings.data_dir / "profiles" / session_key
 		downloads_dir = self.settings.data_dir / "downloads" / job_id
+		session_downloads_dir = self.settings.data_dir / "downloads" / "sessions" / session_key
 		uploads_dir = self._uploads_dir(job_id)
 		profile_dir.mkdir(parents=True, exist_ok=True)
-		self._clear_stale_chromium_locks(profile_dir)
 		downloads_dir.mkdir(parents=True, exist_ok=True)
+		session_downloads_dir.mkdir(parents=True, exist_ok=True)
 		upload_paths = self._stage_uploads(request.uploads, uploads_dir)
 		har_path, _ = self.artifacts.prepare(job_id)
-
-		profile = BrowserProfile(
-			executable_path=self.settings.executable_path,
-			headless=self.settings.headless,
-			user_data_dir=profile_dir,
-			downloads_path=downloads_dir,
-			allowed_domains=self._allowed_domains(request),
-			prohibited_domains=list(self.settings.prohibited_domains) or None,
-			block_ip_addresses=self.settings.block_ip_addresses,
-			chromium_sandbox=self.settings.chromium_sandbox,
-			keep_alive=False,
-			proxy={"server": self.settings.proxy_url} if self.settings.proxy_url else None,
-			# browser-use polls the CDP endpoint through 127.0.0.1. Pin Chromium to
-			# that address as well; newer Chromium builds may otherwise select IPv6
-			# localhost, which makes the browser-use startup probe time out.
-			args=["--remote-debugging-address=127.0.0.1"],
-			record_har_path=har_path,
-			record_har_content="omit",
-			record_har_mode="full",
-		)
-		browser = BrowserSession(browser_profile=profile)
+		browser = self._get_or_create_browser(session_id, request, profile_dir, session_downloads_dir, har_path)
+		persistent = self._sessions[session_id]
+		download_snapshot = self._download_snapshot(persistent.downloads_dir)
 		agent = Agent(
 			task=request.task,
 			llm=self.llm,
@@ -90,6 +85,7 @@ class BrowserUseRunner:
 				on_step_end=capture_latest_screenshot,
 			)
 		finally:
+			self._collect_downloads(persistent.downloads_dir, downloads_dir, download_snapshot)
 			# browser-use's HAR writer includes headers even when response bodies
 			# are omitted. Strip sensitive fields before the artifact remains at rest.
 			self.artifacts.sanitize_har(job_id)
@@ -103,7 +99,53 @@ class BrowserUseRunner:
 			action_names=_unique_strings(history.action_names(), 500, 200),
 			actions=_bounded_actions(history.action_history()),
 			errors=_unique_strings(history.errors(), 100, 4_000),
+			tabs=await self._snapshot_tabs(browser),
 		)
+
+	async def tabs(self, session_id: str) -> list[BrowserTab]:
+		persistent = self._sessions.get(session_id)
+		if persistent is None:
+			return []
+		await persistent.browser.start()
+		return await self._snapshot_tabs(persistent.browser)
+
+	async def close_tab(self, session_id: str, tab_id: str) -> list[BrowserTab]:
+		persistent = self._sessions.get(session_id)
+		if persistent is None:
+			raise BrowserTabNotFound(tab_id)
+		browser = persistent.browser
+		await browser.start()
+		current_tabs = await self._snapshot_tabs(browser)
+		if not any(tab.id == tab_id for tab in current_tabs):
+			raise BrowserTabNotFound(tab_id)
+		was_active = browser.agent_focus_target_id == tab_id
+		await browser.close_page(tab_id)
+		# Let the CDP detach event update SessionManager before returning the
+		# post-close snapshot.
+		await asyncio.sleep(0)
+		remaining = await self._snapshot_tabs(browser)
+		if was_active and remaining:
+			browser.agent_focus_target_id = None
+			await browser.get_or_create_cdp_session(remaining[0].id, focus=True)
+			await browser.cdp_client.send.Target.activateTarget(params={"targetId": remaining[0].id})
+			remaining = await self._snapshot_tabs(browser)
+		return remaining
+
+	def has_session(self, session_id: str) -> bool:
+		return session_id in self._sessions
+
+	async def shutdown(self) -> None:
+		sessions = list(self._sessions.values())
+		self._sessions.clear()
+		for persistent in sessions:
+			try:
+				await persistent.browser.kill()
+			except Exception:
+				# Shutdown is best-effort; the sidecar is exiting and Chromium will
+				# be reaped with the container if it cannot be contacted.
+				pass
+
+		return None
 
 	def screenshot_available(self, job_id: str) -> bool:
 		return self.artifacts.screenshot_available(job_id)
@@ -162,6 +204,99 @@ class BrowserUseRunner:
 
 	def _downloads_dir(self, job_id: str) -> Path:
 		return (self.settings.data_dir / "downloads" / job_id).resolve()
+
+	def _session_key(self, session_id: str) -> str:
+		return hashlib.sha256(session_id.encode("utf-8")).hexdigest()
+
+	def _get_or_create_browser(
+		self,
+		session_id: str,
+		request: StartJobRequest,
+		profile_dir: Path,
+		downloads_dir: Path,
+		har_path: Path,
+	) -> BrowserSession:
+		persistent = self._sessions.get(session_id)
+		if persistent is not None:
+			return persistent.browser
+
+		self._clear_stale_chromium_locks(profile_dir)
+		profile = BrowserProfile(
+			executable_path=self.settings.executable_path,
+			headless=self.settings.headless,
+			user_data_dir=profile_dir,
+			downloads_path=downloads_dir,
+			allowed_domains=self._allowed_domains(request),
+			prohibited_domains=list(self.settings.prohibited_domains) or None,
+			block_ip_addresses=self.settings.block_ip_addresses,
+			chromium_sandbox=self.settings.chromium_sandbox,
+			# Keep the Chromium process and its tabs alive after Agent.run(). The
+			# same BrowserSession object is reused for later jobs in this session.
+			keep_alive=True,
+			proxy={"server": self.settings.proxy_url} if self.settings.proxy_url else None,
+			# browser-use polls the CDP endpoint through 127.0.0.1. Pin Chromium to
+			# that address as well; newer Chromium builds may otherwise select IPv6
+			# localhost, which makes the browser-use startup probe time out.
+			args=["--remote-debugging-address=127.0.0.1"],
+			record_har_path=har_path,
+			record_har_content="omit",
+			record_har_mode="full",
+		)
+		browser = BrowserSession(browser_profile=profile)
+		self._sessions[session_id] = _PersistentBrowser(browser=browser, downloads_dir=downloads_dir)
+		return browser
+
+	def _download_snapshot(self, directory: Path) -> dict[str, tuple[int, int]]:
+		if not directory.is_dir():
+			return {}
+		result: dict[str, tuple[int, int]] = {}
+		for path in directory.iterdir():
+			try:
+				if path.is_file():
+					stat = path.stat()
+					result[path.name] = (stat.st_size, stat.st_mtime_ns)
+			except OSError:
+				continue
+		return result
+
+	def _collect_downloads(
+		self,
+		session_directory: Path,
+		job_directory: Path,
+		before: dict[str, tuple[int, int]],
+	) -> None:
+		job_directory.mkdir(parents=True, exist_ok=True)
+		for path in session_directory.iterdir():
+			try:
+				if not path.is_file():
+					continue
+				stat = path.stat()
+				current = (stat.st_size, stat.st_mtime_ns)
+			except OSError:
+				continue
+			if before.get(path.name) == current:
+				continue
+			target = job_directory / path.name
+			index = 1
+			while target.exists():
+				target = job_directory / f"{index}-{path.name}"
+				index += 1
+			try:
+				shutil.move(str(path), str(target))
+			except OSError:
+				continue
+
+	async def _snapshot_tabs(self, browser: BrowserSession) -> list[BrowserTab]:
+		focused_id = str(browser.agent_focus_target_id or "")
+		return [
+			BrowserTab(
+				id=str(tab.target_id),
+				url=str(tab.url or ""),
+				title=str(tab.title or ""),
+				active=str(tab.target_id) == focused_id,
+			)
+			for tab in await browser.get_tabs()
+		]
 
 	def _clear_stale_chromium_locks(self, profile_dir: Path) -> None:
 		# Chromium leaves these files behind when a job/container is interrupted.

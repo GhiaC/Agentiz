@@ -12,7 +12,8 @@ the Agentize process and run the sidecar validation before deploying.
 
 The upstream Docker image is designed primarily around the browser-use CLI.
 Embedding the Python library behind an Agentize-owned HTTP contract gives us
-job ownership, cancellation, long polling, concurrency limits, stable profiles,
+job ownership, cancellation, long polling, concurrency limits, persistent browser
+sessions, stable profiles,
 and a bounded response format without coupling Go to Python or Chromium.
 
 ```mermaid
@@ -128,9 +129,14 @@ The LLM sees one built-in function:
 
 | Action | Inputs | Behavior |
 |---|---|---|
-| `run` | `task`, optional `allowed_domains`, `max_steps`, `use_vision`, `wait_seconds` | Creates a job and waits up to 45 seconds by default |
+| `run` | `task`, optional `file_ids`, `allowed_domains`, `max_steps`, `use_vision`, `wait_seconds` | Creates a job and waits up to 45 seconds by default. `file_ids` makes up to 10 session-owned user files available for browser form uploads. |
 | `status` | `job_id`, optional `wait_seconds` | Returns immediately or long-polls until completion/timeout |
-| `cancel` | `job_id` | Cancels queued/running work and closes browser resources |
+| `screenshot` | `job_id` | Retrieves the latest viewport captured at a completed browser step and records it as a generated, session-owned `UserFile` |
+| `downloads` | `job_id` | Lists the browser files downloaded by the job. |
+| `download` | `job_id`, `file_name` | Saves one file returned by `downloads` as a generated, session-owned `UserFile`. |
+| `tabs` | — | Returns the current open tabs for the persistent session, including the active tab |
+| `close_tab` | `tab_id` | Closes one tab returned by `tabs` and returns the updated tab snapshot |
+| `cancel` | `job_id` | Cancels queued/running work while leaving the persistent browser session and its tabs open |
 
 Jobs move through:
 
@@ -142,20 +148,95 @@ queued/running    -> cancelled
 
 If `run` returns before completion, its response includes the exact
 `next_action` status call. Completed results include a bounded final answer,
-visited URLs, step count, duration, action names, action summaries, and errors.
-Screenshots are used internally when vision is enabled but are not copied into
-the Agentize LLM context.
+visited URLs, step count, duration, action names, action summaries, errors, and
+whether a screenshot is available. Screenshots are not copied into the LLM
+context. The `screenshot` action saves the bytes through Agentize's configured
+file store and returns a generated `file_id`.
 
-## Session and profile behavior
+The browser agent can navigate and search, click, type, scroll, switch tabs,
+extract page content, inspect/select dropdowns, send keys, run page JavaScript,
+and perform login and form workflows. Give `run` a precise objective rather
+than prescribing individual UI actions unless they are important constraints.
+The browser session is reused for later `run` calls in the same Agentize
+session, so cookies, login state, and open tabs remain available. Use `tabs`
+whenever the agent needs a fresh tab snapshot, then pass one returned `tab_id`
+to `close_tab` when a tab should be removed. Use `status` for incomplete jobs,
+`downloads` followed by `download` to return a downloaded file, and `cancel`
+when the work is no longer needed.
+
+Chat and bot integrations that want automatic attachment delivery should call
+`ProcessMessageWithGeneratedFiles` instead of `ProcessMessage`:
+
+```go
+reply, tokens, generated, err := ag.ProcessMessageWithGeneratedFiles(
+	ctx,
+	sessionID,
+	userMessage,
+)
+for _, file := range generated {
+	data, meta, readErr := ag.ReadUserFileForUser(userID, file.FileID)
+	if readErr != nil {
+		continue
+	}
+	// Attach data using meta.Name and meta.MIMEType in the host chat SDK.
+	_, _, _ = reply, tokens, data
+}
+_ = err
+```
+
+This wrapper returns every newly generated file from that turn, including
+browser screenshots, without changing the existing `ProcessMessage` contract.
+When a chatbot uses `CoreHandler`, call Core's
+`ProcessMessageWithGeneratedFiles(ctx, userID, message)` instead; it observes
+the user's complete file collection and therefore includes screenshots created
+inside worker-agent sessions. See [FILE_MANAGER.md](FILE_MANAGER.md) for the
+attachment-sender integration.
+
+## Browser debugger
+
+When browser-use is configured, the protected Agentize debugger includes a
+**Browser** tab at:
+
+```text
+/agentize/debug/browser
+```
+
+It shows recent jobs, status, session ownership, task, duration, screenshot
+availability, and bounded metadata for loaded HTTPS resources (document, script,
+stylesheet, image, XHR/fetch, fonts, and other Chromium network requests).
+Entries include method, URL, response status, MIME type, transferred size, and
+duration. Request/response bodies, cookies, POST data, and headers are stripped
+before the debug artifact remains at rest.
+
+The page always identifies the `browser_use` tool, its actions, and whether it
+is configured, connected, or waiting for a compatible sidecar. Only `run`
+creates a job; `status`, `screenshot`, and `cancel` operate on an existing
+`job_id`, while `tabs` and `close_tab` operate on the persistent session. Actual
+invocations also appear in **Tool Calls** when the configured
+session store persists tool calls. With Agentize's default tool-approval gate,
+the `run` call must be approved under **Reviews** before it reaches the sidecar
+and creates a browser job.
+
+The sidecar stores one HAR metadata file and one latest-step PNG per retained
+job under its data volume. Job metadata itself is in sidecar memory. Artifacts
+are deleted when expired in-memory jobs are pruned under
+`BROWSER_USE_JOB_TTL_SECONDS`, and restarting the sidecar clears the job list.
+The debugger only requests a bounded recent window, and its screenshot proxy
+remains behind Agentize admin authentication and the raw-file rate limiter.
+
+## Session, profile, and tab behavior
 
 The Agentize runtime injects `__session_id__`; the model cannot choose it. The
 Go client sends it in `X-Agentize-Session-ID`, and the sidecar returns a job only
 to that same owner. Requests for another session's job look like a normal 404.
 
-Each session gets a hashed persistent Chromium profile under `/data/profiles`.
-This preserves cookies and sign-in state between jobs without using raw session
-IDs as paths. Jobs sharing one profile are serialized, while different sessions
-can run concurrently up to `BROWSER_USE_MAX_CONCURRENT_JOBS`.
+Each session gets a hashed persistent Chromium profile under `/data/profiles` and
+one in-memory `BrowserSession` under the sidecar process. This preserves cookies,
+sign-in state, and open tabs between jobs without using raw session IDs as paths.
+Jobs sharing one profile are serialized, while different sessions can run
+concurrently up to `BROWSER_USE_MAX_CONCURRENT_JOBS`. The browser and its tabs
+are closed during sidecar shutdown; individual job completion or cancellation
+does not close them.
 
 ## Configuration
 
@@ -185,11 +266,16 @@ provider API key is missing.
 | `BROWSER_USE_HEADLESS` | `true` | Run Chromium without a visible window |
 | `BROWSER_USE_DEFAULT_USE_VISION` | `true` | Default screenshot use |
 | `BROWSER_USE_BLOCK_IP_ADDRESSES` | `true` | Reject IP-literal navigation, including localhost/private IPs |
+| `BROWSER_USE_PROXY_URL` | empty | Optional proxy for Chromium traffic; overrides `http_proxy` and `HTTP_PROXY` |
 | `BROWSER_USE_ALLOWED_DOMAINS` | empty | Operator-controlled navigation allowlist |
 | `BROWSER_USE_PROHIBITED_DOMAINS` | empty | Operator-controlled navigation denylist |
 
 Provider keys are `OPENAI_API_KEY`, `BROWSER_USE_API_KEY`,
 `OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`, or `GOOGLE_API_KEY`.
+
+For a shared proxy configuration, set `http_proxy` in the selected sidecar env
+file (or export it before running `run.sh`). Chromium uses it automatically.
+Set `BROWSER_USE_PROXY_URL` only when the browser should use a different proxy.
 
 ## Security policy
 
@@ -215,12 +301,18 @@ The sidecar exposes:
 GET  /health
 POST /v1/jobs
 GET  /v1/jobs/{job_id}?wait_seconds=0..60
+GET  /v1/jobs/{job_id}/screenshot
 POST /v1/jobs/{job_id}/cancel
+GET  /v1/tabs
+POST /v1/tabs/{tab_id}/close
+GET  /v1/debug/jobs?limit=1..100&load_limit=0..250
 ```
 
-All `/v1` endpoints require `Authorization: Bearer ...` and
-`X-Agentize-Session-ID`. `/health` is intentionally unauthenticated for
-container orchestration.
+All `/v1` endpoints require `Authorization: Bearer ...`.
+The job/status/cancel/screenshot and tab endpoints also require
+`X-Agentize-Session-ID`; the debug-list endpoint is an operator endpoint used
+only by the protected Agentize debugger. `/health` is intentionally
+unauthenticated for container orchestration.
 
 ## Validation
 

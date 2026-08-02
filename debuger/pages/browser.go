@@ -84,7 +84,7 @@ func browserToolOverview(configured bool, fetchErr error) string {
 			`Rebuild/restart the sidecar so it exposes GET /v1/debug/jobs.`
 	} else if configured {
 		status = `<span class="badge text-bg-success">Ready</span>`
-		statusDetail = `The tool and browser debug endpoint are connected. Only action "run" creates a browser job.`
+		statusDetail = `The tool and browser debug endpoint are connected. Only action "run" creates a browser job; tabs and close_tab operate on the persistent session.`
 	}
 
 	return fmt.Sprintf(`<section class="card mb-3">
@@ -98,7 +98,7 @@ func browserToolOverview(configured bool, fetchErr error) string {
 				<div class="col-lg-5">
 					<div class="small text-muted mb-1">Supported actions</div>
 					<div class="d-flex flex-wrap gap-2">
-						<code>run</code><code>status</code><code>screenshot</code><code>cancel</code>
+						<code>run</code><code>status</code><code>tabs</code><code>close_tab</code><code>screenshot</code><code>cancel</code>
 					</div>
 				</div>
 				<div class="col-lg-7">
